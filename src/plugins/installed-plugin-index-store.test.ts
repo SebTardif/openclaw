@@ -566,6 +566,126 @@ describe("installed plugin index persistence", () => {
     expect(refreshed.plugins.map((plugin) => plugin.pluginId)).toContain("next-demo");
   });
 
+  it("preserves path and npm installed plugins during policy-changed full rebuild", async () => {
+    const stateDir = makeTempDir();
+    // Place plugin directories outside stateDir so they are only discoverable
+    // through their install record paths, not through global directory scanning.
+    const externalRoot = makeTempDir();
+    const npmPluginDir = path.join(externalRoot, "npm-plugin");
+    const pathPluginDir = path.join(externalRoot, "path-plugin");
+    const bundledPluginDir = path.join(stateDir, "plugins", "bundled-plugin");
+    fs.mkdirSync(npmPluginDir, { recursive: true });
+    fs.mkdirSync(pathPluginDir, { recursive: true });
+    fs.mkdirSync(bundledPluginDir, { recursive: true });
+    const npmCandidate = createCandidate(npmPluginDir, { id: "npm-plugin" });
+    const pathCandidate = createCandidate(pathPluginDir, { id: "path-plugin" });
+    const bundledCandidate = createCandidate(bundledPluginDir, { id: "bundled-plugin" });
+    const env = {
+      OPENCLAW_BUNDLED_PLUGINS_DIR: undefined,
+      OPENCLAW_VERSION: "2026.4.25",
+      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
+      VITEST: "true",
+    };
+    const initial = await refreshPersistedInstalledPluginIndex({
+      reason: "manual",
+      stateDir,
+      candidates: [npmCandidate, pathCandidate, bundledCandidate],
+      installRecords: {
+        "npm-plugin": {
+          source: "npm",
+          spec: "@vendor/npm-plugin@1.0.0",
+          installPath: npmPluginDir,
+        },
+        "path-plugin": {
+          source: "path",
+          sourcePath: pathPluginDir,
+          installPath: pathPluginDir,
+        },
+      },
+      env,
+    });
+    expectPluginIds(initial, ["npm-plugin", "path-plugin", "bundled-plugin"]);
+
+    // Force a full rebuild by changing the host version so
+    // canRefreshPersistedPolicyState returns false.
+    const refreshed = await refreshPersistedInstalledPluginIndex({
+      reason: "policy-changed",
+      stateDir,
+      env: {
+        ...env,
+        OPENCLAW_VERSION: "2026.5.1",
+      },
+    });
+
+    // All three plugins must survive the rebuild, not just bundled ones.
+    const pluginIds = refreshed.plugins.map((plugin) => plugin.pluginId);
+    expect(pluginIds).toContain("npm-plugin");
+    expect(pluginIds).toContain("path-plugin");
+    expectInstallRecord(refreshed, "npm-plugin", {
+      source: "npm",
+      spec: "@vendor/npm-plugin@1.0.0",
+      installPath: npmPluginDir,
+    });
+    expectInstallRecord(refreshed, "path-plugin", {
+      source: "path",
+      sourcePath: pathPluginDir,
+      installPath: pathPluginDir,
+    });
+  });
+
+  it("rediscovers path and npm plugins from persisted install records without explicit candidates", async () => {
+    const stateDir = makeTempDir();
+    const externalRoot = makeTempDir();
+    const npmPluginDir = path.join(externalRoot, "npm-plugin");
+    const pathPluginDir = path.join(externalRoot, "path-plugin");
+    fs.mkdirSync(npmPluginDir, { recursive: true });
+    fs.mkdirSync(pathPluginDir, { recursive: true });
+    const npmCandidate = createCandidate(npmPluginDir, { id: "npm-plugin" });
+    const pathCandidate = createCandidate(pathPluginDir, { id: "path-plugin" });
+    const env = {
+      OPENCLAW_BUNDLED_PLUGINS_DIR: undefined,
+      OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
+      OPENCLAW_VERSION: "2026.4.25",
+      OPENCLAW_STATE_DIR: stateDir,
+      VITEST: "true",
+    };
+    // Build and persist the initial index with explicit candidates.
+    await refreshPersistedInstalledPluginIndex({
+      reason: "manual",
+      stateDir,
+      candidates: [npmCandidate, pathCandidate],
+      installRecords: {
+        "npm-plugin": {
+          source: "npm",
+          spec: "@vendor/npm-plugin@1.0.0",
+          installPath: npmPluginDir,
+        },
+        "path-plugin": {
+          source: "path",
+          sourcePath: pathPluginDir,
+          installPath: pathPluginDir,
+        },
+      },
+      env,
+    });
+
+    // Policy-changed refresh without candidates or install records.
+    // The full rebuild must rediscover path/npm plugins from the persisted
+    // install records' paths.
+    const refreshed = await refreshPersistedInstalledPluginIndex({
+      reason: "policy-changed",
+      stateDir,
+      env: {
+        ...env,
+        OPENCLAW_VERSION: "2026.5.1",
+      },
+    });
+
+    const pluginIds = refreshed.plugins.map((plugin) => plugin.pluginId);
+    expect(pluginIds).toContain("npm-plugin");
+    expect(pluginIds).toContain("path-plugin");
+  });
+
   it("preserves existing install records when refreshing the manifest cache", async () => {
     const stateDir = makeTempDir();
     await writePersistedInstalledPluginIndex(

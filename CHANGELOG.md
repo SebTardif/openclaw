@@ -2,6 +2,12 @@
 
 Docs: https://docs.openclaw.ai
 
+## Unreleased
+
+### Fixes
+
+- Plugins: preserve path and npm-installed plugins during policy-changed registry refresh. Thanks @SebTardif.
+
 ## 2026.5.31
 
 ### Highlights
