@@ -1000,9 +1000,51 @@ function migrateLegacyOpenAICodexProvider(raw: Record<string, unknown>, changes:
         `Moved models.providers.${LEGACY_OPENAI_CODEX_PROVIDER_ID} → models.providers.${OPENAI_PROVIDER_ID}.`,
       );
     } else {
-      changes.push(
-        `Removed models.providers.${LEGACY_OPENAI_CODEX_PROVIDER_ID} because models.providers.${OPENAI_PROVIDER_ID} already exists.`,
+      // Merge models from codex provider into canonical openai provider
+      const canonicalKey = Object.keys(providers).find(
+        (pid) => normalizeProviderId(pid) === OPENAI_PROVIDER_ID,
       );
+      const canonicalProvider = canonicalKey ? getRecord(providers[canonicalKey]) : null;
+      const codexModels = Array.isArray(normalized.value.models) ? normalized.value.models : [];
+      const existingModels = canonicalProvider?.models;
+      const canonicalModels: unknown[] = Array.isArray(existingModels) ? [...existingModels] : [];
+
+      let mergedCount = 0;
+      for (const codexModel of codexModels) {
+        const codexModelRecord = getRecord(codexModel);
+        if (!codexModelRecord || typeof codexModelRecord.id !== "string") {
+          continue;
+        }
+        const alreadyExists = canonicalModels.some((m) => {
+          const mr = getRecord(m);
+          return mr !== null && mr.id === codexModelRecord.id;
+        });
+        if (!alreadyExists) {
+          const migratedModel: Record<string, unknown> = { ...codexModelRecord };
+          for (const field of ["api", "baseUrl", "oauth"]) {
+            if (
+              migratedModel[field] === undefined &&
+              normalized.value[field] !== undefined &&
+              normalized.value[field] !== canonicalProvider?.[field]
+            ) {
+              migratedModel[field] = normalized.value[field];
+            }
+          }
+          canonicalModels.push(migratedModel);
+          mergedCount++;
+        }
+      }
+
+      if (mergedCount > 0 && canonicalProvider) {
+        canonicalProvider.models = canonicalModels;
+        changes.push(
+          `Merged ${mergedCount} model${mergedCount !== 1 ? "s" : ""} from models.providers.${LEGACY_OPENAI_CODEX_PROVIDER_ID} into models.providers.${OPENAI_PROVIDER_ID}.`,
+        );
+      } else {
+        changes.push(
+          `Removed models.providers.${LEGACY_OPENAI_CODEX_PROVIDER_ID} because models.providers.${OPENAI_PROVIDER_ID} already exists.`,
+        );
+      }
     }
     delete providers[providerId];
     providersChanged = true;

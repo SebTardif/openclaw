@@ -101,7 +101,97 @@ describe("legacy memory search config migrate", () => {
     ]);
   });
 
-  it("records removal when canonical OpenAI provider already exists", () => {
+  it("merges codex provider models into existing canonical OpenAI provider", () => {
+    const res = migrateLegacyConfigForTest({
+      models: {
+        providers: {
+          openai: {
+            api: "openai-chatgpt-responses",
+            baseUrl: "https://api.openai.com/v1",
+          },
+          "openai-codex": {
+            api: "openai-chatgpt-responses",
+            baseUrl: "https://chatgpt.com/backend-api/codex",
+            models: [
+              {
+                id: "gpt-5.5",
+                name: "GPT-5.5",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(res.config?.models?.providers?.openai).toEqual({
+      api: "openai-chatgpt-responses",
+      baseUrl: "https://api.openai.com/v1",
+      models: [
+        {
+          id: "gpt-5.5",
+          name: "GPT-5.5",
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+        },
+      ],
+    });
+    expect(res.config?.models?.providers).not.toHaveProperty("openai-codex");
+    expect(res.changes).toEqual([
+      "Merged 1 model from models.providers.openai-codex into models.providers.openai.",
+    ]);
+  });
+
+  it("merges codex models preserving api/baseUrl/oauth into canonical provider with embeddings", () => {
+    const res = migrateLegacyConfigForTest({
+      models: {
+        providers: {
+          openai: {
+            models: [
+              {
+                id: "text-embedding-3-small",
+                name: "Text Embedding 3 Small",
+              },
+            ],
+          },
+          "openai-codex": {
+            api: "openai-codex-responses",
+            baseUrl: "https://chatgpt.com/backend-api",
+            oauth: true,
+            models: [
+              {
+                id: "gpt-5.5",
+                name: "GPT-5.5",
+                api: "openai-codex-responses",
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(res.config?.models?.providers?.openai).toEqual({
+      models: [
+        {
+          id: "text-embedding-3-small",
+          name: "Text Embedding 3 Small",
+        },
+        {
+          id: "gpt-5.5",
+          name: "GPT-5.5",
+          api: "openai-chatgpt-responses",
+          baseUrl: "https://chatgpt.com/backend-api",
+          oauth: true,
+        },
+      ],
+    });
+    expect(res.config?.models?.providers).not.toHaveProperty("openai-codex");
+    expect(res.changes).toEqual([
+      'Moved models.providers.openai-codex.api "openai-codex-responses" → "openai-chatgpt-responses".',
+      'Moved models.providers.openai-codex.models[0].api "openai-codex-responses" → "openai-chatgpt-responses".',
+      "Merged 1 model from models.providers.openai-codex into models.providers.openai.",
+    ]);
+  });
+
+  it("records removal when canonical OpenAI provider exists and codex has no models", () => {
     const res = migrateLegacyConfigForTest({
       models: {
         providers: {
