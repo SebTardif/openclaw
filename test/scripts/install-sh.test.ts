@@ -94,7 +94,7 @@ describe("install.sh", () => {
         [
           "set -euo pipefail",
           `source ${JSON.stringify(SCRIPT_PATH)}`,
-          'for fixture in empty.sh html.sh nul-prefix.sh; do',
+          "for fixture in empty.sh html.sh nul-prefix.sh; do",
           '  if validate_downloaded_script "$FIXTURE_DIR/$fixture" "https://example.invalid/$fixture"; then',
           '    printf "unexpectedly accepted: %s\\n" "$fixture"',
           "    exit 91",
