@@ -110,10 +110,18 @@ detect_downloader() {
 download_file() {
     local url="$1"
     local output="$2"
+    local redirect_mode="${3:-follow}"
     if [[ -z "$DOWNLOADER" ]]; then
         detect_downloader
     fi
     if [[ "$DOWNLOADER" == "curl" ]]; then
+        if [[ "$redirect_mode" == "deny" ]]; then
+            curl -fsSL --max-redirs 0 --proto '=https' --tlsv1.2 \
+                --speed-limit 1 --speed-time 30 \
+                --retry 3 --retry-delay 1 --retry-connrefused \
+                -o "$output" "$url"
+            return
+        fi
         # Bound post-connect stalls without imposing a total download duration.
         curl -fsSL --proto '=https' --tlsv1.2 \
             --speed-limit 1 --speed-time 30 \
@@ -121,14 +129,15 @@ download_file() {
             -o "$output" "$url"
         return
     fi
+    if [[ "$redirect_mode" == "deny" ]]; then
+        wget -q --max-redirect=0 --https-only --secure-protocol=TLSv1_2 --tries=3 --timeout=20 -O "$output" "$url"
+        return
+    fi
     wget -q --https-only --secure-protocol=TLSv1_2 --tries=3 --timeout=20 -O "$output" "$url"
 }
 
-# Validate a downloaded file is a non-empty shell script before execution.
-# Used by run_remote_bash and the NodeSource setup-script paths.
-# A full checksum pin is impractical for third-party scripts that update
-# frequently (e.g., Homebrew installer), but structural validation catches
-# truncated downloads, HTML error pages, and empty responses.
+# Managed setup endpoints must return a non-empty script with a raw shebang.
+# This is a response-shape check, not an authenticity or completeness check.
 validate_downloaded_script() {
     local file="$1" url="$2"
     if [[ ! -s "$file" ]]; then
@@ -141,26 +150,24 @@ validate_downloaded_script() {
     local raw_magic
     raw_magic="$(od -An -tx1 -N2 "$file" | tr -d ' ')"
     if [[ "$raw_magic" != "2321" ]]; then
-        local first_line
-        first_line="$(head -c 256 "$file" | head -1)"
-        # Sanitize before logging: strip C0 controls (\000-\037), DEL (\177),
-        # and C1 controls (\200-\237) so untrusted content cannot inject
-        # terminal escapes through ui_error's echo -e path.
-        local safe_line
-        safe_line="$(printf '%s' "${first_line:0:80}" | LC_ALL=C tr -d '\000-\037\177\200-\237')"
-        safe_line="${safe_line//\\/\\\\}"
         ui_error "Downloaded file does not look like a shell script (no shebang): ${url}"
-        ui_error "First line: ${safe_line}"
         return 1
     fi
+}
+
+download_validated_script() {
+    local url="$1" output="$2"
+    # These fixed executable-script endpoints must not redirect: Wget's
+    # --https-only only filters recursive traversal, not ordinary redirects.
+    download_file "$url" "$output" deny || return 1
+    validate_downloaded_script "$output" "$url"
 }
 
 run_remote_bash() {
     local url="$1"
     local tmp
     mktempfile tmp
-    download_file "$url" "$tmp" || return 1
-    validate_downloaded_script "$tmp" "$url" || return 1
+    download_validated_script "$url" "$tmp" || return 1
     /bin/bash "$tmp"
 }
 
@@ -2022,10 +2029,10 @@ install_node() {
 
         ui_info "Installing Node.js via NodeSource"
         if command -v apt-get &> /dev/null; then
-            local tmp
+            local tmp setup_url
+            setup_url="https://deb.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x"
             mktempfile tmp
-            run_required_step "Downloading NodeSource setup script" download_file "https://deb.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
-            validate_downloaded_script "$tmp" "https://deb.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" || return 1
+            run_required_step "Downloading NodeSource setup script" download_validated_script "$setup_url" "$tmp"
             if is_root; then
                 run_required_step "Configuring NodeSource repository" bash "$tmp"
                 run_required_step "Installing Node.js" apt_get_install nodejs
@@ -2034,10 +2041,10 @@ install_node() {
                 run_required_step "Installing Node.js" apt_get_install nodejs
             fi
         elif command -v dnf &> /dev/null; then
-            local tmp
+            local tmp setup_url
+            setup_url="https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x"
             mktempfile tmp
-            run_required_step "Downloading NodeSource setup script" download_file "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
-            validate_downloaded_script "$tmp" "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" || return 1
+            run_required_step "Downloading NodeSource setup script" download_validated_script "$setup_url" "$tmp"
             if is_root; then
                 run_required_step "Configuring NodeSource repository" bash "$tmp"
                 run_required_step "Installing Node.js" dnf install -y -q nodejs
@@ -2046,10 +2053,10 @@ install_node() {
                 run_required_step "Installing Node.js" sudo dnf install -y -q nodejs
             fi
         elif command -v yum &> /dev/null; then
-            local tmp
+            local tmp setup_url
+            setup_url="https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x"
             mktempfile tmp
-            run_required_step "Downloading NodeSource setup script" download_file "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
-            validate_downloaded_script "$tmp" "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" || return 1
+            run_required_step "Downloading NodeSource setup script" download_validated_script "$setup_url" "$tmp"
             if is_root; then
                 run_required_step "Configuring NodeSource repository" bash "$tmp"
                 run_required_step "Installing Node.js" yum install -y -q nodejs
