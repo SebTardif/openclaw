@@ -448,17 +448,21 @@ export class TelegramPollingSession {
           entry.channel === "telegram" && normalizeTelegramAccountId(entry.accountId) === accountId,
         bypassBackoff: false,
       }),
+      onResult: (drainResult) => {
+        // Suppress only when every matched entry was skipped as in-progress.
+        // Mixed results (backoff/admission/stale) must not delay recovery.
+        if (
+          drainResult.matched > 0 &&
+          drainResult.drained === 0 &&
+          drainResult.skippedInProgress === drainResult.matched
+        ) {
+          this.#deliveryDrainSuppressNext = true;
+        }
+      },
     })
-      .then(
-        (drainResult) => {
-          if (drainResult.skippedInProgress > 0 && drainResult.drained === 0) {
-            this.#deliveryDrainSuppressNext = true;
-          }
-        },
-        (err: unknown) => {
-          this.opts.log(`[telegram] reconnect delivery drain failed: ${formatErrorMessage(err)}`);
-        },
-      )
+      .catch((err: unknown) => {
+        this.opts.log(`[telegram] reconnect delivery drain failed: ${formatErrorMessage(err)}`);
+      })
       .finally(() => {
         this.#deliveryDrainInFlight = false;
       });

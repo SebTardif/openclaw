@@ -42,14 +42,45 @@ const computeBackoffMock = vi.hoisted(() =>
   vi.fn((_policy: { initialMs: number }, _attempt: number) => 0),
 );
 const sleepWithAbortMock = vi.hoisted(() => vi.fn(async () => undefined));
+type DrainResultStub = {
+  matched: number;
+  drained: number;
+  skippedInProgress: number;
+  skippedEntryIds: string[];
+};
+
+const emptyDrainResult = (): DrainResultStub => ({
+  matched: 0,
+  drained: 0,
+  skippedInProgress: 0,
+  skippedEntryIds: [],
+});
+
+/** Mock SDK drain: keep Promise<void>; deliver stats via optional onResult. */
 const drainPendingDeliveriesMock = vi.hoisted(() =>
-  vi.fn(async (_opts: unknown) => ({
-    matched: 0,
-    drained: 0,
-    skippedInProgress: 0,
-    skippedEntryIds: [] as string[],
-  })),
+  vi.fn(async (opts?: { onResult?: (result: DrainResultStub) => void }) => {
+    opts?.onResult?.(emptyDrainResult());
+  }),
 );
+
+function mockDrainOnResult(result: DrainResultStub) {
+  drainPendingDeliveriesMock.mockImplementation(
+    async (opts?: { onResult?: (r: DrainResultStub) => void }) => {
+      opts?.onResult?.(result);
+    },
+  );
+}
+
+function mockDrainOnResultSequence(...results: DrainResultStub[]) {
+  let i = 0;
+  drainPendingDeliveriesMock.mockImplementation(
+    async (opts?: { onResult?: (r: DrainResultStub) => void }) => {
+      const result = results[Math.min(i, results.length - 1)] ?? emptyDrainResult();
+      i += 1;
+      opts?.onResult?.(result);
+    },
+  );
+}
 
 vi.mock("@grammyjs/runner", () => ({
   run: runMock,
@@ -778,12 +809,11 @@ describe("TelegramPollingSession", () => {
     isRecoverableTelegramNetworkErrorMock.mockReset().mockReturnValue(true);
     computeBackoffMock.mockReset().mockReturnValue(0);
     sleepWithAbortMock.mockReset().mockResolvedValue(undefined);
-    drainPendingDeliveriesMock.mockReset().mockResolvedValue({
-      matched: 0,
-      drained: 0,
-      skippedInProgress: 0,
-      skippedEntryIds: [],
-    });
+    drainPendingDeliveriesMock
+      .mockReset()
+      .mockImplementation(async (opts?: { onResult?: (r: DrainResultStub) => void }) => {
+        opts?.onResult?.(emptyDrainResult());
+      });
     resetTelegramReplyFenceForTests();
     installTelegramIngressQueueRuntime(() =>
       path.join(os.tmpdir(), "openclaw-telegram-test-state"),
@@ -5602,7 +5632,7 @@ describe("TelegramPollingSession", () => {
     const getApiMiddleware = mockBotCapturingApiMiddleware(botStop);
     const resolveFirstTask = mockLongRunningPollingCycle(runnerStop);
 
-    drainPendingDeliveriesMock.mockResolvedValue({
+    mockDrainOnResult({
       matched: 1,
       drained: 0,
       skippedInProgress: 1,
@@ -5657,14 +5687,15 @@ describe("TelegramPollingSession", () => {
     const getApiMiddleware = mockBotCapturingApiMiddleware(botStop);
     const resolveFirstTask = mockLongRunningPollingCycle(runnerStop);
 
-    drainPendingDeliveriesMock
-      .mockResolvedValueOnce({
+    mockDrainOnResultSequence(
+      {
         matched: 1,
         drained: 0,
         skippedInProgress: 1,
         skippedEntryIds: ["entry-1"],
-      })
-      .mockResolvedValueOnce({ matched: 1, drained: 1, skippedInProgress: 0, skippedEntryIds: [] });
+      },
+      { matched: 1, drained: 1, skippedInProgress: 0, skippedEntryIds: [] },
+    );
 
     const session = createPollingSession({
       abortSignal: abort.signal,
@@ -5727,7 +5758,7 @@ describe("TelegramPollingSession", () => {
     const getApiMiddleware = mockBotCapturingApiMiddleware(botStop);
     const resolveFirstTask = mockLongRunningPollingCycle(runnerStop);
 
-    drainPendingDeliveriesMock.mockResolvedValue({
+    mockDrainOnResult({
       matched: 1,
       drained: 1,
       skippedInProgress: 0,
