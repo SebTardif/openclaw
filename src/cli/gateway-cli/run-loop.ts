@@ -445,9 +445,10 @@ export async function runGatewayLoop(params: {
         if (!isRestart) {
           return null;
         }
-        if (restartIntent?.skipDeferral) {
-          return 0;
-        }
+        // skipDeferral must not zero the close-stage reply drain: a 0ms budget
+        // abandons undrained channel/tool replies (see #95866). Active-turn
+        // skip-deferral still short-circuits long wait paths elsewhere; close
+        // drain keeps a bounded budget so pending replies can finish.
         if (restartDrainTimeoutMs === undefined) {
           return Math.max(0, SHUTDOWN_TIMEOUT_MS - RESTART_CLOSE_REPLY_DRAIN_SHUTDOWN_RESERVE_MS);
         }
