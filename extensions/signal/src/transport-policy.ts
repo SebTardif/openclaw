@@ -67,6 +67,29 @@ export function resolveLocalSignalTransportPort(baseUrl: string): number | undef
   }
 }
 
+/**
+ * When managed-native has a local connection URL but no explicit httpPort, prefer
+ * binding the daemon to that URL's port so client and autoStart daemon agree.
+ * Returns undefined when the URL is an independent endpoint (different host/family
+ * or non-local), so multi-account allocation can still reassign binds.
+ */
+export function preferredManagedNativePortFromConnectionUrl(
+  transport: SignalTransportConfig,
+): number | undefined {
+  if (transport.kind !== "managed-native" || transport.httpPort !== undefined || !transport.url) {
+    return undefined;
+  }
+  const localPort = resolveLocalSignalTransportPort(transport.url);
+  if (localPort === undefined || !isValidSignalManagedNativePort(localPort)) {
+    return undefined;
+  }
+  const candidate: SignalManagedNativeTransport = { ...transport, httpPort: localPort };
+  if (!isSignalManagedNativeConnectionUrlForBind(candidate)) {
+    return undefined;
+  }
+  return localPort;
+}
+
 export function isSignalManagedNativeConnectionUrlForBind(
   transport: SignalTransportConfig,
 ): boolean {

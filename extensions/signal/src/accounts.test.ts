@@ -284,6 +284,27 @@ describe("resolveSignalAccount", () => {
     });
   });
 
+  it("binds autoStart daemon to a non-default local connection URL port when httpPort is omitted", () => {
+    // Repro for #116165: httpUrl/port only, no httpPort → previously bound 8080 while probing 8082.
+    const cfg = {
+      channels: {
+        signal: {
+          transport: {
+            kind: "managed-native",
+            url: "http://127.0.0.1:8082",
+          },
+        },
+      },
+    } as never;
+
+    expect(resolveSignalAccount({ cfg }).transport).toMatchObject({
+      kind: "managed-native",
+      baseUrl: "http://127.0.0.1:8082",
+      httpHost: "127.0.0.1",
+      httpPort: 8082,
+    });
+  });
+
   it("preserves top-level default account when named accounts are configured", () => {
     const cfg = {
       channels: {
