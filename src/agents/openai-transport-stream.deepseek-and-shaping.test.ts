@@ -275,6 +275,67 @@ describe("openai transport stream", () => {
     expect(JSON.stringify(events)).not.toContain("DSML");
   });
 
+  it("discards oversized DeepSeek DSML recovery buffer as text", async () => {
+    const model = createDeepSeekCompletionsModel();
+    const output = createAssistantOutput(model);
+
+    // Unterminated body well above the 256 KB recovery cap.
+    const hugeBody =
+      '<｜DSML｜invoke name="session_status"><｜DSML｜parameter name="key" string="true">' +
+      "x".repeat(300_000) +
+      "</｜DSML｜parameter></｜DSML｜invoke>";
+
+    await testing.processOpenAICompletionsStream(
+      streamChunks([
+        makeCompletionsChunk({
+          content: "<｜DSML｜tool_calls>" + hugeBody,
+        }),
+        makeCompletionsChunk(
+          {
+            content: "</｜DSML｜tool_calls>",
+          },
+          "stop",
+        ),
+      ]),
+      output,
+      model,
+      { push() {} },
+    );
+
+    // Cap discards the open block as text; no tool calls recovered.
+    expect(output.content.filter((b) => b.type === "toolCall")).toEqual([]);
+  });
+
+  it("discards oversized DeepSeek DSML recovery buffer with multibyte UTF-8 text", async () => {
+    const model = createDeepSeekCompletionsModel();
+    const output = createAssistantOutput(model);
+
+    // 200k "é": .length under 256k string units, UTF-8 bytes over 256k.
+    const multibyteBody =
+      '<｜DSML｜invoke name="session_status"><｜DSML｜parameter name="key" string="true">' +
+      "\u00E9".repeat(200_000) +
+      "</｜DSML｜parameter></｜DSML｜invoke>";
+
+    await testing.processOpenAICompletionsStream(
+      streamChunks([
+        makeCompletionsChunk({
+          content: "<｜DSML｜tool_calls>" + multibyteBody,
+        }),
+        makeCompletionsChunk(
+          {
+            content: "</｜DSML｜tool_calls>",
+          },
+          "stop",
+        ),
+      ]),
+      output,
+      model,
+      { push() {} },
+    );
+
+    expect(output.content.filter((b) => b.type === "toolCall")).toEqual([]);
+  });
+
   it.each([
     { finishReason: "length", stopReason: "length" },
     { finishReason: "content_filter", stopReason: "error" },
