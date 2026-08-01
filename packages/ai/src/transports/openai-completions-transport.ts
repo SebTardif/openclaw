@@ -884,6 +884,10 @@ const DEEPSEEK_DSML_TOOL_CLOSE_TOKENS = DEEPSEEK_DSML_BARS.flatMap((bar) =>
 const DEEPSEEK_DSML_TOOL_MAX_OPEN_TOKEN_LEN = Math.max(
   ...DEEPSEEK_DSML_TOOL_OPEN_TOKENS.map((token) => token.length),
 );
+const DEEPSEEK_DSML_TOOL_MAX_BOUNDARY_TOKEN_LEN = Math.max(
+  DEEPSEEK_DSML_TOOL_MAX_OPEN_TOKEN_LEN,
+  ...DEEPSEEK_DSML_TOOL_CLOSE_TOKENS.map((token) => token.length),
+);
 
 // Match MAX_TOOL_CALL_ARGUMENT_BUFFER_BYTES / MAX_POST_TOOL_CALL_BUFFER_BYTES.
 const MAX_DSML_RECOVERY_BUFFER_BYTES = 256_000;
@@ -891,10 +895,39 @@ const MAX_DSML_RECOVERY_BUFFER_BYTES = 256_000;
 function createDeepSeekDsmlToolCallRecoverer() {
   let buffer = "";
   let bufferBytes = 0;
+  let discardDepth = 0;
 
   const consume = (final: boolean): DeepSeekDsmlRecoveredPart[] => {
     const output: DeepSeekDsmlRecoveredPart[] = [];
     while (buffer) {
+      if (discardDepth > 0) {
+        const boundary = findEarliestDeepSeekDsmlToolBoundary(buffer);
+        if (!boundary) {
+          if (final) {
+            buffer = "";
+            discardDepth = 0;
+            return output;
+          }
+          const keep = longestDeepSeekDsmlToolBoundaryPrefixSuffixLength(buffer);
+          buffer = keep > 0 ? buffer.slice(-keep) : "";
+          return output;
+        }
+
+        buffer = buffer.slice(boundary.index + boundary.token.length);
+        if (boundary.kind === "open") {
+          discardDepth += 1;
+        } else {
+          discardDepth -= 1;
+          if (discardDepth === 0) {
+            // The text filter saw the oversized opening block. Give it only
+            // the outer close so both parsers resume at the same boundary.
+            output.push({ kind: "text", text: boundary.token });
+            bufferBytes = Buffer.byteLength(buffer, "utf8");
+          }
+        }
+        continue;
+      }
+
       const open = findEarliestStringToken(buffer, DEEPSEEK_DSML_TOOL_OPEN_TOKENS);
       if (!open) {
         if (final) {
@@ -922,20 +955,40 @@ function createDeepSeekDsmlToolCallRecoverer() {
       }
 
       const afterOpen = buffer.slice(open.token.length);
-      const close = findEarliestStringToken(afterOpen, DEEPSEEK_DSML_TOOL_CLOSE_TOKENS);
-      if (!close) {
-        // Unterminated DSML: discard as text when the stream ends or the
-        // buffer exceeds the shared 256 KB UTF-8 cap (DoS guard).
-        if (final || bufferBytes > MAX_DSML_RECOVERY_BUFFER_BYTES) {
+      const blockScan = scanDeepSeekDsmlToolBlock(afterOpen);
+      if (!blockScan.close) {
+        if (final) {
           output.push({ kind: "text", text: buffer });
           buffer = "";
+          bufferBytes = 0;
+          return output;
+        }
+        if (bufferBytes > MAX_DSML_RECOVERY_BUFFER_BYTES) {
+          // Keep framing state after releasing the oversized buffer. Nested
+          // DSML must remain inert until the original outer block closes.
+          discardDepth = blockScan.depth;
+          output.push({ kind: "text", text: open.token });
+          const keep = longestDeepSeekDsmlToolBoundaryPrefixSuffixLength(afterOpen);
+          buffer = keep > 0 ? afterOpen.slice(-keep) : "";
           bufferBytes = 0;
         }
         return output;
       }
 
-      const body = afterOpen.slice(0, close.index);
-      const blockText = buffer.slice(0, open.token.length + close.index + close.token.length);
+      const body = afterOpen.slice(0, blockScan.close.index);
+      const blockText = buffer.slice(
+        0,
+        open.token.length + blockScan.close.index + blockScan.close.token.length,
+      );
+      const blockBytes = Buffer.byteLength(blockText, "utf8");
+      if (blockBytes > MAX_DSML_RECOVERY_BUFFER_BYTES) {
+        // A close arriving in the chunk that crosses the cap must not make an
+        // otherwise oversized block eligible for tool-call recovery.
+        output.push({ kind: "text", text: open.token + blockScan.close.token });
+        bufferBytes -= blockBytes;
+        buffer = buffer.slice(blockText.length);
+        continue;
+      }
       const recoveredToolCalls = parseDeepSeekDsmlToolCallBlock(body);
       if (recoveredToolCalls.length > 0) {
         output.push(...recoveredToolCalls);
@@ -950,8 +1003,10 @@ function createDeepSeekDsmlToolCallRecoverer() {
 
   return {
     push(chunk: string) {
+      if (discardDepth === 0) {
+        bufferBytes += utf8ByteLengthForAppend(buffer, chunk);
+      }
       buffer += chunk;
-      bufferBytes += Buffer.byteLength(chunk, "utf8");
       return consume(false);
     },
     flush() {
@@ -1057,10 +1112,10 @@ function decodeDeepSeekDsmlText(value: string): string {
     .replaceAll("&amp;", "&");
 }
 
-function findEarliestStringToken(text: string, tokens: readonly string[]) {
+function findEarliestStringToken(text: string, tokens: readonly string[], fromIndex = 0) {
   let best: { index: number; token: string } | null = null;
   for (const token of tokens) {
-    const index = text.indexOf(token);
+    const index = text.indexOf(token, fromIndex);
     if (index !== -1 && (!best || index < best.index)) {
       best = { index, token };
     }
@@ -1068,11 +1123,78 @@ function findEarliestStringToken(text: string, tokens: readonly string[]) {
   return best;
 }
 
+function findEarliestDeepSeekDsmlToolBoundary(text: string, fromIndex = 0) {
+  const open = findEarliestStringToken(text, DEEPSEEK_DSML_TOOL_OPEN_TOKENS, fromIndex);
+  const close = findEarliestStringToken(text, DEEPSEEK_DSML_TOOL_CLOSE_TOKENS, fromIndex);
+  if (!open) {
+    return close ? { kind: "close" as const, ...close } : null;
+  }
+  if (!close || open.index < close.index) {
+    return { kind: "open" as const, ...open };
+  }
+  return { kind: "close" as const, ...close };
+}
+
+function scanDeepSeekDsmlToolBlock(text: string) {
+  let depth = 1;
+  let offset = 0;
+  while (offset < text.length) {
+    const boundary = findEarliestDeepSeekDsmlToolBoundary(text, offset);
+    if (!boundary) {
+      break;
+    }
+    const index = boundary.index;
+    if (boundary.kind === "open") {
+      depth += 1;
+    } else {
+      depth -= 1;
+      if (depth === 0) {
+        return { close: { index, token: boundary.token }, depth };
+      }
+    }
+    offset = index + boundary.token.length;
+  }
+  return { close: null, depth };
+}
+
+function utf8ByteLengthForAppend(buffer: string, chunk: string) {
+  let bytes = Buffer.byteLength(chunk, "utf8");
+  if (!buffer || !chunk) {
+    return bytes;
+  }
+  const previousCodeUnit = buffer.charCodeAt(buffer.length - 1);
+  const nextCodeUnit = chunk.charCodeAt(0);
+  if (
+    previousCodeUnit >= 0xd800 &&
+    previousCodeUnit <= 0xdbff &&
+    nextCodeUnit >= 0xdc00 &&
+    nextCodeUnit <= 0xdfff
+  ) {
+    // Each isolated surrogate counts as three UTF-8 bytes; the joined scalar is four.
+    bytes -= 2;
+  }
+  return bytes;
+}
+
 function longestDeepSeekDsmlToolOpenPrefixSuffixLength(text: string) {
   const maxLength = Math.min(text.length, DEEPSEEK_DSML_TOOL_MAX_OPEN_TOKEN_LEN - 1);
   for (let length = maxLength; length > 0; length -= 1) {
     const suffix = text.slice(text.length - length);
     if (DEEPSEEK_DSML_TOOL_OPEN_TOKENS.some((token) => token.startsWith(suffix))) {
+      return length;
+    }
+  }
+  return 0;
+}
+
+function longestDeepSeekDsmlToolBoundaryPrefixSuffixLength(text: string) {
+  const maxLength = Math.min(text.length, DEEPSEEK_DSML_TOOL_MAX_BOUNDARY_TOKEN_LEN - 1);
+  for (let length = maxLength; length > 0; length -= 1) {
+    const suffix = text.slice(text.length - length);
+    if (
+      DEEPSEEK_DSML_TOOL_OPEN_TOKENS.some((token) => token.startsWith(suffix)) ||
+      DEEPSEEK_DSML_TOOL_CLOSE_TOKENS.some((token) => token.startsWith(suffix))
+    ) {
       return length;
     }
   }
