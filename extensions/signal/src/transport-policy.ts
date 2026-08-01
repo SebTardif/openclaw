@@ -137,7 +137,15 @@ export function assignSignalManagedNativePort(
     throw new Error("Signal managed native port must be an integer between 1 and 65535.");
   }
   const connectionUrlValue = transport.url;
-  if (!connectionUrlValue || !isSignalManagedNativeConnectionUrlForBind(transport)) {
+  // When httpPort is omitted but the connection URL is a bind-aligned local
+  // endpoint, treat the URL port as the provisional bind for alignment. That
+  // way fallback allocation (preferred port already reserved) still rewrites
+  // the probe URL to the allocated port instead of leaving bind and URL
+  // divergent (see vincentkoc review on #116176).
+  const preferredUrlPort = preferredManagedNativePortFromConnectionUrl(transport);
+  const alignmentProbe: SignalManagedNativeTransport =
+    preferredUrlPort === undefined ? transport : { ...transport, httpPort: preferredUrlPort };
+  if (!connectionUrlValue || !isSignalManagedNativeConnectionUrlForBind(alignmentProbe)) {
     return { ...transport, httpPort };
   }
   const connectionUrl = new URL(connectionUrlValue);

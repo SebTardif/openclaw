@@ -48,6 +48,28 @@ describe("preferredManagedNativePortFromConnectionUrl", () => {
       }),
     ).toBeUndefined();
   });
+
+  it("does not prefer remote, https, or cross-family endpoints", () => {
+    expect(
+      preferredManagedNativePortFromConnectionUrl({
+        kind: "managed-native",
+        url: "http://signal.example.com:8082",
+      }),
+    ).toBeUndefined();
+    expect(
+      preferredManagedNativePortFromConnectionUrl({
+        kind: "managed-native",
+        url: "https://127.0.0.1:8082",
+      }),
+    ).toBeUndefined();
+    expect(
+      preferredManagedNativePortFromConnectionUrl({
+        kind: "managed-native",
+        url: "http://[::1]:8082",
+        httpHost: "127.0.0.1",
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("assignSignalManagedNativePort", () => {
@@ -67,5 +89,31 @@ describe("assignSignalManagedNativePort", () => {
     );
     expect(next.url).toBe("http://[::1]:8080");
     expect(next.httpPort).toBe(9090);
+  });
+
+  it("rewrites a URL-only bind-aligned endpoint when fallback allocates a different port", () => {
+    // Preferred URL port 8082 is already reserved; allocate 8080 instead.
+    // Probe URL must follow the daemon bind.
+    const next = assignSignalManagedNativePort(
+      {
+        kind: "managed-native",
+        url: "http://127.0.0.1:8082",
+      },
+      8080,
+    );
+    expect(next.httpPort).toBe(8080);
+    expect(next.url).toBe("http://127.0.0.1:8080");
+  });
+
+  it("keeps remote connection URLs independent when only the bind port is assigned", () => {
+    const next = assignSignalManagedNativePort(
+      {
+        kind: "managed-native",
+        url: "http://signal.example.com:8082",
+      },
+      8080,
+    );
+    expect(next.httpPort).toBe(8080);
+    expect(next.url).toBe("http://signal.example.com:8082");
   });
 });
