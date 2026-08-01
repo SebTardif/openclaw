@@ -289,26 +289,25 @@ describe("openai transport stream", () => {
       content.slice(index * 4096, (index + 1) * 4096),
     );
 
-    await testing.processOpenAICompletionsStream(
-      streamChunks(
-        chunks.map((contentChunk, index) =>
-          makeCompletionsChunk(
-            { content: contentChunk },
-            index === chunks.length - 1 ? "stop" : null,
+    await expect(
+      testing.processOpenAICompletionsStream(
+        streamChunks(
+          chunks.map((contentChunk, index) =>
+            makeCompletionsChunk(
+              { content: contentChunk },
+              index === chunks.length - 1 ? "stop" : null,
+            ),
           ),
         ),
+        output,
+        model,
+        { push: (event) => events.push(event as CapturedStreamEvent) },
       ),
-      output,
-      model,
-      { push: (event) => events.push(event as CapturedStreamEvent) },
-    );
-
-    expect(output.stopReason).toBe("stop");
-    expect(output.content).toEqual([{ type: "text", text: " after" }]);
+    ).rejects.toThrow("Exceeded DeepSeek DSML recovery buffer limit");
     expect(events.filter((event) => event.type?.startsWith("toolcall_"))).toEqual([]);
   });
 
-  it("discards oversized DeepSeek DSML recovery buffer with multibyte UTF-8 text", async () => {
+  it("rejects an oversized DeepSeek DSML recovery buffer using UTF-8 bytes", async () => {
     const model = createDeepSeekCompletionsModel();
     const output = createAssistantOutput(model);
 
@@ -318,21 +317,21 @@ describe("openai transport stream", () => {
       "\u00E9".repeat(200_000) +
       "</｜DSML｜parameter></｜DSML｜invoke>";
 
-    await testing.processOpenAICompletionsStream(
-      streamChunks([
-        makeCompletionsChunk(
-          {
-            content: "<｜DSML｜tool_calls>" + multibyteBody,
-          },
-          "stop",
-        ),
-      ]),
-      output,
-      model,
-      { push() {} },
-    );
-
-    expect(output.content.filter((b) => b.type === "toolCall")).toEqual([]);
+    await expect(
+      testing.processOpenAICompletionsStream(
+        streamChunks([
+          makeCompletionsChunk(
+            {
+              content: "<｜DSML｜tool_calls>" + multibyteBody,
+            },
+            "stop",
+          ),
+        ]),
+        output,
+        model,
+        { push() {} },
+      ),
+    ).rejects.toThrow("Exceeded DeepSeek DSML recovery buffer limit");
   });
 
   it("counts split surrogate pairs exactly at the DeepSeek DSML recovery cap", async () => {
@@ -371,11 +370,7 @@ describe("openai transport stream", () => {
     ]);
   });
 
-  it("discards nested DSML over SSE until the split outer close, then resumes recovery", async () => {
-    const nestedCall = (name: string) =>
-      `<|DSML|tool_calls><|DSML|invoke name="${name}">{"value":"nested"}</|DSML|invoke></|DSML|tool_calls>`;
-    const finalCall =
-      '<|DSML|tool_calls><|DSML|invoke name="read">{"path":"/tmp/final.md"}</|DSML|invoke></|DSML|tool_calls>';
+  it("surfaces an oversized DeepSeek DSML recovery buffer as a transport error", async () => {
     const server = createServer((req, res) => {
       req.resume();
       req.on("end", () => {
@@ -388,15 +383,7 @@ describe("openai transport stream", () => {
           makeCompletionsChunk({
             content: "<|DSML|tool_calls>" + "x".repeat(300_000),
           }),
-          makeCompletionsChunk({
-            content:
-              nestedCall("nested_one") +
-              "<|DSML|tool_use_error>ignored</|DSML|tool_use_error>" +
-              nestedCall("nested_two") +
-              "</|DSML|tool_",
-          }),
-          makeCompletionsChunk({ content: "calls> after " + finalCall }),
-          makeCompletionsChunk({}, "tool_calls"),
+          makeCompletionsChunk({}, "stop"),
         ]) {
           res.write(`data: ${JSON.stringify(chunk)}\n\n`);
         }
@@ -428,41 +415,81 @@ describe("openai transport stream", () => {
 
       const events: Array<{
         type: string;
-        delta?: string;
         reason?: string;
-        message?: {
-          content?: Array<{
-            type?: string;
-            text?: string;
-            name?: string;
-            arguments?: Record<string, unknown>;
-          }>;
-        };
+        error?: { errorMessage?: string; content?: unknown[] };
       }> = [];
       for await (const event of stream as AsyncIterable<(typeof events)[number]>) {
         events.push(event);
       }
 
-      const done = events.find((event) => event.type === "done");
-      expect(done?.reason).toBe("toolUse");
-      expect(done?.message?.content).toEqual([
-        expect.objectContaining({ type: "text", text: " after " }),
+      expect(events).toContainEqual(
         expect.objectContaining({
-          type: "toolCall",
-          name: "read",
-          arguments: { path: "/tmp/final.md" },
+          type: "error",
+          reason: "error",
+          error: expect.objectContaining({
+            errorMessage: "Exceeded DeepSeek DSML recovery buffer limit",
+            content: [],
+          }),
         }),
-      ]);
-      expect(events.filter((event) => event.type === "toolcall_start")).toHaveLength(1);
-      expect(events.filter((event) => event.type === "toolcall_delta")).toHaveLength(1);
-      expect(JSON.stringify(events)).not.toContain("nested_one");
-      expect(JSON.stringify(events)).not.toContain("nested_two");
-      expect(JSON.stringify(events)).not.toContain("DSML");
+      );
+      expect(events.filter((event) => event.type === "toolcall_start")).toEqual([]);
+      expect(events.filter((event) => event.type === "toolcall_delta")).toEqual([]);
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
     }
+  });
+
+  it("fails before a later DSML call after overflow can be authorized", async () => {
+    const model = createDeepSeekCompletionsModel();
+    const output = createAssistantOutput(model);
+    const laterCall =
+      '<|DSML|tool_calls><|DSML|invoke name="read">{"path":"/tmp/repro.md"}</|DSML|invoke></|DSML|tool_calls>';
+
+    await expect(
+      testing.processOpenAICompletionsStream(
+        streamChunks([
+          makeCompletionsChunk({
+            content: "<|DSML|tool_calls>" + "x".repeat(256_001),
+          }),
+          makeCompletionsChunk({
+            content: "</|DSML|function_calls> after " + laterCall,
+          }),
+          makeCompletionsChunk({}, "tool_calls"),
+        ]),
+        output,
+        model,
+        { push() {} },
+      ),
+    ).rejects.toThrow("Exceeded DeepSeek DSML recovery buffer limit");
+  });
+
+  it("treats DSML-looking text inside a parameter value as payload", async () => {
+    const model = createDeepSeekCompletionsModel();
+    const output = createAssistantOutput(model);
+    const content =
+      '<｜DSML｜tool_calls><｜DSML｜invoke name="message">' +
+      '<｜DSML｜parameter name="text" string="true">' +
+      "literal <｜DSML｜tool_calls> marker" +
+      "</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>";
+
+    await testing.processOpenAICompletionsStream(
+      streamChunks([makeCompletionsChunk({ content }, "stop")]),
+      output,
+      model,
+      { push() {} },
+    );
+
+    expect(output.stopReason).toBe("toolUse");
+    expect(output.content).toEqual([
+      {
+        type: "toolCall",
+        id: expect.stringMatching(/^call_[0-9a-f]{24}$/),
+        name: "message",
+        arguments: { text: "literal <｜DSML｜tool_calls> marker" },
+      },
+    ]);
   });
 
   it.each([
