@@ -1210,7 +1210,7 @@ function scanDeepSeekDsmlToolBlock(
       invokeOpen ? { kind: "invoke-open" as const, ...invokeOpen } : null,
     ]
       .filter((candidate) => candidate !== null)
-      .sort((left, right) => left.index - right.index)[0];
+      .toSorted((left, right) => left.index - right.index)[0];
     if (!next) {
       state.offset = Math.max(
         contentStartIndex,

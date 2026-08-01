@@ -489,7 +489,7 @@ describe("openai transport stream", () => {
   it("rejects a nested DSML wrapper before the original outer close", async () => {
     const model = createDeepSeekCompletionsModel();
     const output = createAssistantOutput(model);
-    const events: Array<{ type: string }> = [];
+    const events: CapturedStreamEvent[] = [];
 
     await expect(
       testing.processOpenAICompletionsStream(
@@ -505,7 +505,7 @@ describe("openai transport stream", () => {
         model,
         {
           push(event) {
-            events.push(event);
+            events.push(event as CapturedStreamEvent);
           },
         },
       ),
@@ -573,7 +573,7 @@ describe("openai transport stream", () => {
       "literal <｜DSML｜tool_calls> marker" +
       "</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>";
 
-    const chunks = [...content].map((char) => makeCompletionsChunk({ content: char }));
+    const chunks = Array.from(content, (char) => makeCompletionsChunk({ content: char }));
     chunks.push(makeCompletionsChunk({}, "stop"));
     await testing.processOpenAICompletionsStream(streamChunks(chunks), output, model, {
       push() {},
@@ -600,9 +600,9 @@ describe("openai transport stream", () => {
 
     await testing.processOpenAICompletionsStream(
       streamChunks(
-        [...content]
-          .map((char) => makeCompletionsChunk({ content: char }))
-          .concat([makeCompletionsChunk({}, "stop")]),
+        Array.from(content, (char) => makeCompletionsChunk({ content: char })).concat([
+          makeCompletionsChunk({}, "stop"),
+        ]),
       ),
       output,
       model,
@@ -623,7 +623,7 @@ describe("openai transport stream", () => {
   it("does not recover a nested call hidden inside a nameless invoke", async () => {
     const model = createDeepSeekCompletionsModel();
     const output = createAssistantOutput(model);
-    const events: Array<{ type: string }> = [];
+    const events: CapturedStreamEvent[] = [];
     const content =
       "<|DSML|tool_calls><|DSML|invoke><|DSML|tool_calls>" +
       '<|DSML|invoke name="read">{"path":"/tmp/bypass"}</|DSML|invoke>' +
@@ -635,7 +635,7 @@ describe("openai transport stream", () => {
       model,
       {
         push(event) {
-          events.push(event);
+          events.push(event as CapturedStreamEvent);
         },
       },
     );
