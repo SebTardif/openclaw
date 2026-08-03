@@ -1968,11 +1968,7 @@ export function createCliJsonlStreamingParser(params: {
         claudePartialTextSoFar = "";
       } else {
         const nextText = collectCliText(parsed.message);
-        if (
-          claudePartialTextSoFar &&
-          nextText &&
-          !nextText.startsWith(claudePartialTextSoFar)
-        ) {
+        if (claudePartialTextSoFar && nextText && !nextText.startsWith(claudePartialTextSoFar)) {
           claudePartialTextSoFar = "";
         }
       }

@@ -4309,7 +4309,6 @@ describe("createCliJsonlStreamingParser", () => {
     );
   });
 
-
   it("deduplicates when both stream_event deltas and assistant partials arrive", () => {
     const deltas: Array<{ text: string; delta: string }> = [];
     const parser = createCliJsonlStreamingParser({
