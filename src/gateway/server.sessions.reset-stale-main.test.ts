@@ -29,7 +29,6 @@ function staleMissingMainEntry(): Partial<SessionEntry> {
       chargedAttempts: 3,
       tombstone: {
         reason: "restart recovery exhausted",
-        at: Date.now() - 60_000,
       },
     },
   };
