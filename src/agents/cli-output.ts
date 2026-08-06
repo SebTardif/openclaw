@@ -1973,11 +1973,28 @@ export function createCliJsonlStreamingParser(params: {
         }
       }
     }
+    // Stream-event text deltas advance `assistantText`. Partial assistant
+    // snapshots are cumulative and must not re-emit that prefix when Claude
+    // also sends stream_event text (mixed delivery). Prefer the longer of the
+    // message-local partial baseline and the already-streamed assistant text
+    // only when the snapshot still starts with that stream text.
+    let partialTextSoFar = claudePartialTextSoFar;
+    if (parsed.type === "assistant" && isRecord(parsed.message)) {
+      const snapshotText = collectCliText(parsed.message);
+      if (
+        snapshotText &&
+        assistantText &&
+        snapshotText.startsWith(assistantText) &&
+        assistantText.length > partialTextSoFar.length
+      ) {
+        partialTextSoFar = assistantText;
+      }
+    }
     const partialDelta = parseClaudeCliPartialAssistantDelta({
       backend: params.backend,
       providerId: params.providerId,
       parsed,
-      textSoFar: claudePartialTextSoFar,
+      textSoFar: partialTextSoFar,
       sessionId,
       usage,
     });

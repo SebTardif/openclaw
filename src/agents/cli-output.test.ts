@@ -4317,6 +4317,9 @@ describe("createCliJsonlStreamingParser", () => {
       onAssistantDelta: (d) => deltas.push({ text: d.text, delta: d.delta }),
     });
 
+    // Claude often emits stream_event text_delta and a cumulative assistant
+    // snapshot with stop_reason: null for the same prefix. The snapshot must
+    // not re-emit text already delivered via stream_event.
     parser.push(
       JSON.stringify({
         type: "stream_event",
@@ -4326,13 +4329,27 @@ describe("createCliJsonlStreamingParser", () => {
     parser.push(
       JSON.stringify({
         type: "assistant",
-        message: { role: "assistant", content: [{ type: "text", text: "Hi" }] },
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Hi" }],
+          stop_reason: null,
+        },
       }) + "\n",
     );
     parser.push(
       JSON.stringify({
         type: "stream_event",
         event: { type: "content_block_delta", delta: { type: "text_delta", text: " there" } },
+      }) + "\n",
+    );
+    parser.push(
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Hi there" }],
+          stop_reason: null,
+        },
       }) + "\n",
     );
     parser.finish();
