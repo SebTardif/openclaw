@@ -25,7 +25,14 @@ describe("hasExplicitMutatingToolFailureAcknowledgement", () => {
     "There were no failures during the write path.",
     "The command did not fail; it completed with exit 0.",
     "Status loaded.",
-  ])("does not treat non-failure phrasing as acknowledgement: %s", (text) => {
+    // Negated success must not suppress integrity warnings (Claw P1 on #121579).
+    "The update was not rejected; it succeeded.",
+    "The API was never refused; the write completed cleanly.",
+    "The request was not denied by GitHub.",
+    "The command was not blocked by the approval policy.",
+    "The message was not bounced.",
+    "There was no rejection from the remote API.",
+  ])("does not treat non-failure or negated-success phrasing as acknowledgement: %s", (text) => {
     expect(hasExplicitMutatingToolFailureAcknowledgement(text)).toBe(false);
   });
 });

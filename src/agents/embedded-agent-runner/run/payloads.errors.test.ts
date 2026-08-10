@@ -879,6 +879,27 @@ describe("buildEmbeddedRunPayloads", () => {
     expectSinglePayloadSummary(payloads, { text });
   });
 
+  it.each([
+    "The update was not rejected; it succeeded.",
+    "The API was never refused; the write completed cleanly.",
+    "The request was not denied by GitHub.",
+  ])("keeps write warnings when reply only negates rejection vocabulary: %s", (text) => {
+    const payloads = buildPayloads({
+      assistantTexts: [text],
+      lastAssistant: { stopReason: "end_turn" } as unknown as AssistantMessage,
+      lastToolError: {
+        toolName: "write",
+        error: "HTTP 422: Validation Failed",
+        mutatingAction: true,
+      },
+    });
+
+    expect(payloads).toHaveLength(2);
+    expect(payloads[0]?.text).toBe(text);
+    expect(payloads[1]?.isError).toBe(true);
+    expect(payloads[1]?.text).toContain("Write");
+  });
+
   it("does not treat session_status read failures as mutating when explicitly flagged", () => {
     const payloads = buildPayloads({
       assistantTexts: ["Status loaded."],
