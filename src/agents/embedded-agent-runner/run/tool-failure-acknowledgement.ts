@@ -1,21 +1,30 @@
 import { normalizeTextForComparison } from "../../embedded-agent-helpers.js";
 
 const MUTATING_FAILURE_ACTION_PATTERN =
-  "(?:write|edit|update|save|create|delete|remove|modify|change|apply|patch|move|rename|send|reply|message|run|execute|execution|command|script|shell|bash|exec|tool|action|operation)";
+  "(?:write|edit|update|save|create|delete|remove|modify|change|apply|patch|move|rename|send|reply|message|run|execute|execution|command|script|shell|bash|exec|tool|action|operation|request|call|api|link)";
+// Truthful negative outcomes models use when describing a failed mutation
+// without the words "failed"/"failure" (see openclaw/openclaw#110153).
+const MUTATING_FAILURE_OUTCOME_PATTERN =
+  "(?:failed|failure|errored|rejected|refused|denied|blocked|bounced)";
 const MUTATING_FAILURE_INABILITY_PATTERN = new RegExp(
   `\\b(?:couldn't|could not|can't|cannot|unable to|am unable to|wasn't able to|was not able to|were unable to)\\b.{0,100}\\b${MUTATING_FAILURE_ACTION_PATTERN}\\b`,
   "u",
 );
 const MUTATING_FAILURE_ACTION_THEN_FAILURE_PATTERN = new RegExp(
-  `\\b${MUTATING_FAILURE_ACTION_PATTERN}\\b.{0,100}\\b(?:failed|failure|errored)\\b`,
+  `\\b${MUTATING_FAILURE_ACTION_PATTERN}\\b.{0,100}\\b${MUTATING_FAILURE_OUTCOME_PATTERN}\\b`,
   "u",
 );
 const MUTATING_FAILURE_FAILURE_THEN_ACTION_PATTERN = new RegExp(
-  `\\b(?:failed|failure)\\b.{0,100}\\b${MUTATING_FAILURE_ACTION_PATTERN}\\b`,
+  `\\b${MUTATING_FAILURE_OUTCOME_PATTERN}\\b.{0,100}\\b${MUTATING_FAILURE_ACTION_PATTERN}\\b`,
   "u",
 );
 const MUTATING_FAILURE_ERROR_WHILE_ACTION_PATTERN = new RegExp(
   `\\b(?:hit|encountered|ran into)\\b.{0,60}\\berror\\b.{0,100}\\b(?:while|trying to|when)\\b.{0,100}\\b${MUTATING_FAILURE_ACTION_PATTERN}\\b`,
+  "u",
+);
+// Passive forms near an action noun: "the update was rejected", "request was refused".
+const MUTATING_FAILURE_PASSIVE_NEAR_ACTION_PATTERN = new RegExp(
+  `\\b${MUTATING_FAILURE_ACTION_PATTERN}\\b.{0,40}\\b(?:was|were|got)\\s+${MUTATING_FAILURE_OUTCOME_PATTERN}\\b|\\b(?:was|were|got)\\s+${MUTATING_FAILURE_OUTCOME_PATTERN}\\b.{0,40}\\b${MUTATING_FAILURE_ACTION_PATTERN}\\b`,
   "u",
 );
 const DID_NOT_FAIL_PATTERN = /\b(?:did not|didn't)\s+fail\b/u;
@@ -36,6 +45,7 @@ export function hasExplicitMutatingToolFailureAcknowledgement(text: string): boo
   return (
     MUTATING_FAILURE_ACTION_THEN_FAILURE_PATTERN.test(normalizedText) ||
     MUTATING_FAILURE_FAILURE_THEN_ACTION_PATTERN.test(normalizedText) ||
-    MUTATING_FAILURE_ERROR_WHILE_ACTION_PATTERN.test(normalizedText)
+    MUTATING_FAILURE_ERROR_WHILE_ACTION_PATTERN.test(normalizedText) ||
+    MUTATING_FAILURE_PASSIVE_NEAR_ACTION_PATTERN.test(normalizedText)
   );
 }

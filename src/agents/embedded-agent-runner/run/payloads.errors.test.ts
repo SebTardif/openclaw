@@ -860,6 +860,25 @@ describe("buildEmbeddedRunPayloads", () => {
     expectSinglePayloadSummary(payloads, { text });
   });
 
+  it.each([
+    "The sub-issue API rejected the link so each body carries a Related pointer instead.",
+    "The API refused the update, so I left the existing body unchanged.",
+    "GitHub denied the request to create the issue.",
+    "The update was rejected by the remote API.",
+  ])("suppresses write warnings when reply uses rejection vocabulary: %s", (text) => {
+    const payloads = buildPayloads({
+      assistantTexts: [text],
+      lastAssistant: { stopReason: "end_turn" } as unknown as AssistantMessage,
+      lastToolError: {
+        toolName: "write",
+        error: "HTTP 422: Validation Failed",
+        mutatingAction: true,
+      },
+    });
+
+    expectSinglePayloadSummary(payloads, { text });
+  });
+
   it("does not treat session_status read failures as mutating when explicitly flagged", () => {
     const payloads = buildPayloads({
       assistantTexts: ["Status loaded."],
