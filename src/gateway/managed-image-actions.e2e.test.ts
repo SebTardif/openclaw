@@ -122,7 +122,8 @@ describe("managed image actions Gateway E2E", () => {
             height: 84,
           });
 
-          const authenticated = await fetch(new URL(block.url, fullUrl), {
+          const blockUrl = block.url as string;
+          const authenticated = await fetch(new URL(blockUrl, fullUrl), {
             headers: { Authorization: `Bearer ${GATEWAY_TOKEN}` },
           });
           expect(authenticated.status).toBe(200);

@@ -41,8 +41,19 @@ async function isAllowedAdditionalDirectoryPath(
   }
   try {
     await assertNoSymlinkParents({ rootDir: additionalPath, targetPath: absPath });
-  } catch {
-    return false;
+  } catch (err) {
+    // Missing / non-directory intermediate segments under an allowed extra root
+    // should resolve to empty text later, not hard-fail path validation.
+    // fs-safe emits code "not-file" when a parent path component is a regular file.
+    if (isFileMissingError(err)) {
+      return true;
+    }
+    return Boolean(
+      err &&
+      typeof err === "object" &&
+      "code" in err &&
+      (err as { code?: unknown }).code === "not-file",
+    );
   }
   if (!isPathInsideWithRealpath(additionalPath, absPath)) {
     try {

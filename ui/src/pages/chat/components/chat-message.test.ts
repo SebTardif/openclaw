@@ -4587,12 +4587,15 @@ describe("grouped chat rendering", () => {
 
     expectElement(container, 'button[aria-label="Download image"]', HTMLButtonElement).click();
     await vi.waitFor(() => expect(click).toHaveBeenCalledOnce());
-    expect(click.mock.instances[0]?.download).toBe("Ticketed image.png");
+    const downloadAnchor = click.mock.instances[0] as HTMLAnchorElement | undefined;
+    expect(downloadAnchor?.download).toBe("Ticketed image.png");
 
     expectElement(container, 'button[aria-label="Copy image"]', HTMLButtonElement).click();
     await vi.waitFor(() => expect(copiedBlob?.type).toBe("image/png"));
     await vi.waitFor(() => expect(toastHost.textContent).toContain("Copied!"));
-    expect(fetchMock.mock.calls.filter(([url]) => url === ticketedUrl)).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.filter((call) => (call as unknown as [string])[0] === ticketedUrl),
+    ).toHaveLength(1);
     expect(resolveArtifactDownload).toHaveBeenCalledTimes(2);
     toastHost.remove();
     container.remove();
