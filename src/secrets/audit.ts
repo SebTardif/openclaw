@@ -95,6 +95,8 @@ type RefAssignment = {
   ref: SecretRef;
   expected: "string" | "string-or-object";
   provider?: string;
+  /** Registry target id from discoverConfigSecretTargets (e.g. models.providers.*.apiKey). */
+  targetId?: string;
 };
 
 type ProviderAuthState = {
@@ -223,6 +225,7 @@ function collectConfigSecrets(params: {
         ref,
         expected: target.entry.expectedResolvedValue,
         provider: target.providerId,
+        targetId: target.entry.id,
       });
       if (target.entry.trackProviderShadowing && target.providerId) {
         collectProviderRefPath(params.collector, target.providerId, target.path);

@@ -23,13 +23,19 @@ type ConfigRefAssignment = {
   path: string;
   ref: SecretRef;
   provider?: string;
+  /** Registry target id (must be models.providers.*.apiKey for marker ownership). */
+  targetId?: string;
 };
+
+/** Only model-provider apiKey registry targets own models.json env markers. */
+const MODELS_PROVIDER_API_KEY_TARGET_ID = "models.providers.*.apiKey";
 
 /**
  * models.json persists env SecretRefs as bare env-name markers (for example
  * "FACTCHAT_API_KEY"), not only the built-in known-marker list. Accept those
- * only when the live config owns the same provider with an env SecretRef whose
- * id equals the marker. Arbitrary all-caps strings stay PLAINTEXT.
+ * only when models.providers.<id>.apiKey owns the same env SecretRef id.
+ * talk.providers / talk.realtime.providers with the same provider+env id must
+ * not suppress a plaintext models.json finding.
  */
 function isConfigOwnedEnvApiKeyMarker(params: {
   providerId: string;
@@ -42,14 +48,13 @@ function isConfigOwnedEnvApiKeyMarker(params: {
   }
   const providerKey = normalizeProviderId(params.providerId);
   for (const assignment of params.refAssignments) {
+    if (assignment.targetId !== MODELS_PROVIDER_API_KEY_TARGET_ID) {
+      continue;
+    }
     if (!assignment.provider) {
       continue;
     }
     if (normalizeProviderId(assignment.provider) !== providerKey) {
-      continue;
-    }
-    // Match provider apiKey targets only (not header or other secret paths).
-    if (!assignment.path.endsWith(".apiKey")) {
       continue;
     }
     if (assignment.ref.source !== "env") {
