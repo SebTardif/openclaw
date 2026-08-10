@@ -900,6 +900,21 @@ describe("buildEmbeddedRunPayloads", () => {
     expect(payloads[1]?.text).toContain("Write");
   });
 
+  it("suppresses write warnings when a later genuine failure follows negated success", () => {
+    const text = "The first attempt was not rejected. The second write failed.";
+    const payloads = buildPayloads({
+      assistantTexts: [text],
+      lastAssistant: { stopReason: "end_turn" } as unknown as AssistantMessage,
+      lastToolError: {
+        toolName: "write",
+        error: "HTTP 422: Validation Failed",
+        mutatingAction: true,
+      },
+    });
+
+    expectSinglePayloadSummary(payloads, { text });
+  });
+
   it("does not treat session_status read failures as mutating when explicitly flagged", () => {
     const payloads = buildPayloads({
       assistantTexts: ["Status loaded."],

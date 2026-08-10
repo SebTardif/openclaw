@@ -14,6 +14,9 @@ describe("hasExplicitMutatingToolFailureAcknowledgement", () => {
     "The shell command was blocked by the approval policy.",
     "The outbound message bounced, so nothing was delivered.",
     "The update was rejected by the remote API.",
+    // Negated success then genuine later failure must still acknowledge.
+    "The first attempt was not rejected. The second write failed.",
+    "The API was never refused on try one, but the final request failed.",
   ])("acknowledges truthful negative outcome: %s", (text) => {
     expect(hasExplicitMutatingToolFailureAcknowledgement(text)).toBe(true);
   });
@@ -25,7 +28,6 @@ describe("hasExplicitMutatingToolFailureAcknowledgement", () => {
     "There were no failures during the write path.",
     "The command did not fail; it completed with exit 0.",
     "Status loaded.",
-    // Negated success must not suppress integrity warnings (Claw P1 on #121579).
     "The update was not rejected; it succeeded.",
     "The API was never refused; the write completed cleanly.",
     "The request was not denied by GitHub.",
