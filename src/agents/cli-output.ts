@@ -1464,6 +1464,9 @@ export function createCliJsonlStreamingParser(params: {
   let pendingClaudeText = "";
   let lastClaudePartialMessageId: string | undefined;
   let claudePartialTextSoFar = "";
+  // Per-message text already delivered via stream_event (or buffered as commentary).
+  // Do not use turn-wide assistantText for snapshot dedupe (Claw P1).
+  let claudeStreamDeliveredForPartial = "";
   let pendingMessageSeparator = false;
   let currentMessageStart = 0;
   let segmentStart = 0;
@@ -1524,6 +1527,8 @@ export function createCliJsonlStreamingParser(params: {
     if (!delta) {
       return;
     }
+    // Message-local delivered baseline for partial assistant snapshots.
+    claudeStreamDeliveredForPartial = `${claudeStreamDeliveredForPartial}${delta}`;
     if (classifyClaudeCommentary) {
       pendingClaudeText = `${pendingClaudeText}${delta}`;
       return;
@@ -1966,6 +1971,7 @@ export function createCliJsonlStreamingParser(params: {
       if (messageId !== lastClaudePartialMessageId) {
         lastClaudePartialMessageId = messageId;
         claudePartialTextSoFar = "";
+        claudeStreamDeliveredForPartial = "";
       } else {
         const nextText = collectCliText(parsed.message);
         if (claudePartialTextSoFar && nextText && !nextText.startsWith(claudePartialTextSoFar)) {
@@ -1973,22 +1979,15 @@ export function createCliJsonlStreamingParser(params: {
         }
       }
     }
-    // Stream-event text deltas advance `assistantText`. Partial assistant
-    // snapshots are cumulative and must not re-emit that prefix when Claude
-    // also sends stream_event text (mixed delivery). Prefer the longer of the
-    // message-local partial baseline and the already-streamed assistant text
-    // only when the snapshot still starts with that stream text.
+    // Stream-event text is tracked per message in claudeStreamDeliveredForPartial
+    // (including commentary-buffered text). Do not use turn-wide assistantText:
+    // it omits pending commentary and prior message boundaries (duplicate risk).
     let partialTextSoFar = claudePartialTextSoFar;
-    if (parsed.type === "assistant" && isRecord(parsed.message)) {
-      const snapshotText = collectCliText(parsed.message);
-      if (
-        snapshotText &&
-        assistantText &&
-        snapshotText.startsWith(assistantText) &&
-        assistantText.length > partialTextSoFar.length
-      ) {
-        partialTextSoFar = assistantText;
-      }
+    if (
+      claudeStreamDeliveredForPartial.length > partialTextSoFar.length &&
+      (!partialTextSoFar || claudeStreamDeliveredForPartial.startsWith(partialTextSoFar))
+    ) {
+      partialTextSoFar = claudeStreamDeliveredForPartial;
     }
     const partialDelta = parseClaudeCliPartialAssistantDelta({
       backend: params.backend,
@@ -2002,8 +2001,11 @@ export function createCliJsonlStreamingParser(params: {
       claudePartialTextSoFar = partialDelta.text;
       if (classifyClaudeCommentary) {
         pendingClaudeText = `${pendingClaudeText}${partialDelta.delta}`;
+        claudeStreamDeliveredForPartial = partialDelta.text;
       } else {
         emitClaudeVisibleText(partialDelta.delta);
+        // emitClaudeVisibleText appends delta; snap baseline to full cumulative text
+        claudeStreamDeliveredForPartial = partialDelta.text;
       }
     }
 
