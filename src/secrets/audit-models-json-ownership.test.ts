@@ -248,6 +248,156 @@ describe("secrets audit models.json env-marker ownership", () => {
     });
   });
 
+  it.each([
+    {
+      name: "alias then canonical",
+      providers: {
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "WINNING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+    {
+      name: "canonical then alias",
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "WINNING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+  ])(
+    "does not treat a losing provider alias env marker as writer-owned ($name)",
+    async ({ providers }) => {
+      await writeJsonFile(fixture.configPath, {
+        models: { providers },
+      });
+      await writeJsonFile(fixture.modelsPath, {
+        providers: {
+          openai: {
+            baseUrl: "https://api.openai.com/v1",
+            api: "openai-completions",
+            apiKey: "LOSING_ENV",
+            models: [{ id: "gpt-5", name: "gpt-5" }],
+          },
+        },
+      });
+
+      const report = await runSecretsAudit({ env: fixture.env });
+      expectModelsFinding(report, {
+        code: "PLAINTEXT_FOUND",
+        jsonPath: "providers.openai.apiKey",
+      });
+    },
+  );
+
+  it.each([
+    {
+      name: "alias then canonical",
+      providers: {
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "WINNING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+    {
+      name: "canonical then alias",
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "WINNING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+  ])("still accepts the writer-winning canonical env marker ($name)", async ({ providers }) => {
+    await writeJsonFile(fixture.configPath, {
+      models: { providers },
+    });
+    await writeJsonFile(fixture.modelsPath, {
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: "WINNING_ENV",
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    });
+
+    const report = await runSecretsAudit({ env: fixture.env });
+    expectModelsFinding(report, {
+      code: "PLAINTEXT_FOUND",
+      jsonPath: "providers.openai.apiKey",
+      present: false,
+    });
+  });
+
+  it("still owns an alias-only provider env marker after writer canonicalization", async () => {
+    await writeJsonFile(fixture.configPath, {
+      models: {
+        providers: {
+          OpenAI: {
+            baseUrl: "https://api.openai.com/v1",
+            api: "openai-completions",
+            apiKey: { source: "env", provider: "default", id: OPENAI_API_KEY_MARKER },
+            models: [{ id: "gpt-5", name: "gpt-5" }],
+          },
+        },
+      },
+    });
+    await writeJsonFile(fixture.modelsPath, {
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: OPENAI_API_KEY_MARKER,
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    });
+
+    const report = await runSecretsAudit({ env: fixture.env });
+    expectModelsFinding(report, {
+      code: "PLAINTEXT_FOUND",
+      jsonPath: "providers.openai.apiKey",
+      present: false,
+    });
+  });
+
   it("does not let talk.realtime.providers env SecretRef exempt models.json plaintext", async () => {
     const providerId = "shared-provider";
     const envId = "SHARED_REALTIME_AND_MODEL_KEY"; // pragma: allowlist secret

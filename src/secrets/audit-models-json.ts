@@ -5,6 +5,7 @@ import {
   isSecretRefHeaderValueMarker,
 } from "../agents/model-auth-markers.js";
 import { normalizeProviderId } from "../agents/model-selection.js";
+import { normalizeProviderMapKeys } from "../agents/models-config.merge.js";
 import { coerceSecretRef, type SecretRef } from "../config/types.secrets.js";
 import { isLikelySensitiveModelProviderHeaderName } from "./model-provider-header-policy.js";
 import { isNonEmptyString, isRecord } from "./shared.js";
@@ -47,6 +48,10 @@ function isConfigOwnedEnvApiKeyMarker(params: {
     return false;
   }
   const providerKey = normalizeProviderId(params.providerId);
+  if (!providerKey) {
+    return false;
+  }
+  const ownedByRawKey: Record<string, string> = {};
   for (const assignment of params.refAssignments) {
     if (assignment.targetId !== MODELS_PROVIDER_API_KEY_TARGET_ID) {
       continue;
@@ -54,17 +59,15 @@ function isConfigOwnedEnvApiKeyMarker(params: {
     if (!assignment.provider) {
       continue;
     }
-    if (normalizeProviderId(assignment.provider) !== providerKey) {
-      continue;
-    }
     if (assignment.ref.source !== "env") {
       continue;
     }
-    if (assignment.ref.id.trim() === marker) {
-      return true;
-    }
+    ownedByRawKey[assignment.provider] = assignment.ref.id.trim();
   }
-  return false;
+  // Writer emits only the canonical-key winner (exact spelling over aliases,
+  // later alias if no canonical). Losing aliases must not suppress PLAINTEXT_FOUND.
+  const ownedByCanonicalKey = normalizeProviderMapKeys(ownedByRawKey);
+  return ownedByCanonicalKey[providerKey] === marker;
 }
 
 /** Collect models.json findings for plaintext credentials and unresolved SecretRef objects. */
