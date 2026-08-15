@@ -78,6 +78,12 @@ describe("resolveSessionDisplayName", () => {
       expected: "Alice (work) · work",
     },
     {
+      name: "a stored label that already ends in the account suffix is left alone",
+      key: "agent:main:telegram:cards:direct:42",
+      row: { accountId: "cards", label: "Alice · cards" },
+      expected: "Alice · cards",
+    },
+    {
       name: "a canonical group key is unchanged",
       key: "agent:main:telegram:group:-1001234567890",
       row: undefined,

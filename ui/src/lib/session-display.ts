@@ -115,7 +115,11 @@ type SessionKeyInfo = {
  * label that happens to read like one.
  */
 function withAccountDisambiguator(name: string, accountId: string | undefined): string {
-  return !accountId || accountId === "default" ? name : `${name} · ${accountId}`;
+  if (!accountId || accountId === "default") {
+    return name;
+  }
+  const suffix = ` · ${accountId}`;
+  return name.endsWith(suffix) ? name : `${name}${suffix}`;
 }
 
 /** Typed-session prefixes come from the i18n catalog (RFC 0026). */
