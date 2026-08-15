@@ -38,6 +38,55 @@ describe("resolveSessionDisplayName", () => {
     expect(resolveSessionDisplayName("agent:main:imessage:direct:+4912")).toBe("iMessage · +4912");
   });
 
+  it("surfaces a non-default account on unnamed DM and group fallbacks", () => {
+    expect(resolveSessionDisplayName("agent:main:telegram:cards:direct:42")).toBe(
+      "Telegram · 42 · cards",
+    );
+    expect(resolveSessionDisplayName("agent:main:telegram:cards:direct:491234567890")).toBe(
+      "Telegram · …567890 · cards",
+    );
+    expect(resolveSessionDisplayName("agent:main:signal:work:direct:+4912")).toBe(
+      "Signal · +4912 · work",
+    );
+    expect(resolveSessionDisplayName("agent:main:telegram:cards:group:-1001234567890")).toBe(
+      "Telegram Group · cards",
+    );
+  });
+
+  it("does not surface a default account segment in fallbacks", () => {
+    expect(resolveSessionDisplayName("agent:main:telegram:default:direct:42")).toBe(
+      "Telegram · 42",
+    );
+    expect(resolveSessionDisplayName("agent:main:telegram:group:-1001234567890")).toBe(
+      "Telegram Group",
+    );
+  });
+
+  it("keeps named label and displayName distinguishable across accounts", () => {
+    expect(
+      resolveSessionDisplayName("agent:main:telegram:cards:direct:42", {
+        label: "Alice",
+        displayName: "openclaw-tui",
+      }),
+    ).toBe("Alice · cards");
+    expect(
+      resolveSessionDisplayName("agent:main:telegram:cards:direct:42", { displayName: "Alice" }),
+    ).toBe("Alice · cards");
+    expect(
+      resolveSessionDisplayName("agent:main:telegram:direct:42", { displayName: "Alice" }),
+    ).toBe("Alice");
+    expect(
+      resolveSessionDisplayName("agent:main:telegram:cards:direct:42", {
+        displayName: "Alice · cards",
+      }),
+    ).toBe("Alice · cards");
+    expect(
+      resolveSessionDisplayName("agent:main:telegram:work:direct:42", {
+        displayName: "Alice (workflow)",
+      }),
+    ).toBe("Alice (workflow) · work");
+  });
+
   it("does not split UTF-16 surrogate pairs when shortening peer ids", () => {
     expect(resolveSessionDisplayName("agent:main:telegram:direct:12345😀67890")).toBe(
       "Telegram · …67890",

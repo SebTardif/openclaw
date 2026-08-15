@@ -20,6 +20,9 @@ const CHANNEL_LABELS: Record<string, string> = {
 
 const KNOWN_CHANNEL_KEYS = Object.keys(CHANNEL_LABELS);
 
+/** Account segment that session-key builders normalize absence to. */
+const DEFAULT_ACCOUNT_ID = "default";
+
 /** Raw peer ids stay out of the sidebar; keep a short recognizable tail only. */
 function shortenPeerId(identifier: string): string {
   const trimmed = identifier.trim();
@@ -99,7 +102,30 @@ type SessionKeyInfo = {
   prefix: string;
   /** Human-readable fallback when no label / displayName is available. */
   fallbackName: string;
+  /**
+   * Non-default account from a per-account-channel-peer key. Appended to
+   * named rows as well so two "Alice" DMs stay distinguishable.
+   */
+  accountId?: string;
 };
+
+function nonDefaultAccountId(account: string | undefined): string | undefined {
+  if (!account || account === DEFAULT_ACCOUNT_ID) {
+    return undefined;
+  }
+  return account;
+}
+
+function withAccountDisambiguator(name: string, accountId?: string): string {
+  if (!accountId) {
+    return name;
+  }
+  const suffix = ` · ${accountId}`;
+  if (name.endsWith(suffix) || name.endsWith(` (${accountId})`)) {
+    return name;
+  }
+  return `${name}${suffix}`;
+}
 
 /** Typed-session prefixes come from the i18n catalog (RFC 0026). */
 function typedSessionPrefix(kind: SessionTypedKind): string {
@@ -147,28 +173,36 @@ function parseSessionKey(key: string): SessionKeyInfo {
     return { kind: "automation", prefix, fallbackName: prefix };
   }
 
-  // Direct chat: agent:<x>:<channel>:direct:<id>. Never render the raw peer
-  // id; the gateway sends origin-derived names, so this is a last resort.
-  const directMatch = key.match(/^agent:[^:]+:([^:]+):direct:(.+)$/);
+  // Direct chat: agent:<x>:<channel>[:<account>]:direct:<id>. Never render the
+  // raw peer id; the gateway sends origin-derived names, so this is a last
+  // resort. A non-default account (per-account-channel-peer) is kept so
+  // multi-account rows stay distinguishable even when they share a name.
+  const directMatch = key.match(/^agent:[^:]+:([^:]+)(?::([^:]+))?:direct:(.+)$/);
   if (directMatch) {
     const channel = directMatch[1];
-    const identifier = directMatch[2];
+    const accountId = nonDefaultAccountId(directMatch[2]);
+    const identifier = directMatch[3];
     if (!channel || !identifier) {
-      return { prefix: "", fallbackName: key };
+      return { prefix: "", fallbackName: key, accountId };
     }
     const channelLabel = CHANNEL_LABELS[channel] ?? capitalize(channel);
-    return { prefix: "", fallbackName: `${channelLabel} · ${shortenPeerId(identifier)}` };
+    return {
+      prefix: "",
+      fallbackName: `${channelLabel} · ${shortenPeerId(identifier)}`,
+      accountId,
+    };
   }
 
-  // Group chat: agent:<x>:<channel>:group:<id>.
-  const groupMatch = key.match(/^agent:[^:]+:([^:]+):group:(.+)$/);
+  // Group chat: agent:<x>:<channel>[:<account>]:group:<id>.
+  const groupMatch = key.match(/^agent:[^:]+:([^:]+)(?::([^:]+))?:group:(.+)$/);
   if (groupMatch) {
     const channel = groupMatch[1];
+    const accountId = nonDefaultAccountId(groupMatch[2]);
     if (!channel) {
-      return { prefix: "", fallbackName: key };
+      return { prefix: "", fallbackName: key, accountId };
     }
     const channelLabel = CHANNEL_LABELS[channel] ?? capitalize(channel);
-    return { prefix: "", fallbackName: `${channelLabel} Group` };
+    return { prefix: "", fallbackName: `${channelLabel} Group`, accountId };
   }
 
   // Channel-prefixed keys like "telegram:123": durable session rows written by
@@ -206,7 +240,7 @@ export function resolveSessionDisplayName(
   const label = normalizeOptionalString(row?.label) ?? "";
   const displayName = normalizeOptionalString(row?.displayName) ?? "";
   const derivedTitle = normalizeOptionalString(row?.derivedTitle) ?? "";
-  const { kind, prefix, fallbackName } = parseSessionKey(key);
+  const { kind, prefix, fallbackName, accountId } = parseSessionKey(key);
 
   const applyTypedPrefix = (rawName: string): string => {
     if (!kind || !prefix) {
@@ -227,20 +261,20 @@ export function resolveSessionDisplayName(
   };
 
   if (label && label !== key) {
-    return applyTypedPrefix(label);
+    return withAccountDisambiguator(applyTypedPrefix(label), accountId);
   }
   if (displayName && displayName !== key) {
-    return applyTypedPrefix(displayName);
+    return withAccountDisambiguator(applyTypedPrefix(displayName), accountId);
   }
   // Unnamed work sessions read as their checkout instead of an opaque key.
   const workSubtitle = row ? resolveSessionWorkSubtitle(row) : undefined;
   if (workSubtitle && row?.worktree) {
-    return applyTypedPrefix(workSubtitle);
+    return withAccountDisambiguator(applyTypedPrefix(workSubtitle), accountId);
   }
   if (derivedTitle && derivedTitle !== key) {
-    return applyTypedPrefix(derivedTitle);
+    return withAccountDisambiguator(applyTypedPrefix(derivedTitle), accountId);
   }
-  return fallbackName;
+  return withAccountDisambiguator(fallbackName, accountId);
 }
 
 export function isCronSessionKey(key: string): boolean {
