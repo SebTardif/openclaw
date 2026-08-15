@@ -61,6 +61,12 @@ export type SidebarRecentSession = {
   createdActor?: SessionCreatedActor;
   archivedBy?: SessionCreatedActor;
   label: string;
+  /**
+   * Stored user label, undecorated. `label` above is the resolved display name
+   * and can carry a derived account or channel; rename edits this one so a
+   * derived string never lands back in persisted state.
+   */
+  userLabel?: string;
   /** Compact repo/branch/node line for work sessions. */
   subtitle?: string;
   href: string;

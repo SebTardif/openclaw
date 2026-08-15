@@ -105,13 +105,21 @@ describe("resolveSessionDisplayName", () => {
     );
   });
 
-  it("keeps the account discriminator idempotent when a rename stores it back", () => {
+  it("takes the account from the gateway row, not the key", () => {
+    // Only the projection carries account identity here; the key has none.
     expect(
-      resolveSessionDisplayName("agent:main:telegram:cards:direct:42", {
+      resolveSessionDisplayName("agent:main:telegram:direct:42", {
         accountId: "cards",
-        label: "Alice · cards",
+        displayName: "Alice",
       }),
     ).toBe("Alice · cards");
+    // When the two disagree, the route the Gateway parsed wins over the guess.
+    expect(
+      resolveSessionDisplayName("agent:main:telegram:cards:direct:42", {
+        accountId: "ops",
+        displayName: "Alice",
+      }),
+    ).toBe("Alice · ops");
   });
 
   it("does not split UTF-16 surrogate pairs when shortening peer ids", () => {
@@ -253,7 +261,7 @@ describe("resolveChannelSessionInfo", () => {
       channel: "telegram",
       channelSession: true,
     });
-    expect(resolveChannelSessionInfo("agent:main:slack:acct-1:channel:C1")).toEqual({
+    expect(resolveChannelSessionInfo("agent:main:slack:channel:C1")).toEqual({
       channel: "slack",
       channelSession: true,
     });
@@ -266,7 +274,14 @@ describe("resolveChannelSessionInfo", () => {
       channel: "whatsapp",
       channelSession: true,
     });
-    // A custom key holding a peer kind where the channel belongs names no channel.
+    // Accounts qualify direct chats only, so these key shapes name no channel
+    // and must not be filed under one the canonical parser would reject.
+    expect(resolveChannelSessionInfo("agent:main:telegram:work:group:room")).toEqual({
+      channelSession: false,
+    });
+    expect(resolveChannelSessionInfo("agent:main:slack:acct-1:channel:C1")).toEqual({
+      channelSession: false,
+    });
     expect(resolveChannelSessionInfo("agent:main:dm:account:group:room")).toEqual({
       channelSession: false,
     });

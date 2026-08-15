@@ -39,10 +39,12 @@ const WORKTREE_BRANCH_PREFIX = "openclaw/";
 
 // `dm` is the pre-#11881 spelling of `direct`; those keys still persist and the
 // canonical parser still accepts both (src/sessions/session-key-utils.ts).
+// Only direct chats take an account segment (src/routing/session-key.ts), so an
+// account-qualified group or channel key is not a shape any producer emits and
+// must not name a channel here either.
 const CHANNEL_SESSION_KEY_RE =
-  /^agent:[^:]+:([^:]+)(?::[^:]+)?:(?:direct|dm|group|channel|thread):/;
+  /^agent:[^:]+:([^:]+)(?:(?::[^:]+)?:(?:direct|dm)|:(?:group|channel|thread)):/;
 const PEER_SESSION_KEY_RE = /:(?:direct|dm|group|channel|thread):/;
-const DIRECT_PEER_KIND_SEGMENTS = new Set(["direct", "dm"]);
 
 /**
  * Classifies channel-originated sessions for the sidebar's built-in channel
@@ -57,11 +59,7 @@ export function resolveChannelSessionInfo(
     return { channelSession: false };
   }
   const keyChannel = key.match(CHANNEL_SESSION_KEY_RE)?.[1];
-  // A per-peer key (`agent:<x>:direct:<peer>`) captures the peer kind, not a
-  // channel; only the row can name the channel then.
-  const namedChannel =
-    keyChannel && !DIRECT_PEER_KIND_SEGMENTS.has(keyChannel) ? keyChannel : undefined;
-  const channel = normalizeOptionalString(namedChannel) ?? normalizeOptionalString(rowChannel);
+  const channel = normalizeOptionalString(keyChannel) ?? normalizeOptionalString(rowChannel);
   return { channel, channelSession: Boolean(channel) };
 }
 
@@ -112,15 +110,12 @@ type SessionKeyInfo = {
 /**
  * Two DMs from different accounts routinely share a name, so the account is the
  * only discriminator; `default` is what key builders write for absence and says
- * nothing. Re-suffixing is skipped because the sidebar rename dialog pre-fills
- * with this resolved name, which can come back in as a stored label.
+ * nothing. The account is appended from the recorded fact alone — never by
+ * inspecting the rendered name, which cannot tell an account apart from a user
+ * label that happens to read like one.
  */
 function withAccountDisambiguator(name: string, accountId: string | undefined): string {
-  if (!accountId || accountId === "default") {
-    return name;
-  }
-  const suffix = ` · ${accountId}`;
-  return name.endsWith(suffix) ? name : `${name}${suffix}`;
+  return !accountId || accountId === "default" ? name : `${name} · ${accountId}`;
 }
 
 /** Typed-session prefixes come from the i18n catalog (RFC 0026). */
