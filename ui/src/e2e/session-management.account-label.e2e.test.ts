@@ -59,4 +59,44 @@ suite.define(() => {
       await context.close();
     }
   });
+
+  it("opens rename on the stored label, not the account-decorated name", async () => {
+    const cardsKey = "agent:main:telegram:cards:direct:42";
+    const context = await suite.browser.newContext({
+      locale: "en-US",
+      serviceWorkers: "block",
+      viewport: { height: 900, width: 1280 },
+    });
+    const page = await context.newPage();
+    await installMockGateway(page, {
+      methodResponses: {
+        "sessions.list": sessionsListResponse([gatewayDirectRow(cardsKey, Date.now(), "cards")]),
+      },
+      sessionKey: cardsKey,
+    });
+
+    try {
+      await page.goto(`${suite.server.baseUrl}chat`);
+      const row = page.locator(`[data-session-key="${cardsKey}"]`);
+      await row.waitFor({ state: "visible", timeout: 10_000 });
+      // The row itself carries the account discriminator, so a rename field that
+      // echoed the rendered name would look plausible while persisting it.
+      await expect
+        .poll(() => trimmedTextContents(row.locator(".sidebar-recent-session__name")))
+        .toEqual(["Alice · cards"]);
+
+      await row.hover();
+      await row.getByRole("button", { name: "Open session menu" }).click();
+      await page.getByRole("menuitem", { name: "Rename…" }).click();
+      const field = page
+        .locator('openclaw-modal-dialog[label="Rename session"]')
+        .getByRole("textbox", { name: "Rename session" });
+      await field.waitFor({ state: "visible" });
+      // This row has no stored label, so the field starts empty. Submitting the
+      // decorated name here is what used to freeze it into persisted state.
+      expect(await field.inputValue()).toBe("");
+    } finally {
+      await context.close();
+    }
+  });
 });
