@@ -38,53 +38,80 @@ describe("resolveSessionDisplayName", () => {
     expect(resolveSessionDisplayName("agent:main:imessage:direct:+4912")).toBe("iMessage · +4912");
   });
 
-  it("surfaces a non-default account on unnamed DM and group fallbacks", () => {
+  // Rows are shaped like the Gateway projection: displayName plus the
+  // accountId it derives from the canonical route, no user label.
+  it.each([
+    {
+      name: "an account-less direct row keeps its plain name",
+      key: "agent:main:telegram:direct:42",
+      row: { displayName: "Alice" },
+      expected: "Alice",
+    },
+    {
+      name: "an account-qualified direct row names its account",
+      key: "agent:main:telegram:cards:direct:42",
+      row: { accountId: "cards", displayName: "Alice" },
+      expected: "Alice · cards",
+    },
+    {
+      name: "a shipped dm-spelled row names its account",
+      key: "agent:main:telegram:cards:dm:42",
+      row: { accountId: "cards", displayName: "Alice" },
+      expected: "Alice · cards",
+    },
+    {
+      name: "an unnamed shipped dm row reads as a friendly peer plus account",
+      key: "agent:main:telegram:cards:dm:491234567890",
+      row: { accountId: "cards" },
+      expected: "Telegram · …567890 · cards",
+    },
+    {
+      name: "the default account adds no discriminator",
+      key: "agent:main:telegram:default:direct:42",
+      row: { accountId: "default", displayName: "Alice" },
+      expected: "Alice",
+    },
+    {
+      name: "a human label that merely looks account-shaped still gets a discriminator",
+      key: "agent:main:telegram:work:direct:42",
+      row: { accountId: "work", label: "Alice (work)" },
+      expected: "Alice (work) · work",
+    },
+    {
+      name: "a canonical group key is unchanged",
+      key: "agent:main:telegram:group:-1001234567890",
+      row: undefined,
+      expected: "Telegram Group",
+    },
+    {
+      name: "an account-looking group key is not read as an account-qualified group",
+      key: "agent:main:dm:account:group:room",
+      row: undefined,
+      expected: "dm:account:group:room",
+    },
+  ])("$name", ({ key, row, expected }) => {
+    expect(resolveSessionDisplayName(key, row)).toBe(expected);
+  });
+
+  it("reads the account off the key only until the gateway row arrives", () => {
     expect(resolveSessionDisplayName("agent:main:telegram:cards:direct:42")).toBe(
       "Telegram · 42 · cards",
     );
-    expect(resolveSessionDisplayName("agent:main:telegram:cards:direct:491234567890")).toBe(
-      "Telegram · …567890 · cards",
-    );
-    expect(resolveSessionDisplayName("agent:main:signal:work:direct:+4912")).toBe(
+    expect(resolveSessionDisplayName("agent:main:signal:work:dm:+4912")).toBe(
       "Signal · +4912 · work",
     );
-    expect(resolveSessionDisplayName("agent:main:telegram:cards:group:-1001234567890")).toBe(
-      "Telegram Group · cards",
-    );
-  });
-
-  it("does not surface a default account segment in fallbacks", () => {
     expect(resolveSessionDisplayName("agent:main:telegram:default:direct:42")).toBe(
       "Telegram · 42",
     );
-    expect(resolveSessionDisplayName("agent:main:telegram:group:-1001234567890")).toBe(
-      "Telegram Group",
-    );
   });
 
-  it("keeps named label and displayName distinguishable across accounts", () => {
+  it("keeps the account discriminator idempotent when a rename stores it back", () => {
     expect(
       resolveSessionDisplayName("agent:main:telegram:cards:direct:42", {
-        label: "Alice",
-        displayName: "openclaw-tui",
+        accountId: "cards",
+        label: "Alice · cards",
       }),
     ).toBe("Alice · cards");
-    expect(
-      resolveSessionDisplayName("agent:main:telegram:cards:direct:42", { displayName: "Alice" }),
-    ).toBe("Alice · cards");
-    expect(
-      resolveSessionDisplayName("agent:main:telegram:direct:42", { displayName: "Alice" }),
-    ).toBe("Alice");
-    expect(
-      resolveSessionDisplayName("agent:main:telegram:cards:direct:42", {
-        displayName: "Alice · cards",
-      }),
-    ).toBe("Alice · cards");
-    expect(
-      resolveSessionDisplayName("agent:main:telegram:work:direct:42", {
-        displayName: "Alice (workflow)",
-      }),
-    ).toBe("Alice (workflow) · work");
   });
 
   it("does not split UTF-16 surrogate pairs when shortening peer ids", () => {
@@ -229,6 +256,19 @@ describe("resolveChannelSessionInfo", () => {
     expect(resolveChannelSessionInfo("agent:main:slack:acct-1:channel:C1")).toEqual({
       channel: "slack",
       channelSession: true,
+    });
+    // Shipped pre-#11881 keys spell direct chats `dm`; they are still channel sessions.
+    expect(resolveChannelSessionInfo("agent:main:telegram:cards:dm:42")).toEqual({
+      channel: "telegram",
+      channelSession: true,
+    });
+    expect(resolveChannelSessionInfo("agent:main:dm:+123", "whatsapp")).toEqual({
+      channel: "whatsapp",
+      channelSession: true,
+    });
+    // A custom key holding a peer kind where the channel belongs names no channel.
+    expect(resolveChannelSessionInfo("agent:main:dm:account:group:room")).toEqual({
+      channelSession: false,
     });
     // dmScope per-peer keys have no channel segment; the row channel wins.
     expect(resolveChannelSessionInfo("agent:main:direct:+123", "whatsapp")).toEqual({

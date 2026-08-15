@@ -11,6 +11,16 @@ import {
 
 const suite = createSessionManagementE2eSuite();
 
+/**
+ * An ordinary Gateway direct-chat row: an origin-derived `displayName`, no user
+ * label, and the `accountId` the Gateway projects from the canonical route
+ * (src/gateway/session-classification.ts). Without both traits this would
+ * exercise the label branch instead of the shipped one.
+ */
+function gatewayDirectRow(key: string, updatedAt: number, accountId?: string) {
+  return { ...sessionRow(key, "Alice", updatedAt), accountId, label: undefined };
+}
+
 suite.define(() => {
   it("disambiguates same-name sessions from different Telegram accounts in the sidebar", async () => {
     const defaultKey = "agent:main:telegram:direct:42";
@@ -25,8 +35,8 @@ suite.define(() => {
     await installMockGateway(page, {
       methodResponses: {
         "sessions.list": sessionsListResponse([
-          sessionRow(defaultKey, "Alice", 2),
-          sessionRow(cardsKey, "Alice", 1),
+          gatewayDirectRow(defaultKey, 2),
+          gatewayDirectRow(cardsKey, 1, "cards"),
         ]),
       },
       sessionKey: defaultKey,

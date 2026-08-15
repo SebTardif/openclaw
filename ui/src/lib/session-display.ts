@@ -20,9 +20,6 @@ const CHANNEL_LABELS: Record<string, string> = {
 
 const KNOWN_CHANNEL_KEYS = Object.keys(CHANNEL_LABELS);
 
-/** Account segment that session-key builders normalize absence to. */
-const DEFAULT_ACCOUNT_ID = "default";
-
 /** Raw peer ids stay out of the sidebar; keep a short recognizable tail only. */
 function shortenPeerId(identifier: string): string {
   const trimmed = identifier.trim();
@@ -40,8 +37,12 @@ function shortenOpaqueIdRuns(text: string): string {
 
 const WORKTREE_BRANCH_PREFIX = "openclaw/";
 
-const CHANNEL_SESSION_KEY_RE = /^agent:[^:]+:([^:]+)(?::[^:]+)?:(?:direct|group|channel|thread):/;
-const PEER_SESSION_KEY_RE = /:(?:direct|group|channel|thread):/;
+// `dm` is the pre-#11881 spelling of `direct`; those keys still persist and the
+// canonical parser still accepts both (src/sessions/session-key-utils.ts).
+const CHANNEL_SESSION_KEY_RE =
+  /^agent:[^:]+:([^:]+)(?::[^:]+)?:(?:direct|dm|group|channel|thread):/;
+const PEER_SESSION_KEY_RE = /:(?:direct|dm|group|channel|thread):/;
+const DIRECT_PEER_KIND_SEGMENTS = new Set(["direct", "dm"]);
 
 /**
  * Classifies channel-originated sessions for the sidebar's built-in channel
@@ -56,9 +57,11 @@ export function resolveChannelSessionInfo(
     return { channelSession: false };
   }
   const keyChannel = key.match(CHANNEL_SESSION_KEY_RE)?.[1];
-  const channel =
-    normalizeOptionalString(keyChannel && keyChannel !== "direct" ? keyChannel : undefined) ??
-    normalizeOptionalString(rowChannel);
+  // A per-peer key (`agent:<x>:direct:<peer>`) captures the peer kind, not a
+  // channel; only the row can name the channel then.
+  const namedChannel =
+    keyChannel && !DIRECT_PEER_KIND_SEGMENTS.has(keyChannel) ? keyChannel : undefined;
+  const channel = normalizeOptionalString(namedChannel) ?? normalizeOptionalString(rowChannel);
   return { channel, channelSession: Boolean(channel) };
 }
 
@@ -102,29 +105,22 @@ type SessionKeyInfo = {
   prefix: string;
   /** Human-readable fallback when no label / displayName is available. */
   fallbackName: string;
-  /**
-   * Non-default account from a per-account-channel-peer key. Appended to
-   * named rows as well so two "Alice" DMs stay distinguishable.
-   */
+  /** Raw account segment; only a fallback, Gateway rows carry the real one. */
   accountId?: string;
 };
 
-function nonDefaultAccountId(account: string | undefined): string | undefined {
-  if (!account || account === DEFAULT_ACCOUNT_ID) {
-    return undefined;
-  }
-  return account;
-}
-
-function withAccountDisambiguator(name: string, accountId?: string): string {
-  if (!accountId) {
+/**
+ * Two DMs from different accounts routinely share a name, so the account is the
+ * only discriminator; `default` is what key builders write for absence and says
+ * nothing. Re-suffixing is skipped because the sidebar rename dialog pre-fills
+ * with this resolved name, which can come back in as a stored label.
+ */
+function withAccountDisambiguator(name: string, accountId: string | undefined): string {
+  if (!accountId || accountId === "default") {
     return name;
   }
   const suffix = ` · ${accountId}`;
-  if (name.endsWith(suffix) || name.endsWith(` (${accountId})`)) {
-    return name;
-  }
-  return `${name}${suffix}`;
+  return name.endsWith(suffix) ? name : `${name}${suffix}`;
 }
 
 /** Typed-session prefixes come from the i18n catalog (RFC 0026). */
@@ -138,6 +134,8 @@ type SessionDisplayRow = {
   label?: string;
   displayName?: string;
   derivedTitle?: string;
+  /** Canonical account projected from the delivery route by the Gateway. */
+  accountId?: string;
 } & SessionWorktreeDisplayRow;
 
 type SessionDisplayOptions = {
@@ -173,14 +171,13 @@ function parseSessionKey(key: string): SessionKeyInfo {
     return { kind: "automation", prefix, fallbackName: prefix };
   }
 
-  // Direct chat: agent:<x>:<channel>[:<account>]:direct:<id>. Never render the
-  // raw peer id; the gateway sends origin-derived names, so this is a last
-  // resort. A non-default account (per-account-channel-peer) is kept so
-  // multi-account rows stay distinguishable even when they share a name.
-  const directMatch = key.match(/^agent:[^:]+:([^:]+)(?::([^:]+))?:direct:(.+)$/);
+  // Direct chat: agent:<x>:<channel>[:<account>]:(direct|dm):<id>. Never render
+  // the raw peer id; the gateway sends origin-derived names, so this is a last
+  // resort.
+  const directMatch = key.match(/^agent:[^:]+:([^:]+)(?::([^:]+))?:(?:direct|dm):(.+)$/);
   if (directMatch) {
     const channel = directMatch[1];
-    const accountId = nonDefaultAccountId(directMatch[2]);
+    const accountId = directMatch[2];
     const identifier = directMatch[3];
     if (!channel || !identifier) {
       return { prefix: "", fallbackName: key, accountId };
@@ -193,16 +190,17 @@ function parseSessionKey(key: string): SessionKeyInfo {
     };
   }
 
-  // Group chat: agent:<x>:<channel>[:<account>]:group:<id>.
-  const groupMatch = key.match(/^agent:[^:]+:([^:]+)(?::([^:]+))?:group:(.+)$/);
+  // Group chat: agent:<x>:<channel>:group:<id>. buildAgentPeerSessionKey scopes
+  // accounts to DMs (src/routing/session-key.ts), so an account-looking segment
+  // here belongs to a custom key and must not be read as one.
+  const groupMatch = key.match(/^agent:[^:]+:([^:]+):group:(.+)$/);
   if (groupMatch) {
     const channel = groupMatch[1];
-    const accountId = nonDefaultAccountId(groupMatch[2]);
     if (!channel) {
-      return { prefix: "", fallbackName: key, accountId };
+      return { prefix: "", fallbackName: key };
     }
     const channelLabel = CHANNEL_LABELS[channel] ?? capitalize(channel);
-    return { prefix: "", fallbackName: `${channelLabel} Group`, accountId };
+    return { prefix: "", fallbackName: `${channelLabel} Group` };
   }
 
   // Channel-prefixed keys like "telegram:123": durable session rows written by
@@ -240,7 +238,10 @@ export function resolveSessionDisplayName(
   const label = normalizeOptionalString(row?.label) ?? "";
   const displayName = normalizeOptionalString(row?.displayName) ?? "";
   const derivedTitle = normalizeOptionalString(row?.derivedTitle) ?? "";
-  const { kind, prefix, fallbackName, accountId } = parseSessionKey(key);
+  const { kind, prefix, fallbackName, accountId: keyAccountId } = parseSessionKey(key);
+  // The Gateway records the account on the row (src/gateway/session-classification.ts);
+  // the key is parsed only for panes rendered before their row arrives.
+  const accountId = normalizeOptionalString(row?.accountId) ?? keyAccountId;
 
   const applyTypedPrefix = (rawName: string): string => {
     if (!kind || !prefix) {
@@ -260,21 +261,25 @@ export function resolveSessionDisplayName(
     return prefixPattern.test(name) ? name : `${prefix} ${name}`;
   };
 
-  if (label && label !== key) {
-    return withAccountDisambiguator(applyTypedPrefix(label), accountId);
-  }
-  if (displayName && displayName !== key) {
-    return withAccountDisambiguator(applyTypedPrefix(displayName), accountId);
-  }
-  // Unnamed work sessions read as their checkout instead of an opaque key.
-  const workSubtitle = row ? resolveSessionWorkSubtitle(row) : undefined;
-  if (workSubtitle && row?.worktree) {
-    return withAccountDisambiguator(applyTypedPrefix(workSubtitle), accountId);
-  }
-  if (derivedTitle && derivedTitle !== key) {
-    return withAccountDisambiguator(applyTypedPrefix(derivedTitle), accountId);
-  }
-  return withAccountDisambiguator(fallbackName, accountId);
+  const resolveNamedOrFallback = (): string => {
+    if (label && label !== key) {
+      return applyTypedPrefix(label);
+    }
+    if (displayName && displayName !== key) {
+      return applyTypedPrefix(displayName);
+    }
+    // Unnamed work sessions read as their checkout instead of an opaque key.
+    const workSubtitle = row ? resolveSessionWorkSubtitle(row) : undefined;
+    if (workSubtitle && row?.worktree) {
+      return applyTypedPrefix(workSubtitle);
+    }
+    if (derivedTitle && derivedTitle !== key) {
+      return applyTypedPrefix(derivedTitle);
+    }
+    return fallbackName;
+  };
+
+  return withAccountDisambiguator(resolveNamedOrFallback(), accountId);
 }
 
 export function isCronSessionKey(key: string): boolean {
