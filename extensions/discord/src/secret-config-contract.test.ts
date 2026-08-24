@@ -29,12 +29,20 @@ describe("Discord secret target registry", () => {
       "channels.discord.voice.tts.providers.openai.apiKey",
     ],
     [
+      "channels.discord.voice.tts.personas.*.providers.*.apiKey",
+      "channels.discord.voice.tts.personas.narrator.providers.openai.apiKey",
+    ],
+    [
       "channels.discord.accounts.*.voice.realtime.providers.*.apiKey",
       "channels.discord.accounts.work.voice.realtime.providers.openai.apiKey",
     ],
     [
       "channels.discord.accounts.*.voice.tts.providers.*.apiKey",
       "channels.discord.accounts.work.voice.tts.providers.openai.apiKey",
+    ],
+    [
+      "channels.discord.accounts.*.voice.tts.personas.*.providers.*.apiKey",
+      "channels.discord.accounts.work.voice.tts.personas.narrator.providers.openai.apiKey",
     ],
   ])("identifies the provider segment for %s", (targetId, concretePath) => {
     const entry = secretTargetRegistryEntries.find((candidate) => candidate.id === targetId);
@@ -148,5 +156,22 @@ describe("Discord secret target registry", () => {
         path: "channels.discord.accounts.work.voice.realtime.providers.openai.apiKey",
       },
     ]);
+  });
+
+  it("registers Discord voice TTS persona SecretRefs for plan/audit/configure", () => {
+    const root = secretTargetRegistryEntries.find(
+      (entry) => entry.id === "channels.discord.voice.tts.personas.*.providers.*.apiKey",
+    );
+    const account = secretTargetRegistryEntries.find(
+      (entry) => entry.id === "channels.discord.accounts.*.voice.tts.personas.*.providers.*.apiKey",
+    );
+    expect(root?.includeInPlan).toBe(true);
+    expect(root?.includeInAudit).toBe(true);
+    expect(root?.includeInConfigure).toBe(true);
+    expect(root?.providerIdPathSegmentIndex).toBe(7);
+    expect(account?.includeInPlan).toBe(true);
+    expect(account?.includeInAudit).toBe(true);
+    expect(account?.includeInConfigure).toBe(true);
+    expect(account?.providerIdPathSegmentIndex).toBe(9);
   });
 });

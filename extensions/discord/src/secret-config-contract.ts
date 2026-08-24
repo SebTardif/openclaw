@@ -17,9 +17,19 @@ import { collectNestedChannelTtsAssignments } from "openclaw/plugin-sdk/channel-
 function createVoiceProviderSecretTarget(params: {
   capability: "realtime" | "tts";
   scope: "account" | "channel";
+  personas?: boolean;
 }): SecretTargetRegistryEntry {
   const prefix = params.scope === "account" ? "channels.discord.accounts.*" : "channels.discord";
-  const path = `${prefix}.voice.${params.capability}.providers.*.apiKey`;
+  const path = params.personas
+    ? `${prefix}.voice.${params.capability}.personas.*.providers.*.apiKey`
+    : `${prefix}.voice.${params.capability}.providers.*.apiKey`;
+  const providerIdPathSegmentIndex = params.personas
+    ? params.scope === "account"
+      ? 9
+      : 7
+    : params.scope === "account"
+      ? 7
+      : 5;
   return {
     id: path,
     targetType: path,
@@ -30,7 +40,7 @@ function createVoiceProviderSecretTarget(params: {
     includeInPlan: true,
     includeInConfigure: true,
     includeInAudit: true,
-    providerIdPathSegmentIndex: params.scope === "account" ? 7 : 5,
+    providerIdPathSegmentIndex,
   };
 }
 
@@ -67,6 +77,7 @@ export const secretTargetRegistryEntries: SecretTargetRegistryEntry[] = [
   },
   createVoiceProviderSecretTarget({ capability: "realtime", scope: "account" }),
   createVoiceProviderSecretTarget({ capability: "tts", scope: "account" }),
+  createVoiceProviderSecretTarget({ capability: "tts", scope: "account", personas: true }),
   {
     id: "channels.discord.pluralkit.token",
     targetType: "channels.discord.pluralkit.token",
@@ -91,6 +102,7 @@ export const secretTargetRegistryEntries: SecretTargetRegistryEntry[] = [
   },
   createVoiceProviderSecretTarget({ capability: "realtime", scope: "channel" }),
   createVoiceProviderSecretTarget({ capability: "tts", scope: "channel" }),
+  createVoiceProviderSecretTarget({ capability: "tts", scope: "channel", personas: true }),
 ];
 
 export function collectRuntimeConfigAssignments(params: {

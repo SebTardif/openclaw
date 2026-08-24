@@ -38,10 +38,12 @@ The lists below are generated from the source target registry and checked agains
 - `skills.entries.*.apiKey`
 - `memory.search.remote.apiKey`
 - `agents.entries.*.tts.providers.*.apiKey`
+- `agents.entries.*.tts.personas.*.providers.*.apiKey`
 - `agents.entries.*.memory.search.remote.apiKey`
 - `talk.providers.*.apiKey`
 - `talk.realtime.providers.*.apiKey`
 - `tts.providers.*.apiKey`
+- `tts.personas.*.providers.*.apiKey`
 - `plugins.entries.acpx.config.mcpServers.*.env.*`
 - `plugins.entries.brave.config.webSearch.apiKey`
 - `plugins.entries.codex.config.appServer.authToken`
@@ -92,10 +94,12 @@ The lists below are generated from the source target registry and checked agains
 - `channels.discord.pluralkit.token`
 - `channels.discord.voice.realtime.providers.*.apiKey`
 - `channels.discord.voice.tts.providers.*.apiKey`
+- `channels.discord.voice.tts.personas.*.providers.*.apiKey`
 - `channels.discord.accounts.*.token`
 - `channels.discord.accounts.*.pluralkit.token`
 - `channels.discord.accounts.*.voice.realtime.providers.*.apiKey`
 - `channels.discord.accounts.*.voice.tts.providers.*.apiKey`
+- `channels.discord.accounts.*.voice.tts.personas.*.providers.*.apiKey`
 - `channels.irc.password`
 - `channels.irc.nickserv.password`
 - `channels.irc.accounts.*.password`
