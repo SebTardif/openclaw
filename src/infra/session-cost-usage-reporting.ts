@@ -42,6 +42,7 @@ import type {
 } from "./session-cost-usage.types.js";
 
 const USAGE_COST_DIRECT_REFRESH_RETRY_MS = 25;
+const USAGE_COST_DIRECT_REFRESH_MAX_WAIT_MS = 5_000;
 
 export async function discoverAllSessions(params: {
   agentId: string;
@@ -137,6 +138,7 @@ export async function loadSessionCostSummary(params: {
     if (inventory.files.length === 0) {
       return null;
     }
+    const refreshWaitStartedAt = Date.now();
     while (
       (await refreshCostUsageCacheForAgent({
         config: scoped.config,
@@ -149,6 +151,9 @@ export async function loadSessionCostSummary(params: {
         incognito: scoped.incognito,
       })) === "busy"
     ) {
+      if (Date.now() - refreshWaitStartedAt >= USAGE_COST_DIRECT_REFRESH_MAX_WAIT_MS) {
+        break;
+      }
       // Direct detail callers require the requested session, unlike background
       // summary refreshes. Wait for the agent-wide writer to release, then retry.
       await sleep(USAGE_COST_DIRECT_REFRESH_RETRY_MS);
