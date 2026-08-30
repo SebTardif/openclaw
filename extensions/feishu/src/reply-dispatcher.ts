@@ -30,6 +30,9 @@ import { chunkFeishuPostMarkdown, materializeFeishuPostMarkdownSoftBreaks } from
 import { buildFeishuMediaFallbackText } from "./media-fallback.js";
 import { sendMediaFeishu, shouldSuppressFeishuTextForVoiceMedia } from "./media.js";
 import type { MentionTarget } from "./mention-target.types.js";
+import { buildMentionedCardContent } from "./mention.js";
+import { buildFeishuPayloadCard } from "./outbound.js";
+import { isFeishuCardWithinEnvelope } from "./presentation-card.js";
 import {
   createFeishuPartialReplyDeliveryError,
   createFeishuReplyDeliveryResult,
@@ -43,6 +46,7 @@ import { streamingStartBackoffUntilByAccount } from "./reply-dispatcher-state.js
 import { getFeishuRuntime } from "./runtime.js";
 import {
   chunkFeishuCardMarkdown,
+  sendCardFeishu,
   sendMessageFeishu,
   sendStructuredCardFeishu,
   type CardHeaderConfig,
@@ -1295,20 +1299,35 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         );
       const finalTextExceedsStreamingLimit =
         info?.kind === "final" && hasText && text.length > textChunkLimit;
+      // Interactive / presentation blocks (buttons, approval cards) require the
+      // presentation-aware card path. Plain text + markdown card heuristics alone
+      // drop buttons (issue #119616).
+      const interactiveCard =
+        info?.kind === "final"
+          ? buildFeishuPayloadCard({
+              payload,
+              text: text ?? payload.text,
+              identity,
+            })
+          : undefined;
+      const hasInteractiveCard = Boolean(interactiveCard);
       const useStaticCard =
-        hasText &&
-        (renderMode === "card" ||
+        (hasText || hasInteractiveCard) &&
+        (hasInteractiveCard ||
+          renderMode === "card" ||
           (info?.kind === "block" && coreBlockStreamingEnabled && renderMode !== "raw") ||
-          (renderMode === "auto" && shouldUseCard(text)));
+          (renderMode === "auto" && shouldUseCard(text ?? "")));
       const useStreamingCard =
         hasText &&
+        !hasInteractiveCard &&
         streamingEnabled &&
         !finalTextExceedsStreamingLimit &&
         (info?.kind === "final" || useStaticCard);
       const useCard = useStaticCard || useStreamingCard;
       const skipTextForDuplicateFinal =
         info?.kind === "final" && hasText && deliveredFinalTexts.has(text);
-      const shouldDeliverText = hasText && !hasVoiceMedia && !skipTextForDuplicateFinal;
+      const shouldDeliverText =
+        (hasText || hasInteractiveCard) && !hasVoiceMedia && !skipTextForDuplicateFinal;
       const shouldDiscardStreamingPreview =
         info?.kind === "final" &&
         (finalTextExceedsStreamingLimit ||
@@ -1351,6 +1370,68 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
 
       if (shouldDiscardStreamingPreview) {
         await discardStreamingPreview();
+      }
+
+      // Interactive/presentation finals must win over any active streaming preview.
+      // The active-preview branch below returns before sendCardFeishu, which would
+      // still drop buttons in the common partial/card streaming flow (#119616).
+      // Preview-disposal transition carried from 5d5f2d971d5e (licheer-zte).
+      if (interactiveCard) {
+        if (streaming?.isActive() || streamingStartPromise) {
+          await discardStreamingPreview();
+        }
+        let cardToSend = interactiveCard;
+        if (requiredMentionTargets?.length) {
+          const mentionContent = buildMentionedCardContent(requiredMentionTargets, "").trim();
+          const body = cardToSend.body;
+          if (
+            mentionContent &&
+            body &&
+            typeof body === "object" &&
+            !Array.isArray(body) &&
+            // SAFETY: body is a non-null object; we only read optional elements.
+            Array.isArray((body as { elements?: unknown }).elements)
+          ) {
+            // SAFETY: the guard above proved elements is an array.
+            const bodyRecord = body as { elements: unknown[] };
+            const withMentions = {
+              ...cardToSend,
+              body: {
+                ...bodyRecord,
+                elements: [{ tag: "markdown", content: mentionContent }, ...bodyRecord.elements],
+              },
+            };
+            // buildFeishuPayloadCard already enforced the envelope; revalidate after
+            // mutation so a 200-element card + mention never becomes a 201-element send.
+            cardToSend = isFeishuCardWithinEnvelope(withMentions) ? withMentions : interactiveCard;
+          }
+        }
+        deliveredResults.push(
+          createFeishuReplyDeliveryResult({
+            results: [
+              await sendCardFeishu({
+                cfg,
+                to: sendTarget,
+                card: cardToSend,
+                replyToMessageId: sendReplyToMessageId,
+                replyInThread: effectiveReplyInThread,
+                allowTopLevelReplyFallback,
+                accountId,
+              }),
+            ],
+            visibleReplySent: true,
+            content: text ?? payload.text ?? "",
+            kind: "card",
+          }),
+        );
+        markVisibleReplySent();
+        if (info?.kind === "final" && text) {
+          deliveredFinalTexts.add(text);
+        }
+        if (hasMedia) {
+          await collectMediaDelivery(payload);
+        }
+        return mergeFeishuReplyDeliveryResults(deliveredResults, text ?? payload.text ?? "");
       }
 
       if (shouldDeliverText) {
