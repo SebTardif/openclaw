@@ -56,6 +56,10 @@ function isEventStreamResponse(response: Response): boolean {
 
 const JSON_RPC_ID_MAX_CHARS = 256;
 
+function isJsonRpcId(value: unknown): value is string | number {
+  return typeof value === "string" || typeof value === "number";
+}
+
 // Find the top-level JSON-RPC id without materializing the event. An id that
 // arrives late stays under the catalog cap, so field ordering cannot bypass it.
 class JsonRpcEventIdScanner {
@@ -136,7 +140,8 @@ class JsonRpcEventIdScanner {
     this.inString = false;
     if (this.stringRole === "key") {
       try {
-        this.key = JSON.parse(`"${this.stringValue}"`) as string;
+        const value: unknown = JSON.parse(`"${this.stringValue}"`);
+        this.key = typeof value === "string" ? value : undefined;
       } catch {
         this.key = undefined;
       }
@@ -287,6 +292,25 @@ function withMcpHttpResponseLimits(
     limitMcpHttpResponse(await fetchFn(input, init), init, catalogRequestIds);
 }
 
+type EventSourceLikeResponse = {
+  status: number;
+  headers: { get(name: string): string | null };
+  body: unknown;
+};
+
+function toWebResponse(response: Response | EventSourceLikeResponse): Response {
+  if (response instanceof Response) {
+    return response;
+  }
+  const headers = new Headers();
+  const contentType = response.headers.get("content-type");
+  if (contentType) {
+    headers.set("content-type", contentType);
+  }
+  const body = response.body instanceof ReadableStream ? response.body : null;
+  return new Response(body, { status: response.status, headers });
+}
+
 abstract class OpenClawMcpHttpTransport implements Transport {
   onclose?: () => void;
   onerror?: (error: Error) => void;
@@ -316,14 +340,14 @@ abstract class OpenClawMcpHttpTransport implements Transport {
       return message.id;
     }
     const cancelled = CancelledNotificationSchema.safeParse(message);
-    if (cancelled.success) {
+    if (cancelled.success && isJsonRpcId(cancelled.data.params.requestId)) {
       this.catalogRequestIds.delete(cancelled.data.params.requestId);
     }
     return undefined;
   }
 
   protected emitMessage(message: JSONRPCMessage): void {
-    if ("id" in message) {
+    if ("id" in message && isJsonRpcId(message.id)) {
       this.catalogRequestIds.delete(message.id);
     }
     this.onmessage?.(message);
@@ -362,16 +386,12 @@ export class OpenClawSSEClientTransport extends OpenClawMcpHttpTransport {
         ? {
             eventSourceInit: {
               ...eventSourceInit,
-              fetch: configuredEventSourceFetch
-                ? withMcpHttpResponseLimits(
-                    (input, init) =>
-                      configuredEventSourceFetch(
-                        input instanceof Request ? input.url : input,
-                        init,
-                      ),
-                    this.catalogRequestIds,
-                  )
-                : limitedFetch,
+              fetch: async (eventUrl, init) => {
+                const raw = configuredEventSourceFetch
+                  ? await configuredEventSourceFetch(eventUrl, init)
+                  : await limitedFetch(eventUrl, init);
+                return limitMcpHttpResponse(toWebResponse(raw), init, this.catalogRequestIds);
+              },
             },
           }
         : {}),

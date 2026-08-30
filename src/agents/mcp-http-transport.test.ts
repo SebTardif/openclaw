@@ -7,6 +7,17 @@ import {
   OpenClawStreamableHTTPClientTransport,
 } from "./mcp-http-transport.js";
 
+function textContentLength(content: unknown): number {
+  if (!Array.isArray(content) || content.length === 0) {
+    return 0;
+  }
+  const first: unknown = content[0];
+  if (!first || typeof first !== "object" || !("type" in first) || first.type !== "text") {
+    return 0;
+  }
+  return "text" in first && typeof first.text === "string" ? first.text.length : 0;
+}
+
 function jsonResponse(value: unknown, init?: ResponseInit): Response {
   const headers = new Headers(init?.headers);
   headers.set("content-type", "application/json");
@@ -233,8 +244,7 @@ describe("OpenClaw MCP HTTP lifecycle adapters", () => {
       );
       await vi.waitFor(() => expect(catalogRequestId).toBeDefined());
       const toolResult = await client.callTool({ name: "large_result", arguments: {} });
-      const first = toolResult.content[0];
-      expect(first?.type === "text" ? first.text.length : 0).toBe(OVERSIZED_MCP_TEXT.length);
+      expect(textContentLength(toolResult.content)).toBe(OVERSIZED_MCP_TEXT.length);
       const catalogPayload = JSON.stringify({
         jsonrpc: "2.0",
         result: {
@@ -282,9 +292,7 @@ describe("OpenClaw MCP HTTP lifecycle adapters", () => {
     try {
       await client.connect(transport);
       const result = await client.callTool({ name: "large_result", arguments: {} });
-      const first = result.content[0];
-      expect(first?.type).toBe("text");
-      expect(first?.type === "text" ? first.text.length : 0).toBe(OVERSIZED_MCP_TEXT.length);
+      expect(textContentLength(result.content)).toBe(OVERSIZED_MCP_TEXT.length);
     } finally {
       await disposeMcpClient({ client, transport, transportType: "streamable-http" });
     }
