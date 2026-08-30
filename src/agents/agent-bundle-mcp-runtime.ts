@@ -38,6 +38,7 @@ import type {
   SessionMcpRuntime,
   SessionMcpRuntimeManager,
 } from "./agent-bundle-mcp-types.js";
+import { MCP_CATALOG_MAX_BYTES } from "./mcp-catalog-limits.js";
 import {
   connectMcpClient,
   disposeMcpClient,
@@ -86,7 +87,6 @@ const BUNDLE_MCP_DISPOSE_TIMEOUT_MS = 5_000;
 const BUNDLE_MCP_CATALOG_CONNECT_CONCURRENCY = 6;
 const BUNDLE_MCP_MAX_LIST_PAGES = 128;
 const BUNDLE_MCP_MAX_LIST_ITEMS = 16_384;
-const BUNDLE_MCP_MAX_LIST_BYTES = 10 * 1024 * 1024;
 let bundleMcpCatalogListTimeoutMs: number | undefined;
 const BUNDLE_MCP_TEST_STATE_KEY = Symbol.for("openclaw.bundleMcpTestState");
 type BundleMcpTestState = { disposeTimeoutMs?: number };
@@ -121,7 +121,7 @@ async function listAllTools(
     timeoutMs,
     maxPages: BUNDLE_MCP_MAX_LIST_PAGES,
     maxItems: BUNDLE_MCP_MAX_LIST_ITEMS,
-    maxBytes: BUNDLE_MCP_MAX_LIST_BYTES,
+    maxBytes: MCP_CATALOG_MAX_BYTES,
     signal,
     loadPage: async ({ cursor, requestTimeoutMs, signal: requestSignal }) => {
       const requestController = new AbortController();
@@ -517,7 +517,7 @@ export function createSessionMcpRuntime(params: {
       timeoutMs: session.requestTimeoutMs,
       maxPages: BUNDLE_MCP_MAX_LIST_PAGES,
       maxItems: BUNDLE_MCP_MAX_LIST_ITEMS,
-      maxBytes: BUNDLE_MCP_MAX_LIST_BYTES,
+      maxBytes: MCP_CATALOG_MAX_BYTES,
       signal: callerSignal
         ? AbortSignal.any([lifecycleAbortController.signal, callerSignal])
         : lifecycleAbortController.signal,

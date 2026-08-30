@@ -14,6 +14,7 @@ import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/st
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import pLimit from "p-limit";
 import type { NodePluginToolDescriptor } from "../../packages/gateway-protocol/src/schema/nodes.js";
+import { MCP_CATALOG_MAX_BYTES } from "../agents/mcp-catalog-limits.js";
 import {
   connectMcpClient,
   disposeMcpClient,
@@ -45,7 +46,6 @@ const NODE_MCP_SERVER_FRAGMENT_MAX_CHARS = 31;
 const NODE_MCP_ERROR_MAX_CHARS = 1_024;
 const NODE_MCP_MAX_DESCRIPTORS = 128;
 const NODE_MCP_MAX_DESCRIPTOR_BYTES = 1024 * 1024;
-const NODE_MCP_MAX_CATALOG_BYTES = 10 * 1024 * 1024;
 const NODE_MCP_MAX_LIST_PAGES = NODE_MCP_MAX_DESCRIPTORS;
 // The byte cap charges every response; this separately bounds retained tiny-tool object overhead.
 const NODE_MCP_MAX_LISTED_TOOLS = NODE_MCP_MAX_DESCRIPTORS * NODE_MCP_MAX_LIST_PAGES;
@@ -213,7 +213,7 @@ function buildNodeMcpToolDescriptors(
     const descriptorBytes = Buffer.byteLength(JSON.stringify(descriptor));
     if (
       descriptorBytes > NODE_MCP_MAX_DESCRIPTOR_BYTES ||
-      catalogBytes + descriptorBytes > NODE_MCP_MAX_CATALOG_BYTES
+      catalogBytes + descriptorBytes > MCP_CATALOG_MAX_BYTES
     ) {
       continue;
     }
@@ -238,7 +238,7 @@ async function listAllTools(
     timeoutMs,
     maxPages: NODE_MCP_MAX_LIST_PAGES,
     maxItems: NODE_MCP_MAX_LISTED_TOOLS,
-    maxBytes: NODE_MCP_MAX_CATALOG_BYTES,
+    maxBytes: MCP_CATALOG_MAX_BYTES,
     signal,
     loadPage: async ({ cursor, requestTimeoutMs, signal: requestSignal }) => {
       const page = await client.request(
