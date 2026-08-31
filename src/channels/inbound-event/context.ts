@@ -528,6 +528,9 @@ function buildChannelInboundEventContextValue(
   });
 
   const context = {
+    // Extra is applied first. Host-owned session, sender, and command-authorization
+    // fields must win after that merge. Spreading extra last lets those facts change.
+    ...params.extra,
     Body: body,
     InboundEventKind: params.message.inboundEventKind ?? "user_request",
     BodyForAgent: params.message.bodyForAgent ?? params.message.rawBody,
@@ -589,7 +592,6 @@ function buildChannelInboundEventContextValue(
     // that fact so interceptors cannot bypass sender, route, or pairing gates.
     InboundAccessAuthorized: true,
     ConversationRouteContextObserved: params.conversation.routePeer ? true : undefined,
-    ...params.extra,
   };
   const finalizeParams = {
     finalize: params.finalize,

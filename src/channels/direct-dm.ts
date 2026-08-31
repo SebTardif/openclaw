@@ -117,9 +117,11 @@ async function buildDirectDmContext(
     access: { commands: { authorized: params.commandAuthorized === true } },
     channelIngress: params.channelIngress,
     extra: {
+      // Extra is applied first. Native direct-user and originating-channel
+      // identity stay host-owned. Spreading extra last lets those keys change.
+      ...params.extraContext,
       NativeDirectUserId: params.peer.id,
       OriginatingChannel: params.originatingChannel ?? params.channel,
-      ...params.extraContext,
     },
   });
 }
@@ -218,6 +220,9 @@ export async function dispatchInboundDirectDmWithRuntime(
     timestamp: params.timestamp,
   });
   const ctxPayload = params.runtime.channel.reply.finalizeInboundContext({
+    // Extra is applied first. Host-owned session, sender, and command-authorization
+    // fields must win after that merge. Spreading extra last lets those facts change.
+    ...params.extraContext,
     Body: body,
     BodyForAgent: params.bodyForAgent ?? params.rawBody,
     RawBody: params.rawBody,
@@ -243,7 +248,6 @@ export async function dispatchInboundDirectDmWithRuntime(
     OriginatingChannel: params.originatingChannel ?? params.channel,
     OriginatingTo: params.originatingTo ?? params.senderAddress,
     NativeDirectUserId: params.peer.id,
-    ...params.extraContext,
   });
   const plan = buildDirectDmTurnPlan(params, route, ctxPayload);
   await params.runtime.channel.inbound.run({
