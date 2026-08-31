@@ -534,6 +534,9 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
 
   const requestDrain = (): void => {
     if (!running || isAborted() || isGatewayRestartDraining()) {
+      // Restart drain must not leave requested latched, or waitForIdle
+      // busy-spins on already-resolved awaits.
+      requested = false;
       publishActivity();
       return;
     }
@@ -745,7 +748,7 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
         await waitForPumpIdle();
         await waitForActiveDeliveries();
         await drain?.waitForIdle();
-        if (!pumping && activeDeliveries.size === 0 && !requested) {
+        if (!pumping && activeDeliveries.size === 0 && (!requested || isGatewayRestartDraining())) {
           return;
         }
       }
