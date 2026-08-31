@@ -8,8 +8,11 @@ import {
   getActiveGatewayRootWorkCount,
   getGatewayRestartDrainSignal,
   getGatewaySuspendAdmissionPhase,
+  isGatewayRestartDrainCommitted,
   isGatewayRestartDrainError,
+  isGatewayRestartDraining,
   isGatewaySubordinateWorkAdmissionClosed,
+  waitForGatewayRestartFenceSettlement,
   isGatewayWorkAdmissionClosed,
   markGatewayRestartDraining,
   retainGatewayRootWorkAdmissionContinuation,
@@ -26,6 +29,33 @@ import { runWithGatewayRootWorkAdmissionForTest } from "./gateway-work-admission
 
 beforeEach(resetGatewayWorkAdmission);
 afterEach(resetGatewayWorkAdmission);
+
+it("treats the restart signal fence as draining but not committed", async () => {
+  expect(isGatewayRestartDraining()).toBe(false);
+  expect(isGatewayRestartDrainCommitted()).toBe(false);
+
+  const signal = beginGatewayRestartSignalAdmission();
+  expect(isGatewayRestartDraining()).toBe(true);
+  expect(isGatewayRestartDrainCommitted()).toBe(false);
+
+  const pending = waitForGatewayRestartFenceSettlement();
+  const raced = await Promise.race([
+    pending.then(() => "settled" as const),
+    new Promise<"pending">((resolve) => {
+      setTimeout(() => resolve("pending"), 20);
+    }),
+  ]);
+  expect(raced).toBe("pending");
+  expect(signal?.rollback()).toBe(true);
+  await expect(pending).resolves.toBeUndefined();
+  expect(isGatewayRestartDraining()).toBe(false);
+  expect(isGatewayRestartDrainCommitted()).toBe(false);
+
+  markGatewayRestartDraining();
+  expect(isGatewayRestartDraining()).toBe(true);
+  expect(isGatewayRestartDrainCommitted()).toBe(true);
+  await expect(waitForGatewayRestartFenceSettlement()).resolves.toBeUndefined();
+});
 
 it("classifies draining errors only while an authoritative restart signal or drain is active", () => {
   const error = new GatewayDrainingError();

@@ -1,6 +1,10 @@
 /** Shared durable channel-ingress admission, pump, retention, and shutdown lifecycle. */
 import { formatErrorMessage, toErrorObject } from "../../infra/errors.js";
-import { isGatewayRestartDraining } from "../../process/gateway-work-admission.js";
+import {
+  isGatewayRestartDrainCommitted,
+  isGatewayRestartDraining,
+  waitForGatewayRestartFenceSettlement,
+} from "../../process/gateway-work-admission.js";
 import { sleep } from "../../utils/sleep.js";
 import {
   createChannelIngressDrain,
@@ -533,10 +537,17 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
   };
 
   const requestDrain = (): void => {
-    if (!running || isAborted() || isGatewayRestartDraining()) {
-      // Restart drain must not leave requested latched, or waitForIdle
-      // busy-spins on already-resolved awaits.
+    if (!running || isAborted() || isGatewayRestartDrainCommitted()) {
+      // One-way restart drain must not leave requested latched, or
+      // waitForIdle busy-spins on already-resolved awaits.
       requested = false;
+      publishActivity();
+      return;
+    }
+    if (isGatewayRestartDraining()) {
+      // Reversible signal fence: keep the drain request so waitForIdle
+      // stays pending until rollback reopens admission or drain commits.
+      requested = true;
       publishActivity();
       return;
     }
@@ -748,8 +759,18 @@ export function createChannelIngressMonitor<TRaw, TBody, TStoredPayload, TMetada
         await waitForPumpIdle();
         await waitForActiveDeliveries();
         await drain?.waitForIdle();
-        if (!pumping && activeDeliveries.size === 0 && (!requested || isGatewayRestartDraining())) {
+        if (
+          !pumping &&
+          activeDeliveries.size === 0 &&
+          (!requested || isGatewayRestartDrainCommitted())
+        ) {
           return;
+        }
+        if (requested && isGatewayRestartDraining() && !isGatewayRestartDrainCommitted()) {
+          await waitForGatewayRestartFenceSettlement();
+          if (running && !isAborted() && requested && !isGatewayRestartDrainCommitted()) {
+            requestDrain();
+          }
         }
       }
     },

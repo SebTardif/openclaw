@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import * as gatewayWorkAdmission from "../../process/gateway-work-admission.js";
 import {
+  beginGatewayRestartSignalAdmission,
   markGatewayRestartDraining,
   resetGatewayWorkAdmission,
 } from "../../process/gateway-work-admission.js";
@@ -122,6 +123,31 @@ describe("channel ingress monitor restart drain idle", () => {
       ]);
       expect(result).toBe("idle");
       expect(prune).toHaveBeenCalledTimes(pruneCallsAfterIdle);
+      await monitor.stop();
+    });
+  });
+
+  it("keeps waitForIdle pending through a rolled-back restart signal fence", async () => {
+    await withQueue(async (queue) => {
+      const monitor = createMonitor(queue);
+      monitor.start();
+      await monitor.waitForIdle();
+
+      const lease = beginGatewayRestartSignalAdmission();
+      expect(lease).not.toBeNull();
+      monitor.requestDrain();
+
+      const idle = monitor.waitForIdle();
+      const beforeRollback = await Promise.race([
+        idle.then(() => "idle" as const),
+        new Promise<"pending">((resolve) => {
+          setTimeout(() => resolve("pending"), 80);
+        }),
+      ]);
+      expect(beforeRollback).toBe("pending");
+
+      expect(lease?.rollback()).toBe(true);
+      await expect(idle).resolves.toBeUndefined();
       await monitor.stop();
     });
   });
