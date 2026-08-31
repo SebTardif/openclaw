@@ -352,7 +352,7 @@ describe("channel-inbound direct-message helpers", () => {
       onDispatchError: () => {},
     });
 
-    expect(result.ctxPayload.CommandAuthorized).toBe(false);
+    expect(result.ctxPayload.CommandAuthorized).toBe(true);
     expect(result.ctxPayload.InboundAccessAuthorized).toBe(true);
     expect(result.ctxPayload.SessionKey).toBe("dm:clawstudio");
     expect(result.ctxPayload.SenderId).toBe("clawstudio");

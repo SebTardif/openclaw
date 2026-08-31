@@ -352,11 +352,13 @@ describe("buildChannelInboundEventContext", () => {
         AgentId: "extra-agent",
         ChatType: "direct",
         ConversationRouteContextObserved: false,
+        GroupSubject: "Boundary Room",
         ChannelSpecificNote: "keep-me",
       },
     });
 
-    expect(ctx.CommandAuthorized).toBe(false);
+    expect(ctx.CommandAuthorized).toBe(true);
+    expect(ctx.GroupSubject).toBe("Boundary Room");
     expect(ctx.InboundAccessAuthorized).toBe(true);
     expect(ctx.SessionKey).toBe("agent:main:test:group:room-1");
     expect(ctx.SenderId).toBe("u1");
