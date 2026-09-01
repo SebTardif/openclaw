@@ -820,6 +820,66 @@ describe("config io write", () => {
   });
 
   itWithHome(
+    "does not claim a rejected payload was saved when the sidecar write fails",
+    async (home) => {
+      const configPath = configPathForHome(home);
+      await fs.mkdir(path.dirname(configPath), { recursive: true });
+      const original = {
+        gateway: { mode: "local" },
+        channels: { telegram: { enabled: true, dmPolicy: "pairing" } },
+        agents: { entries: { main: { default: true, workspace: "/tmp/openclaw-main" } } },
+        tools: { profile: "messaging" },
+        commands: { restart: false },
+      } satisfies ConfigFileSnapshot["config"];
+      const originalRaw = formatConfig(original);
+      await fs.writeFile(configPath, originalRaw, "utf-8");
+      const saveError = Object.assign(
+        new Error("EACCES: permission denied, open rejected sidecar"),
+        {
+          code: "EACCES",
+        },
+      );
+      const writeFile = ((target: unknown, data: unknown, options?: unknown) => {
+        if (String(target).includes(".rejected.")) {
+          return Promise.reject(saveError);
+        }
+        return fsNode.promises.writeFile(target as never, data as never, options as never);
+      }) as typeof fsNode.promises.writeFile;
+      const warn = vi.fn();
+      const io = createHomeConfigIO(home, {
+        env: { VITEST: "true" } as NodeJS.ProcessEnv,
+        logger: { warn, error: vi.fn() },
+        fs: {
+          ...fsNode,
+          promises: { ...fsNode.promises, writeFile },
+        },
+      });
+      const baseSnapshot = createExistingConfigSnapshot(configPath, original, originalRaw);
+
+      let thrown: Record<string, unknown> | undefined;
+      try {
+        await io.writeConfigFile({ update: { channel: "beta" } }, { baseSnapshot });
+      } catch (error) {
+        thrown = requireRecord(error, "config write rejection");
+      }
+
+      expect(thrown?.code).toBe("CONFIG_WRITE_REJECTED");
+      expect(String(thrown?.message)).toContain("gateway-mode-removed");
+      expect(String(thrown?.message)).toContain("Rejected payload could not be saved to");
+      expect(String(thrown?.message)).toContain(`${configPath}.rejected.`);
+      expect(String(thrown?.message)).toContain(saveError.message);
+      expect(String(thrown?.message)).not.toContain("Rejected payload saved to");
+      expect(thrown).not.toHaveProperty("rejectedPath");
+      expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
+        String(thrown?.message),
+      ]);
+      await expect(fs.readFile(configPath, "utf-8")).resolves.toBe(originalRaw);
+      const entries = await fs.readdir(path.dirname(configPath));
+      expect(entries.filter((entry) => entry.includes(".rejected."))).toHaveLength(0);
+    },
+  );
+
+  itWithHome(
     "does not preflight runtime secrets before rejecting blocked root writes",
     async (home) => {
       const configPath = configPathForHome(home);

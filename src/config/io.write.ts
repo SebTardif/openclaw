@@ -410,13 +410,27 @@ export async function writeConfigFileFromContext(
   const blockingReasons = resolveConfigWriteBlockingReasons(suspiciousReasons, options);
   if (blockingReasons.length > 0 && options.allowDestructiveWrite !== true) {
     const rejectedPath = `${configPath}.rejected.${formatConfigArtifactTimestamp(new Date().toISOString())}`;
-    await deps.fs.promises
-      .writeFile(rejectedPath, json, { encoding: "utf-8", mode: 0o600, flag: "wx" })
-      .catch(() => {});
-    const message = `Config write rejected: ${configPath} (${blockingReasons.join(", ")}). Rejected payload saved to ${rejectedPath}.`;
+    // Exclusive create can fail (EEXIST/EACCES). Mention the sidecar only
+    // after it lands, otherwise operators hunt a file that is not on disk.
+    let rejectedSaveError: unknown;
+    let savedRejectedPayload = false;
+    try {
+      await deps.fs.promises.writeFile(rejectedPath, json, {
+        encoding: "utf-8",
+        mode: 0o600,
+        flag: "wx",
+      });
+      savedRejectedPayload = true;
+    } catch (saveError) {
+      rejectedSaveError = saveError;
+    }
+    const rejectedSaveDetail = savedRejectedPayload
+      ? `Rejected payload saved to ${rejectedPath}.`
+      : `Rejected payload could not be saved to ${rejectedPath}: ${formatErrorMessage(rejectedSaveError)}.`;
+    const message = `Config write rejected: ${configPath} (${blockingReasons.join(", ")}). ${rejectedSaveDetail}`;
     const error = Object.assign(new Error(message), {
       code: "CONFIG_WRITE_REJECTED",
-      rejectedPath,
+      ...(savedRejectedPayload ? { rejectedPath } : {}),
       reasons: blockingReasons,
     });
     deps.logger.warn(message);
