@@ -570,6 +570,46 @@ describe("agent exec command composition", () => {
     });
   });
 
+  it.each([
+    { kind: "exception", status: "error", exitCode: 1, thrown: true },
+    { kind: "timeout", status: "timeout", exitCode: 2, thrown: true },
+    { kind: "context_overflow", status: "error", exitCode: 1, thrown: false },
+  ] as const)("preserves $kind when temporary-state cleanup also fails", async (failure) => {
+    const { runtime, log, error } = createRuntime();
+    let observedStateDir = "";
+    vi.spyOn(fs, "rm").mockRejectedValueOnce(new Error("cleanup denied"));
+
+    const result = await agentExecCommand("inspect", { json: true }, runtime, {
+      runAgent: async () => {
+        observedStateDir = process.env.OPENCLAW_STATE_DIR ?? "";
+        if (failure.thrown) {
+          throw Object.assign(new Error("original run failure"), {
+            name: failure.kind === "timeout" ? "TimeoutError" : "Error",
+          });
+        }
+        return {
+          ...successResult("partial answer"),
+          meta: { durationMs: 25, error: { kind: failure.kind, message: "original run failure" } },
+        };
+      },
+    });
+    externalTempDirs.push(observedStateDir);
+
+    expect(result).toMatchObject({
+      exitCode: failure.exitCode,
+      envelope: {
+        status: failure.status,
+        final: failure.thrown ? "" : "partial answer",
+        payloads: failure.thrown ? [] : [{ text: "partial answer" }],
+        error: { kind: failure.kind, message: "original run failure" },
+      },
+    });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toEqual(result.envelope);
+    expect(error).toHaveBeenCalledWith("original run failure");
+    expect(error).toHaveBeenCalledWith("Agent exec cleanup failed: cleanup denied");
+  });
+
   it("classifies cleanup failures before emitting the JSON envelope", async () => {
     const { runtime, log } = createRuntime();
     let observedStateDir = "";
@@ -597,38 +637,6 @@ describe("agent exec command composition", () => {
       status: "error",
       error: { message: "Agent exec cleanup failed: cleanup denied" },
     });
-  });
-
-  it("keeps a failed run envelope when later cleanup also fails", async () => {
-    const { runtime, log, error } = createRuntime();
-    let observedStateDir = "";
-    vi.spyOn(fs, "rm").mockRejectedValueOnce(new Error("cleanup denied"));
-
-    const result = await agentExecCommand("inspect", { json: true }, runtime, {
-      runAgent: vi.fn(async () => {
-        observedStateDir = process.env.OPENCLAW_STATE_DIR ?? "";
-        throw new Error("model refused the prompt");
-      }),
-    });
-    externalTempDirs.push(observedStateDir);
-
-    expect(result).toMatchObject({
-      exitCode: 1,
-      envelope: {
-        ok: false,
-        status: "error",
-        error: { kind: "exception", message: "model refused the prompt" },
-        cleanupError: { message: "Agent exec cleanup failed: cleanup denied" },
-      },
-    });
-    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
-      ok: false,
-      status: "error",
-      error: { message: "model refused the prompt" },
-      cleanupError: { message: "Agent exec cleanup failed: cleanup denied" },
-    });
-    expect(error).toHaveBeenCalledWith("model refused the prompt");
-    expect(error).toHaveBeenCalledWith("Agent exec cleanup failed: cleanup denied");
   });
 
   it("threads --cwd to both workspace and tool cwd", async () => {

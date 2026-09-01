@@ -188,9 +188,6 @@ function writeAgentExecOutput(
   if (!envelope.ok && envelope.error) {
     runtime.error(envelope.error.message);
   }
-  if (envelope.cleanupError) {
-    runtime.error(envelope.cleanupError.message);
-  }
 }
 
 /** Run one isolated embedded agent turn and project its stable CLI result. */
@@ -441,17 +438,12 @@ export async function agentExecCommand(
   if (cleanupError) {
     const cleanupFailure = new Error(
       `Agent exec cleanup failed: ${formatErrorMessage(cleanupError)}`,
-      { cause: cleanupError },
     );
-    const cleanupMessage = formatErrorMessage(cleanupFailure);
     if (commandResult.envelope.ok) {
       const envelope = errorEnvelope(cleanupFailure, sessionId);
       commandResult = { envelope, exitCode: exitCodeForEnvelope(envelope) };
     } else {
-      commandResult.envelope = {
-        ...commandResult.envelope,
-        cleanupError: { message: cleanupMessage },
-      };
+      runtime.error(cleanupFailure.message);
     }
   }
 
