@@ -36,6 +36,9 @@ export type AgentExecEnvelope = {
     message: string;
     kind: string;
   };
+  cleanupError?: {
+    message: string;
+  };
 };
 
 function projectAgentExecPayload(payload: AgentExecRawPayload): AgentExecPayload {

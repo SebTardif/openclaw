@@ -599,6 +599,38 @@ describe("agent exec command composition", () => {
     });
   });
 
+  it("keeps a failed run envelope when later cleanup also fails", async () => {
+    const { runtime, log, error } = createRuntime();
+    let observedStateDir = "";
+    vi.spyOn(fs, "rm").mockRejectedValueOnce(new Error("cleanup denied"));
+
+    const result = await agentExecCommand("inspect", { json: true }, runtime, {
+      runAgent: vi.fn(async () => {
+        observedStateDir = process.env.OPENCLAW_STATE_DIR ?? "";
+        throw new Error("model refused the prompt");
+      }),
+    });
+    externalTempDirs.push(observedStateDir);
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      envelope: {
+        ok: false,
+        status: "error",
+        error: { kind: "exception", message: "model refused the prompt" },
+        cleanupError: { message: "Agent exec cleanup failed: cleanup denied" },
+      },
+    });
+    expect(JSON.parse(String(log.mock.calls[0]?.[0]))).toMatchObject({
+      ok: false,
+      status: "error",
+      error: { message: "model refused the prompt" },
+      cleanupError: { message: "Agent exec cleanup failed: cleanup denied" },
+    });
+    expect(error).toHaveBeenCalledWith("model refused the prompt");
+    expect(error).toHaveBeenCalledWith("Agent exec cleanup failed: cleanup denied");
+  });
+
   it("threads --cwd to both workspace and tool cwd", async () => {
     const root = tempDirs.make("openclaw-agent-exec-cwd-");
     const { runtime } = createRuntime();
