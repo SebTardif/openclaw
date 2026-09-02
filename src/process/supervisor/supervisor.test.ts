@@ -212,6 +212,56 @@ describe("process supervisor", () => {
     },
   );
 
+  it.each([
+    {
+      timeoutField: "timeoutMs" as const,
+      reason: "overall-timeout" as const,
+    },
+    {
+      timeoutField: "noOutputTimeoutMs" as const,
+      reason: "no-output-timeout" as const,
+    },
+  ])("bounds a hung child adapter construction with $reason", async ({ timeoutField, reason }) => {
+    vi.useFakeTimers();
+    const startup = createDeferred<StubChildAdapter>();
+    createChildAdapterMock.mockReturnValueOnce(startup.promise);
+
+    const supervisor = createProcessSupervisor();
+    const runId = `hung-adapter-${reason}`;
+    const pendingRun = spawnChild(supervisor, {
+      runId,
+      sessionId: runId,
+      argv: createSilentIdleArgv(),
+      [timeoutField]: 25,
+      stdinMode: "pipe-closed",
+    });
+
+    expect(supervisor.getRecord(runId)).toMatchObject({ state: "starting" });
+    await vi.advanceTimersByTimeAsync(25);
+    const constructionState = await Promise.race([
+      pendingRun.then(() => "settled" as const),
+      Promise.resolve().then(() => "pending" as const),
+    ]);
+    expect(constructionState).toBe("settled");
+
+    const run = await pendingRun;
+    await expect(run.wait()).resolves.toMatchObject({
+      reason,
+      timedOut: true,
+      noOutputTimedOut: reason === "no-output-timeout",
+    });
+    expect(supervisor.getRecord(runId)).toMatchObject({
+      state: "exited",
+      terminationReason: reason,
+    });
+
+    const lateAdapter = createStubChildAdapter();
+    startup.resolve(lateAdapter);
+    await Promise.resolve();
+    expect(lateAdapter.killMock).toHaveBeenCalledWith("SIGKILL");
+    expect(lateAdapter.disposeMock).toHaveBeenCalled();
+  });
+
   it("fences new runs and drains an unscoped startup during shutdown", async () => {
     const adapter = createStubChildAdapter({
       onKill: (signal, current) => {

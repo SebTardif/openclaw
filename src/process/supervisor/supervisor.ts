@@ -238,10 +238,16 @@ export function createProcessSupervisor(): ProcessSupervisor & {
     };
 
     let cancelAdapter: ((reason: TerminationReason) => void) | null = null;
+    let abortAdapterConstruction: (() => void) | null = null;
 
     const requestCancel = (reason: TerminationReason) => {
       setForcedReason(reason);
       cancelAdapter?.(reason);
+      // Timeouts must abort the construction wait: createChildAdapter can hang
+      // in secret delivery or the service-relay ready handshake with no adapter.
+      if (!cancelAdapter && isTimeoutReason(reason)) {
+        abortAdapterConstruction?.();
+      }
     };
     owner.cancel = requestCancel;
 
@@ -290,21 +296,24 @@ export function createProcessSupervisor(): ProcessSupervisor & {
       if (input.mode !== "anchored-shell" && input.argv.length === 0) {
         throw new Error("spawn argv cannot be empty");
       }
-      const adapter =
+      // Cover construction: secret-fd writes and relay ready have no inner deadline.
+      overallDeadline.reset();
+      outputDeadline.reset();
+      const adapterPromise =
         input.mode === "pty"
-          ? await createPtyAdapter({
+          ? createPtyAdapter({
               shell: expectDefined(input.argv[0], "spawn executable"),
               args: input.argv.slice(1),
               cwd: input.cwd,
               env: input.env,
             })
           : input.mode === "anchored-shell"
-            ? await createChildAdapter({
+            ? createChildAdapter({
                 anchoredShellCommand: input.command,
                 cwd: input.cwd,
                 env: input.env,
               })
-            : await createChildAdapter({
+            : createChildAdapter({
                 argv: input.argv,
                 argv0: input.argv0,
                 cwd: input.cwd,
@@ -315,6 +324,49 @@ export function createProcessSupervisor(): ProcessSupervisor & {
                 stdinMode: input.stdinMode,
                 secretInput: input.secretInput,
               });
+      let adapter: Awaited<typeof adapterPromise>;
+      try {
+        adapter = await new Promise((resolve, reject) => {
+          abortAdapterConstruction = () => {
+            abortAdapterConstruction = null;
+            reject(new Error(forcedReason ?? "overall-timeout"));
+          };
+          void adapterPromise.then((value) => {
+            abortAdapterConstruction = null;
+            resolve(value);
+          }, reject);
+        });
+      } catch (err) {
+        if (!(forcedReason && isTimeoutReason(forcedReason))) {
+          throw err;
+        }
+        overallDeadline.clear();
+        outputDeadline.clear();
+        void adapterPromise.then(
+          (started) => {
+            started.kill("SIGKILL");
+            started.dispose();
+          },
+          () => undefined,
+        );
+        const exit: RunExit = {
+          reason: forcedReason,
+          exitCode: null,
+          exitSignal: null,
+          durationMs: Date.now() - startedAtMs,
+          stdout: "",
+          stderr: "",
+          timedOut: true,
+          noOutputTimedOut: forcedReason === "no-output-timeout",
+        };
+        registration.finalize(exit);
+        return {
+          runId,
+          startedAtMs,
+          wait: async () => exit,
+          cancel: () => undefined,
+        };
+      }
 
       registration.updateState(forcedReason ? "exiting" : "running", {
         pid: adapter.pid,
@@ -383,9 +435,6 @@ export function createProcessSupervisor(): ProcessSupervisor & {
         }, GRACEFUL_CANCEL_TIMEOUT_MS);
         forceKillTimer.unref?.();
       };
-
-      overallDeadline.reset();
-      outputDeadline.reset();
 
       const withOutputFence =
         <Chunk>(deliver?: (chunk: Chunk) => void, recordsOutput = true) =>
@@ -483,6 +532,8 @@ export function createProcessSupervisor(): ProcessSupervisor & {
       }
       return managedRun;
     } catch (err) {
+      overallDeadline.clear();
+      outputDeadline.clear();
       registration.finalize({
         reason: "spawn-error",
         exitCode: null,
