@@ -187,26 +187,15 @@ export function isGatewayRestartDraining(): boolean {
   );
 }
 
-/** True only after one-way restart drain. The reversible signal fence is excluded. */
-export function isGatewayRestartDrainCommitted(): boolean {
-  return GATEWAY_WORK_ADMISSION_STATE.restartDraining;
-}
-
 /** Resolves when one-way drain commits or the reversible signal fence clears. */
-export function waitForGatewayRestartFenceSettlement(): Promise<void> {
-  return new Promise((resolve) => {
-    const finish = () => {
-      if (
-        GATEWAY_WORK_ADMISSION_STATE.restartDraining ||
-        !GATEWAY_WORK_ADMISSION_STATE.restartSignalPending
-      ) {
-        resolve();
-        return;
-      }
-      GATEWAY_WORK_ADMISSION_STATE.suspendOpenWaiters.add(finish);
-    };
-    finish();
+export async function waitForGatewayRestartFenceSettlement(): Promise<void> {
+  if (!GATEWAY_WORK_ADMISSION_STATE.restartSignalPending) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    GATEWAY_WORK_ADMISSION_STATE.suspendOpenWaiters.add(resolve);
   });
+  await waitForGatewayRestartFenceSettlement();
 }
 
 export function getGatewayRestartDrainSignal(): AbortSignal {
