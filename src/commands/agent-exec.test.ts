@@ -201,6 +201,7 @@ describe("agent exec command composition", () => {
     const root = tempDirs.make("openclaw-agent-exec-service-construction-");
     const binDir = path.join(root, "bin");
     const pidPath = path.join(root, "command.pid");
+    const configPath = path.join(root, "openclaw.json");
     await fs.mkdir(binDir);
     const claudePath = path.join(binDir, "claude");
     await fs.writeFile(
@@ -212,6 +213,20 @@ sleep 60
       "utf8",
     );
     await fs.chmod(claudePath, 0o755);
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({
+        agents: {
+          defaults: {
+            model: { primary: "anthropic/claude-opus-4-7" },
+            models: {
+              "anthropic/claude-opus-4-7": { agentRuntime: { id: "claude-cli" } },
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
 
     const child = spawn(
       process.execPath,
@@ -221,10 +236,8 @@ sleep 60
         path.resolve(import.meta.dirname, "../entry.ts"),
         "agent",
         "exec",
-        "--isolated",
-        "--auth-env-only",
-        "--model",
-        "claude-cli/claude-opus-5",
+        "--config",
+        configPath,
         "--timeout",
         "1",
         "--json",
