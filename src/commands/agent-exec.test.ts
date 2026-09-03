@@ -271,7 +271,16 @@ sleep 60
         child.once("close", (code) => resolve({ code, stdout, stderr }));
       },
     );
-    const commandPid = await waitForPidFile(pidPath, 10_000);
+    const startedOrCompleted = await Promise.race([
+      waitForPidFile(pidPath, 10_000).then((pid) => ({ kind: "started" as const, pid })),
+      result.then((completed) => ({ kind: "completed" as const, completed })),
+    ]);
+    if (startedOrCompleted.kind === "completed") {
+      throw new Error(
+        `agent exec exited before the fake CLI started: code=${String(startedOrCompleted.completed.code)} stderr=${startedOrCompleted.completed.stderr}`,
+      );
+    }
+    const commandPid = startedOrCompleted.pid;
     expect(commandPid).toBeGreaterThan(0);
 
     const completed = await result;
