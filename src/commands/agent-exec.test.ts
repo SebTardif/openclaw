@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -228,65 +228,47 @@ sleep 60
       "utf8",
     );
 
-    const child = spawn(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        path.resolve(import.meta.dirname, "../entry.ts"),
-        "agent",
-        "exec",
-        "--config",
-        configPath,
-        "--timeout",
-        "1",
-        "--json",
-        "probe",
-      ],
-      {
-        cwd: path.resolve(import.meta.dirname, "../.."),
-        env: {
-          ...process.env,
-          ANTHROPIC_API_KEY: "synthetic-proof-key",
-          NODE_DISABLE_COMPILE_CACHE: "1",
-          OPENCLAW_SERVICE_MARKER: "openclaw",
-          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
+    const previousEnvironment = {
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      NODE_DISABLE_COMPILE_CACHE: process.env.NODE_DISABLE_COMPILE_CACHE,
+      OPENCLAW_SERVICE_MARKER: process.env.OPENCLAW_SERVICE_MARKER,
+      PATH: process.env.PATH,
+    };
+    Object.assign(process.env, {
+      ANTHROPIC_API_KEY: "synthetic-proof-key",
+      NODE_DISABLE_COMPILE_CACHE: "1",
+      OPENCLAW_SERVICE_MARKER: "openclaw",
+      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    const result = new Promise<{ code: number | null; stdout: string; stderr: string }>(
-      (resolve, reject) => {
-        child.once("error", reject);
-        child.once("close", (code) => resolve({ code, stdout, stderr }));
-      },
+    const { runtime } = createRuntime();
+    const result = agentExecCommand(
+      "probe",
+      { config: configPath, cwd: root, timeout: "1", json: true },
+      runtime,
     );
     let commandPid: number;
     try {
       commandPid = await waitForPidFile(pidPath, 3_000);
     } catch (error) {
-      child.kill("SIGKILL");
       const completed = await result;
       throw new Error(
-        `agent exec did not start the fake CLI: ${String(error)} code=${String(completed.code)} stderr=${completed.stderr}`,
+        `agent exec did not start the fake CLI: ${String(error)} exit=${String(completed.exitCode)} envelope=${JSON.stringify(completed.envelope)}`,
         { cause: error },
       );
+    } finally {
+      for (const [key, value] of Object.entries(previousEnvironment)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
     }
     expect(commandPid).toBeGreaterThan(0);
 
     const completed = await result;
-    expect(completed.code, completed.stderr).toBe(2);
-    expect(JSON.parse(completed.stdout)).toMatchObject({
+    expect(completed.exitCode).toBe(2);
+    expect(completed.envelope).toMatchObject({
       ok: false,
       status: "timeout",
     });
