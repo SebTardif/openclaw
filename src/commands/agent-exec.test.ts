@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitForDead, waitForPidFile } from "../../test/helpers/process-wait.js";
 import { cleanupTempDirs, useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { AgentRunTerminalOutcomeError } from "../agents/agent-run-terminal-error.js";
 import { createAgentHarnessToolSurfaceRuntimeCore } from "../agents/harness/tool-surface-bridge.js";
@@ -196,6 +197,79 @@ describe("agent exec strict result classification", () => {
 });
 
 describe("agent exec command composition", () => {
+  it("bounds blocked service-relay construction through the shipped CLI command", async () => {
+    const root = tempDirs.make("openclaw-agent-exec-service-construction-");
+    const binDir = path.join(root, "bin");
+    const pidPath = path.join(root, "command.pid");
+    await fs.mkdir(binDir);
+    const claudePath = path.join(binDir, "claude");
+    await fs.writeFile(
+      claudePath,
+      `#!/bin/sh
+printf '%s' "$$" > ${JSON.stringify(pidPath)}
+sleep 60
+`,
+      "utf8",
+    );
+    await fs.chmod(claudePath, 0o755);
+
+    const child = spawn(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        path.resolve(import.meta.dirname, "../entry.ts"),
+        "agent",
+        "exec",
+        "--isolated",
+        "--auth-env-only",
+        "--model",
+        "claude-cli/claude-opus-5",
+        "--timeout",
+        "1",
+        "--json",
+        "probe",
+      ],
+      {
+        cwd: path.resolve(import.meta.dirname, "../.."),
+        env: {
+          ...process.env,
+          ANTHROPIC_API_KEY: "synthetic-proof-key",
+          NODE_DISABLE_COMPILE_CACHE: "1",
+          OPENCLAW_SERVICE_MARKER: "openclaw",
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const result = new Promise<{ code: number | null; stdout: string; stderr: string }>(
+      (resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code) => resolve({ code, stdout, stderr }));
+      },
+    );
+    const commandPid = await waitForPidFile(pidPath, 10_000);
+    expect(commandPid).toBeGreaterThan(0);
+
+    const completed = await result;
+    expect(completed.code, completed.stderr).toBe(2);
+    expect(JSON.parse(completed.stdout)).toMatchObject({
+      ok: false,
+      status: "timeout",
+    });
+    await waitForDead(commandPid, 5_000);
+  });
+
   it("writes plain final text to stdout when diagnostics are routed to stderr", async () => {
     const source = `
       import { agentExecCommand } from "./src/commands/agent-exec.ts";
