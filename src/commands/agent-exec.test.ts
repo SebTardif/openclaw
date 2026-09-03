@@ -279,6 +279,7 @@ sleep 60
       const completed = await result;
       throw new Error(
         `agent exec did not start the fake CLI: ${String(error)} code=${String(completed.code)} stderr=${completed.stderr}`,
+        { cause: error },
       );
     }
     expect(commandPid).toBeGreaterThan(0);
