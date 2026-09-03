@@ -393,7 +393,7 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
 
   if (params.secretInput) {
     try {
-      await secretDelivery?.deliverTo(spawned.child);
+      await secretDelivery?.deliverTo(spawned.child, { abortSignal: params.abortSignal });
     } catch (error) {
       spawned.child.kill("SIGKILL");
       throw error;

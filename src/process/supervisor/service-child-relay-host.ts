@@ -317,7 +317,8 @@ export async function createServiceChildRelayAdapter(params: {
     }
     inboundSequence = message.sequence;
     if (message.type === "ready" && state === "starting") {
-      removeConstructionAbortListener();
+      // Ready is not construction-complete: secret delivery can still be
+      // blocked. Keep abort protection until the adapter returns.
       commandPid = message.commandPid;
       state = "active";
       startup.resolve();
@@ -469,7 +470,7 @@ export async function createServiceChildRelayAdapter(params: {
 
   const [startupResult, secretDeliveryResult] = await Promise.allSettled([
     startup.promise,
-    secretDelivery?.deliverTo(child),
+    secretDelivery?.deliverTo(child, { abortSignal: params.abortSignal }),
   ]);
   const startupError = startupResult.status === "rejected" ? startupResult.reason : undefined;
   const secretDeliveryError =
@@ -487,6 +488,13 @@ export async function createServiceChildRelayAdapter(params: {
     // backpressured secret pipe closing as a consequence of that failed admission.
     throw startupError ?? secretDeliveryError;
   }
+  if (params.abortSignal?.aborted || state === "identity-lost") {
+    removeConstructionAbortListener();
+    child.kill("SIGKILL");
+    retainedChildren.delete(generation);
+    throw waitError ?? new Error("service child construction aborted");
+  }
+  removeConstructionAbortListener();
 
   const stdin = createManagedChildStdin(child.stdin);
   if (params.input !== undefined) {
