@@ -230,7 +230,10 @@ it("refreshes the supervisor deadline from text-only Windows Job output", async 
   }
 });
 
-it("drops identity and SIGKILLs when a control line exceeds the pending cap", async () => {
+it.each([
+  { label: "ASCII", chunk: "x".repeat(64 * 1024), overflow: "x" },
+  { label: "multibyte UTF-8", chunk: "é".repeat(32 * 1024), overflow: "é" },
+])("caps an accumulated $label control line by wire bytes", async ({ chunk, overflow }) => {
   const { adapter, floodControl, killSpy, close } = await createRelay("linux");
   const rejectedWait = expect(adapter.wait()).rejects.toThrow(
     "control pipe pending line exceeded cap",
@@ -238,23 +241,11 @@ it("drops identity and SIGKILLs when a control line exceeds the pending cap", as
   const rejectedExtinction = expect(adapter.waitForExtinction()).rejects.toThrow(
     "control pipe pending line exceeded cap",
   );
-  floodControl("x".repeat(256 * 1024 + 1));
-  await rejectedWait;
-  await rejectedExtinction;
-  expect(killSpy).toHaveBeenCalledWith("SIGKILL");
-  close();
-});
-
-it("measures the pending control line in UTF-8 bytes, not string length", async () => {
-  const { adapter, floodControl, killSpy, close } = await createRelay("linux");
-  const rejectedWait = expect(adapter.wait()).rejects.toThrow(
-    "control pipe pending line exceeded cap",
-  );
-  const rejectedExtinction = expect(adapter.waitForExtinction()).rejects.toThrow(
-    "control pipe pending line exceeded cap",
-  );
-  // 131_073 × U+00E9 is 262_146 UTF-8 bytes but only 131_073 JS code units.
-  floodControl("é".repeat(131_073));
+  for (let index = 0; index < 4; index += 1) {
+    floodControl(chunk);
+  }
+  expect(killSpy).not.toHaveBeenCalled();
+  floodControl(overflow);
   await rejectedWait;
   await rejectedExtinction;
   expect(killSpy).toHaveBeenCalledWith("SIGKILL");

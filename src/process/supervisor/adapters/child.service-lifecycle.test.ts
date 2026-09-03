@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as realDelay } from "node:timers/promises";
@@ -93,6 +93,160 @@ describe.skipIf(process.platform === "win32")("POSIX child invocation identity",
 });
 
 describe.skipIf(process.platform === "win32")("service-managed child lifecycle", () => {
+  it("reclaims the command group when the anchor floods an unterminated control line", async () => {
+    const tempDir = tempDirs.make("openclaw-service-child-control-flood-");
+    const preloadPath = path.join(tempDir, "control-flood.cjs");
+    const rootPath = path.join(tempDir, "root.cjs");
+    const hostPath = path.join(tempDir, "host.mts");
+    const pidPath = path.join(tempDir, "pids.txt");
+    const rolePidPath = path.join(tempDir, "role-pids.txt");
+    await writeFile(
+      preloadPath,
+      `
+        const fs = require("node:fs");
+        const { Socket } = require("node:net");
+        const role = /service-child-(relay|group-anchor)\\.[cm]?[jt]s$/.exec(process.argv[1] || "")?.[1];
+        if (role) {
+          fs.appendFileSync(process.env.OPENCLAW_CONTROL_PROBE_PATH, role + " " + process.pid + "\\n");
+        }
+        const originalWrite = Socket.prototype.write;
+        let flooded = false;
+        Socket.prototype.write = function (chunk, ...args) {
+          if (
+            !flooded &&
+            /service-child-group-anchor\\.[cm]?[jt]s$/.test(process.argv[1] || "") &&
+            String(chunk).includes('"type":"ready"')
+          ) {
+            flooded = true;
+            const accepted = originalWrite.call(this, chunk, ...args);
+            setTimeout(() => originalWrite.call(this, "é".repeat(131_073)), 200);
+            return accepted;
+          }
+          return originalWrite.call(this, chunk, ...args);
+        };
+      `,
+      "utf8",
+    );
+    await writeFile(
+      rootPath,
+      `
+        const fs = require("node:fs");
+        const { spawn } = require("node:child_process");
+        const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+          stdio: "ignore",
+        });
+        fs.writeFileSync(${JSON.stringify(pidPath)}, process.pid + " " + descendant.pid);
+        setInterval(() => {}, 1000);
+      `,
+      "utf8",
+    );
+    const childModuleUrl = new URL("./child.ts", import.meta.url).href;
+    await writeFile(
+      hostPath,
+      `
+        process.env.OPENCLAW_SERVICE_MARKER = "openclaw";
+        const { createChildAdapter } = await import(${JSON.stringify(childModuleUrl)});
+        try {
+          const adapter = await createChildAdapter({
+            argv: [process.execPath, ${JSON.stringify(rootPath)}],
+            stdinMode: "pipe-closed",
+          });
+          const [waitResult, extinctionResult] = await Promise.allSettled([
+            adapter.wait(),
+            adapter.waitForExtinction(),
+          ]);
+          const messages = [waitResult, extinctionResult].map((result) =>
+            result.status === "rejected"
+              ? result.reason instanceof Error
+                ? result.reason.message
+                : String(result.reason)
+              : "resolved",
+          );
+          process.stdout.write(messages.join("\\n") + "\\n", () => {
+            process.exit(messages.every((message) =>
+              message.includes("control pipe pending line exceeded cap")) ? 0 : 3);
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          process.stderr.write(message + "\\n", () => process.exit(2));
+        }
+      `,
+      "utf8",
+    );
+    const host = spawn(process.execPath, ["--import", "tsx", hostPath], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require=${preloadPath}`.trim(),
+        OPENCLAW_CONTROL_PROBE_PATH: rolePidPath,
+      },
+    });
+    let stdout = "";
+    let stderr = "";
+    host.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    host.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    await waitFor(() => existsSync(pidPath));
+    const [rootPid, descendantPid] = parsePidPair(readFileSync(pidPath, "utf8"));
+    await waitFor(() => {
+      if (!existsSync(rolePidPath)) {
+        return false;
+      }
+      const roles = readFileSync(rolePidPath, "utf8");
+      return roles.includes("relay ") && roles.includes("group-anchor ");
+    });
+    const roles = new Map(
+      readFileSync(rolePidPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => {
+          const match = /^(relay|group-anchor) (\d+)$/u.exec(line);
+          if (!match?.[1] || !match[2]) {
+            throw new Error(`expected service child role PID: ${JSON.stringify(line)}`);
+          }
+          return [match[1], Number.parseInt(match[2], 10)] as const;
+        }),
+    );
+    const relayPid = roles.get("relay");
+    const anchorPid = roles.get("group-anchor");
+    if (!relayPid || !anchorPid) {
+      throw new Error(`expected relay and group-anchor PIDs: ${JSON.stringify([...roles])}`);
+    }
+    activePids.add(relayPid);
+    activePids.add(anchorPid);
+    activePids.add(rootPid);
+    activePids.add(descendantPid);
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve) => {
+        host.once("exit", (code, signal) => resolve({ code, signal }));
+      },
+    );
+    let timeoutId: NodeJS.Timeout | undefined;
+    const timedOut = await Promise.race([
+      exited.then(() => false),
+      new Promise<true>((resolve) => {
+        timeoutId = setTimeout(() => resolve(true), 5_000);
+      }),
+    ]);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (timedOut) {
+      host.kill("SIGKILL");
+      await exited;
+    }
+
+    expect(timedOut, stderr).toBe(false);
+    expect(await exited, stderr).toEqual({ code: 0, signal: null });
+    expect(stdout.match(/control pipe pending line exceeded cap/gu)).toHaveLength(2);
+    await waitFor(() =>
+      [relayPid, anchorPid, rootPid, descendantPid].every((pid) => !isAlive(pid)),
+    );
+  });
+
   it("cancels the complete admitted command group before settling", async () => {
     process.env.OPENCLAW_SERVICE_MARKER = "openclaw";
     const adapter = await createChildAdapter({
