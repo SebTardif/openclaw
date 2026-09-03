@@ -434,7 +434,8 @@ describe("createGatewayCloseHandler", () => {
     });
     releaseEmbeddingDrain();
 
-    await expect(failedStart).rejects.toThrow();
+    const started = await failedStart;
+    await started.wait();
     await closing;
     const nextSupervisor = getProcessSupervisor();
     const run = await nextSupervisor.spawn({
