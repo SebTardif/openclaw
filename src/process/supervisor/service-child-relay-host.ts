@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Duplex, Readable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import { toErrorObject } from "../../infra/errors.js";
 import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
 import {
@@ -368,39 +369,55 @@ export async function createServiceChildRelayAdapter(params: {
 
   if (control) {
     let pending = "";
+    let pendingBytes = 0;
+    let decoder = new StringDecoder("utf8");
     const rejectControlLine = () => {
       loseIdentity("control pipe pending line exceeded cap");
       child.kill("SIGKILL");
       pending = "";
+      pendingBytes = 0;
+      decoder = new StringDecoder("utf8");
     };
-    control.setEncoding("utf8");
-    control.on("data", (chunk: string) => {
-      pending += chunk;
-      for (;;) {
-        const newline = pending.indexOf("\n");
-        if (newline < 0) {
-          break;
+    const parseControlLine = (fragment: Buffer): boolean => {
+      if (pendingBytes + fragment.length > CONTROL_PENDING_LINE_LIMIT_BYTES) {
+        rejectControlLine();
+        return false;
+      }
+      const line = pending + decoder.end(fragment);
+      pending = "";
+      pendingBytes = 0;
+      decoder = new StringDecoder("utf8");
+      try {
+        const message = readChildMessage(JSON.parse(line));
+        if (!("sequence" in message)) {
+          throw new Error("invalid anchor message");
         }
-        const line = pending.slice(0, newline);
-        pending = pending.slice(newline + 1);
-        // Apply the cap before parsing complete frames too.
-        // Otherwise a trailing newline clears pending and bypasses the bound.
-        if (Buffer.byteLength(line, "utf8") > CONTROL_PENDING_LINE_LIMIT_BYTES) {
-          rejectControlLine();
+        handleAnchorMessage(message);
+      } catch {
+        loseIdentity("invalid anchor message");
+      }
+      return true;
+    };
+    // Keep raw bytes until the line cap accepts each fragment.
+    // String mode decodes a complete oversized frame before this parser can reject it.
+    control.on("data", (chunk: Buffer) => {
+      let offset = 0;
+      for (;;) {
+        const newline = chunk.indexOf(0x0a, offset);
+        if (newline < 0) {
+          const fragment = chunk.subarray(offset);
+          if (pendingBytes + fragment.length > CONTROL_PENDING_LINE_LIMIT_BYTES) {
+            rejectControlLine();
+          } else {
+            pending += decoder.write(fragment);
+            pendingBytes += fragment.length;
+          }
           return;
         }
-        try {
-          const message = readChildMessage(JSON.parse(line));
-          if (!("sequence" in message)) {
-            throw new Error("invalid anchor message");
-          }
-          handleAnchorMessage(message);
-        } catch {
-          loseIdentity("invalid anchor message");
+        if (!parseControlLine(chunk.subarray(offset, newline))) {
+          return;
         }
-      }
-      if (Buffer.byteLength(pending, "utf8") > CONTROL_PENDING_LINE_LIMIT_BYTES) {
-        rejectControlLine();
+        offset = newline + 1;
       }
     });
     control.once("close", () => {

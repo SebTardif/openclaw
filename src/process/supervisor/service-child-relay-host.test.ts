@@ -75,7 +75,7 @@ async function createRelay(platform: "linux" | "win32") {
     if (platform === "win32") {
       stub.child.emit("message", message);
     } else {
-      control.emit("data", encodeServiceChildMessage(message));
+      control.push(Buffer.from(encodeServiceChildMessage(message)));
     }
   };
   emit({ type: "ready", commandPid: 1234, anchorPid: 1235 });
@@ -108,11 +108,21 @@ async function createRelay(platform: "linux" | "win32") {
     stub.emitExit(0);
   };
   const floodControl = (chunk: string) => {
-    control.emit("data", chunk);
+    control.push(Buffer.from(chunk));
   };
+  const controlEncoding = () => control.readableEncoding;
   const killSpy = vi.spyOn(stub.child, "kill");
   cleanups.push(close);
-  return { adapter, cancellations, emit, completeRoot, close, floodControl, killSpy };
+  return {
+    adapter,
+    cancellations,
+    emit,
+    completeRoot,
+    close,
+    floodControl,
+    controlEncoding,
+    killSpy,
+  };
 }
 
 it("kills the spawned relay when abortSignal fires before ready", async () => {
@@ -255,9 +265,10 @@ it.each([
 it.each([
   { label: "ASCII", chunk: "x".repeat(64 * 1024), overflow: "x" },
   { label: "multibyte UTF-8", chunk: "é".repeat(32 * 1024), overflow: "é" },
-])("caps a completed $label control line before parsing", async ({ chunk, overflow }) => {
-  const { adapter, floodControl, killSpy, close } = await createRelay("linux");
+])("caps a completed $label control line before decoding", async ({ chunk, overflow }) => {
+  const { adapter, floodControl, controlEncoding, killSpy, close } = await createRelay("linux");
   const parseSpy = vi.spyOn(JSON, "parse");
+  expect(controlEncoding()).toBeNull();
   floodControl(`${chunk.repeat(4)}${overflow}\n`);
   await expect(adapter.wait()).rejects.toThrow("control pipe pending line exceeded cap");
   await expect(adapter.waitForExtinction()).rejects.toThrow(
