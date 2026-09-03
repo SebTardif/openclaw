@@ -10,6 +10,7 @@ import {
   buildMultiAccountChannelSchema,
 } from "openclaw/plugin-sdk/channel-config-schema";
 import { z } from "zod";
+import { canonicalizeFeishuDomain, FEISHU_CUSTOM_HTTPS_DOMAIN_PATTERN } from "./custom-domain.js";
 import { FEISHU_EXTERNAL_KEY_PATTERN } from "./external-keys.js";
 import { buildSecretInputSchema, hasConfiguredSecretInput } from "./secret-input.js";
 import { DEFAULT_FEISHU_WEBHOOK_PATH, normalizeFeishuWebhookPath } from "./webhook-path.js";
@@ -63,6 +64,7 @@ const FeishuGroupPolicySchema = z.union([
 const CustomFeishuDomainSchema = z
   .string()
   .url()
+  .and(z.string().regex(FEISHU_CUSTOM_HTTPS_DOMAIN_PATTERN, "Custom Feishu domain must use HTTPS"))
   .superRefine((value, ctx) => {
     let parsed: URL;
     try {
@@ -95,15 +97,7 @@ const CustomFeishuDomainSchema = z
       });
     }
   })
-  .transform((value) => {
-    const parsed = new URL(value);
-    parsed.protocol = "https:";
-    parsed.username = "";
-    parsed.password = "";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString().replace(/\/+$/, "");
-  });
+  .transform((value) => canonicalizeFeishuDomain(value) ?? value);
 const FeishuDomainSchema = z.union([z.enum(["feishu", "lark"]), CustomFeishuDomainSchema]);
 const FeishuConnectionModeSchema = z.enum(["websocket", "webhook"]);
 const FeishuWebhookPathSchema = z

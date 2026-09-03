@@ -475,6 +475,46 @@ describe("FeishuStreamingSession", () => {
     expect(session.isActive()).toBe(false);
   });
 
+  it("routes uppercase HTTPS custom domains to the configured host", async () => {
+    const requested: URL[] = [];
+    const deps = createMemoryFetch((url) => {
+      requested.push(url);
+      if (url.pathname.includes("/auth/")) {
+        return jsonResponse({
+          code: 0,
+          msg: "ok",
+          tenant_access_token: "token",
+          expire: 7200,
+        });
+      }
+      return jsonResponse({ code: 0, msg: "ok", data: { card_id: "card_custom_https" } });
+    });
+    const create = vi.fn(async () => ({
+      code: 0,
+      msg: "ok",
+      data: { message_id: "om_custom_https" },
+    }));
+    const session = new FeishuStreamingSession(
+      { im: { message: { create } } } as never,
+      {
+        appId: "app_custom_https",
+        appSecret: "secret",
+        domain: "HTTPS://tenant.example",
+      },
+      undefined,
+      deps,
+    );
+
+    await session.start("chat_1");
+
+    expect(requested.map((url) => url.hostname)).toEqual(["tenant.example", "tenant.example"]);
+    expect(requested.map((url) => url.pathname)).toEqual([
+      "/open-apis/auth/v3/tenant_access_token/internal",
+      "/open-apis/cardkit/v1/cards",
+    ]);
+    expect(requested.some((url) => url.hostname === "open.feishu.cn")).toBe(false);
+  });
+
   it("rejects oversized streaming tenant-token JSON before buffering the full body", async () => {
     let streamState:
       | {

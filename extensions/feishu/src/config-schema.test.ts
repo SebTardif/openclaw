@@ -29,6 +29,16 @@ function expectSchemaIssue(
   }
 }
 
+function expectJsonSchemaDomain(value: Record<string, unknown>, accepted: boolean) {
+  const result = validateJsonSchemaValue({
+    schema: FeishuChannelConfigSchema.schema,
+    cacheKey: "feishu-domain-json-schema-test",
+    value,
+    applyDefaults: false,
+  });
+  expect(result.ok, "exported JSON Schema validation").toBe(accepted);
+}
+
 describe("FeishuConfigSchema webhook validation", () => {
   it("applies top-level defaults", () => {
     const result = FeishuConfigSchema.parse({});
@@ -160,6 +170,8 @@ describe("FeishuConfigSchema webhook validation", () => {
         accounts: { work: { domain: "HTTPS://tenant.example/base/" } },
       }).accounts?.work?.domain,
     ).toBe("https://tenant.example/base");
+    expectJsonSchemaDomain({ domain: "HTTPS://tenant.example" }, true);
+    expectJsonSchemaDomain({ accounts: { work: { domain: "HTTPS://tenant.example" } } }, true);
   });
 
   it("rejects custom HTTP domains", () => {
@@ -170,6 +182,8 @@ describe("FeishuConfigSchema webhook validation", () => {
       }),
       "accounts.work.domain",
     );
+    expectJsonSchemaDomain({ domain: "http://tenant.example" }, false);
+    expectJsonSchemaDomain({ accounts: { work: { domain: "http://tenant.example" } } }, false);
   });
 
   it("rejects custom HTTPS domains with credentials, query, or fragment", () => {
