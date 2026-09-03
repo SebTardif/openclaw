@@ -107,8 +107,12 @@ async function createRelay(platform: "linux" | "win32") {
     stub.disconnectMock();
     stub.emitExit(0);
   };
+  const floodControl = (chunk: string) => {
+    control.emit("data", chunk);
+  };
+  const killSpy = vi.spyOn(stub.child, "kill");
   cleanups.push(close);
-  return { adapter, cancellations, emit, completeRoot, close };
+  return { adapter, cancellations, emit, completeRoot, close, floodControl, killSpy };
 }
 
 it("kills the spawned relay when abortSignal fires before ready", async () => {
@@ -224,6 +228,21 @@ it("refreshes the supervisor deadline from text-only Windows Job output", async 
     await run.waitForExtinction!();
     await supervisor.shutdown();
   }
+});
+
+it("drops identity and SIGKILLs when a control line exceeds the pending cap", async () => {
+  const { adapter, floodControl, killSpy, close } = await createRelay("linux");
+  const rejectedWait = expect(adapter.wait()).rejects.toThrow(
+    "control pipe pending line exceeded cap",
+  );
+  const rejectedExtinction = expect(adapter.waitForExtinction()).rejects.toThrow(
+    "control pipe pending line exceeded cap",
+  );
+  floodControl("x".repeat(256 * 1024 + 1));
+  await rejectedWait;
+  await rejectedExtinction;
+  expect(killSpy).toHaveBeenCalledWith("SIGKILL");
+  close();
 });
 
 describe.each(["linux", "win32"] as const)("service closing authority (%s)", (platform) => {

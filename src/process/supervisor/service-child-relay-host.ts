@@ -28,6 +28,7 @@ type AuthorityState = "starting" | "active" | "closing" | "closed" | "identity-l
 type StdioEntry = "ignore" | "inherit" | "ipc" | "pipe" | number;
 
 const PUSHED_OUTPUT_BUFFER_LIMIT_BYTES = 256 * 1024;
+const CONTROL_PENDING_LINE_LIMIT_BYTES = 256 * 1024;
 
 function readChildMessage(raw: unknown): ServiceChildRelayMessage | ServiceChildAnchorMessage {
   // SAFETY: the spawned relay or Job anchor is the sole writer on each private protocol channel.
@@ -386,6 +387,11 @@ export async function createServiceChildRelayAdapter(params: {
         } catch {
           loseIdentity("invalid anchor message");
         }
+      }
+      if (pending.length > CONTROL_PENDING_LINE_LIMIT_BYTES) {
+        loseIdentity("control pipe pending line exceeded cap");
+        child.kill("SIGKILL");
+        pending = "";
       }
     });
     control.once("close", () => {
