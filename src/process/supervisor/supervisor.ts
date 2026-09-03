@@ -239,13 +239,15 @@ export function createProcessSupervisor(): ProcessSupervisor & {
 
     let cancelAdapter: ((reason: TerminationReason) => void) | null = null;
     let abortAdapterConstruction: (() => void) | null = null;
+    const constructionAbort = new AbortController();
 
     const requestCancel = (reason: TerminationReason) => {
       setForcedReason(reason);
       cancelAdapter?.(reason);
-      // Timeouts must abort the construction wait: createChildAdapter can hang
-      // in secret delivery or the service-relay ready handshake with no adapter.
-      if (!cancelAdapter && isTimeoutReason(reason)) {
+      // Any cancel must abort construction: the relay may already be spawned
+      // and waiting for ready, and a later deadline must not replace this reason.
+      if (!cancelAdapter) {
+        constructionAbort.abort();
         abortAdapterConstruction?.();
       }
     };
@@ -306,12 +308,14 @@ export function createProcessSupervisor(): ProcessSupervisor & {
               args: input.argv.slice(1),
               cwd: input.cwd,
               env: input.env,
+              abortSignal: constructionAbort.signal,
             })
           : input.mode === "anchored-shell"
             ? createChildAdapter({
                 anchoredShellCommand: input.command,
                 cwd: input.cwd,
                 env: input.env,
+                abortSignal: constructionAbort.signal,
               })
             : createChildAdapter({
                 argv: input.argv,
@@ -323,6 +327,7 @@ export function createProcessSupervisor(): ProcessSupervisor & {
                 input: input.input,
                 stdinMode: input.stdinMode,
                 secretInput: input.secretInput,
+                abortSignal: constructionAbort.signal,
               });
       let adapter: Awaited<typeof adapterPromise>;
       try {
@@ -337,7 +342,7 @@ export function createProcessSupervisor(): ProcessSupervisor & {
           }, reject);
         });
       } catch (err) {
-        if (!(forcedReason && isTimeoutReason(forcedReason))) {
+        if (!forcedReason) {
           throw err;
         }
         overallDeadline.clear();
@@ -356,7 +361,7 @@ export function createProcessSupervisor(): ProcessSupervisor & {
           durationMs: Date.now() - startedAtMs,
           stdout: "",
           stderr: "",
-          timedOut: true,
+          timedOut: isTimeoutReason(forcedReason),
           noOutputTimedOut: forcedReason === "no-output-timeout",
         };
         registration.finalize(exit);

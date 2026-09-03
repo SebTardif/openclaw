@@ -134,6 +134,7 @@ export async function createServiceChildRelayAdapter(params: {
   secretInput?: SpawnSecretInput;
   oomScoreWrapperSelected: boolean;
   windowsShellCommand?: string;
+  abortSignal?: AbortSignal;
 }): Promise<ServiceChildRelayAdapter> {
   const generation = randomUUID();
   const useWindowsJobAnchor =
@@ -162,6 +163,14 @@ export async function createServiceChildRelayAdapter(params: {
   });
   retainedChildren.set(generation, child);
   child.unref();
+  // Ready may never arrive. Abort must SIGKILL this already-spawned relay
+  // immediately; supervisor late-adapter cleanup cannot see this child.
+  if (params.abortSignal?.aborted) {
+    child.kill("SIGKILL");
+    retainedChildren.delete(generation);
+    throw new Error("service child construction aborted");
+  }
+  let removeConstructionAbortListener = () => {};
 
   // SAFETY: a defined controlFd was reserved as a pipe in this exact spawn stdio array.
   const control = controlFd === undefined ? null : (child.stdio[controlFd] as Duplex | null);
@@ -234,6 +243,24 @@ export async function createServiceChildRelayAdapter(params: {
     extinctionCompletion.reject(waitError);
   };
 
+  const constructionAbortSignal = params.abortSignal;
+  if (constructionAbortSignal) {
+    const onConstructionAbort = () => {
+      child.kill("SIGKILL");
+      retainedChildren.delete(generation);
+      loseIdentity("construction aborted");
+    };
+    constructionAbortSignal.addEventListener("abort", onConstructionAbort, { once: true });
+    removeConstructionAbortListener = () => {
+      constructionAbortSignal.removeEventListener("abort", onConstructionAbort);
+      removeConstructionAbortListener = () => {};
+    };
+    if (constructionAbortSignal.aborted) {
+      removeConstructionAbortListener();
+      onConstructionAbort();
+    }
+  }
+
   const sendChildMessage = (
     message: ServiceChildStart | ServiceChildControlMessage,
   ): Promise<void> =>
@@ -290,6 +317,7 @@ export async function createServiceChildRelayAdapter(params: {
     }
     inboundSequence = message.sequence;
     if (message.type === "ready" && state === "starting") {
+      removeConstructionAbortListener();
       commandPid = message.commandPid;
       state = "active";
       startup.resolve();
@@ -409,6 +437,7 @@ export async function createServiceChildRelayAdapter(params: {
   });
   child.once("exit", () => {
     childExited = true;
+    removeConstructionAbortListener();
     if (useWindowsJobAnchor) {
       finishWindowsAuthority();
     } else {
@@ -432,6 +461,7 @@ export async function createServiceChildRelayAdapter(params: {
   try {
     await sendChildMessage(start);
   } catch (error) {
+    removeConstructionAbortListener();
     child.kill("SIGKILL");
     retainedChildren.delete(generation);
     throw error;
@@ -445,6 +475,7 @@ export async function createServiceChildRelayAdapter(params: {
   const secretDeliveryError =
     secretDeliveryResult.status === "rejected" ? secretDeliveryResult.reason : undefined;
   if (startupError !== undefined || secretDeliveryError !== undefined) {
+    removeConstructionAbortListener();
     if (useWindowsJobAnchor && startupError !== undefined) {
       await startupErrorAckDelivery;
       await extinctionCompletion.promise;

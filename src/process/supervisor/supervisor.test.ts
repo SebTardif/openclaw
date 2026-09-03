@@ -203,7 +203,8 @@ describe("process supervisor", () => {
 
       startup.resolve(adapter);
       const run = await pendingRun;
-      expect(adapter.killMock).toHaveBeenCalledWith("SIGTERM");
+      expect(adapter.killMock).toHaveBeenCalledWith("SIGKILL");
+      expect(adapter.disposeMock).toHaveBeenCalled();
       await expect(run.wait()).resolves.toMatchObject({ reason: "manual-cancel" });
       expect(supervisor.getRecord(runId)).toMatchObject({
         state: "exited",
@@ -291,7 +292,8 @@ describe("process supervisor", () => {
     const run = await pendingRun;
     await expect(shutdown).resolves.toBeUndefined();
 
-    expect(adapter.killMock).toHaveBeenCalledWith("SIGTERM");
+    expect(adapter.killMock).toHaveBeenCalledWith("SIGKILL");
+    expect(adapter.disposeMock).toHaveBeenCalled();
     await expect(run.wait()).resolves.toMatchObject({ reason: "manual-cancel" });
   });
 
@@ -388,7 +390,8 @@ describe("process supervisor", () => {
 
     const runs = await Promise.all(pendingRuns);
     for (const adapter of adapters) {
-      expect(adapter.killMock).toHaveBeenCalledWith("SIGTERM");
+      expect(adapter.killMock).toHaveBeenCalledWith("SIGKILL");
+      expect(adapter.disposeMock).toHaveBeenCalled();
     }
     await expect(Promise.all(runs.map((run) => run.wait()))).resolves.toEqual(
       Array.from({ length: runCount }, () => expect.objectContaining({ reason: "manual-cancel" })),
@@ -441,7 +444,8 @@ describe("process supervisor", () => {
       laterPromise,
     ]);
     expect(createChildAdapterMock).toHaveBeenCalledTimes(2);
-    expect(first.killMock).toHaveBeenCalledWith("SIGTERM");
+    expect(first.killMock).toHaveBeenCalledWith("SIGKILL");
+    expect(first.disposeMock).toHaveBeenCalled();
     expect(replacementRun.pid).toBeUndefined();
     expect(replacementRun.waitForExtinction).toBeUndefined();
     expect(later.killMock).not.toHaveBeenCalled();

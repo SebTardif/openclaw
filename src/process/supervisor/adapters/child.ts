@@ -94,6 +94,7 @@ type ChildAdapterInput = {
   input?: string;
   stdinMode?: "inherit" | "pipe-open" | "pipe-closed";
   secretInput?: SpawnSecretInput;
+  abortSignal?: AbortSignal;
 } & (
   | { argv: string[]; anchoredShellCommand?: never }
   | { argv?: never; anchoredShellCommand: string }
@@ -109,6 +110,7 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
       env: params.env,
       stdinMode: "pipe-closed",
       oomScoreWrapperSelected: false,
+      abortSignal: params.abortSignal,
     });
   }
 
@@ -140,6 +142,7 @@ export async function createChildAdapter(params: ChildAdapterInput): Promise<Wor
       input: params.input,
       secretInput: params.secretInput,
       oomScoreWrapperSelected: preparedSpawn.wrapped,
+      abortSignal: params.abortSignal,
     });
   }
 
