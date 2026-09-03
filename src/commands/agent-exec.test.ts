@@ -19,6 +19,7 @@ import {
 } from "../config/io.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeEnv } from "../runtime.js";
+import { withEnvAsync } from "../test-utils/env.js";
 import {
   buildExecRunConfig,
   resolveAgentExecPrompt,
@@ -228,51 +229,41 @@ sleep 60
       "utf8",
     );
 
-    const previousEnvironment = {
-      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-      NODE_DISABLE_COMPILE_CACHE: process.env.NODE_DISABLE_COMPILE_CACHE,
-      OPENCLAW_SERVICE_MARKER: process.env.OPENCLAW_SERVICE_MARKER,
-      PATH: process.env.PATH,
-    };
-    Object.assign(process.env, {
-      ANTHROPIC_API_KEY: "synthetic-proof-key",
-      NODE_DISABLE_COMPILE_CACHE: "1",
-      OPENCLAW_SERVICE_MARKER: "openclaw",
-      PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    });
-    const { runtime } = createRuntime();
-    const result = agentExecCommand(
-      "probe",
-      { config: configPath, cwd: root, timeout: "1", json: true },
-      runtime,
-    );
-    let commandPid: number;
-    try {
-      commandPid = await waitForPidFile(pidPath, 3_000);
-    } catch (error) {
-      const completed = await result;
-      throw new Error(
-        `agent exec did not start the fake CLI: ${String(error)} exit=${String(completed.exitCode)} envelope=${JSON.stringify(completed.envelope)}`,
-        { cause: error },
-      );
-    } finally {
-      for (const [key, value] of Object.entries(previousEnvironment)) {
-        if (value === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = value;
+    const completed = await withEnvAsync(
+      {
+        ANTHROPIC_API_KEY: "synthetic-proof-key",
+        NODE_DISABLE_COMPILE_CACHE: "1",
+        OPENCLAW_SERVICE_MARKER: "openclaw",
+        PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      },
+      async () => {
+        const { runtime } = createRuntime();
+        const result = agentExecCommand(
+          "probe",
+          { config: configPath, cwd: root, timeout: "1", json: true },
+          runtime,
+        );
+        let commandPid: number;
+        try {
+          commandPid = await waitForPidFile(pidPath, 3_000);
+        } catch (error) {
+          const failed = await result;
+          throw new Error(
+            `agent exec did not start the fake CLI: ${String(error)} exit=${String(failed.exitCode)} envelope=${JSON.stringify(failed.envelope)}`,
+            { cause: error },
+          );
         }
-      }
-    }
-    expect(commandPid).toBeGreaterThan(0);
-
-    const completed = await result;
+        expect(commandPid).toBeGreaterThan(0);
+        const finished = await result;
+        await waitForDead(commandPid, 5_000);
+        return finished;
+      },
+    );
     expect(completed.exitCode).toBe(2);
     expect(completed.envelope).toMatchObject({
       ok: false,
       status: "timeout",
     });
-    await waitForDead(commandPid, 5_000);
   });
 
   it("writes plain final text to stdout when diagnostics are routed to stderr", async () => {
