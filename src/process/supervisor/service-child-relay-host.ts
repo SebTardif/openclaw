@@ -388,7 +388,7 @@ export async function createServiceChildRelayAdapter(params: {
           loseIdentity("invalid anchor message");
         }
       }
-      if (pending.length > CONTROL_PENDING_LINE_LIMIT_BYTES) {
+      if (Buffer.byteLength(pending, "utf8") > CONTROL_PENDING_LINE_LIMIT_BYTES) {
         loseIdentity("control pipe pending line exceeded cap");
         child.kill("SIGKILL");
         pending = "";

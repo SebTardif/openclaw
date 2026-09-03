@@ -245,6 +245,22 @@ it("drops identity and SIGKILLs when a control line exceeds the pending cap", as
   close();
 });
 
+it("measures the pending control line in UTF-8 bytes, not string length", async () => {
+  const { adapter, floodControl, killSpy, close } = await createRelay("linux");
+  const rejectedWait = expect(adapter.wait()).rejects.toThrow(
+    "control pipe pending line exceeded cap",
+  );
+  const rejectedExtinction = expect(adapter.waitForExtinction()).rejects.toThrow(
+    "control pipe pending line exceeded cap",
+  );
+  // 131_073 × U+00E9 is 262_146 UTF-8 bytes but only 131_073 JS code units.
+  floodControl("é".repeat(131_073));
+  await rejectedWait;
+  await rejectedExtinction;
+  expect(killSpy).toHaveBeenCalledWith("SIGKILL");
+  close();
+});
+
 describe.each(["linux", "win32"] as const)("service closing authority (%s)", (platform) => {
   it.each(["after receipt", "before receipt"])(
     "preserves confirmed extinction when cancellation starts %s",
