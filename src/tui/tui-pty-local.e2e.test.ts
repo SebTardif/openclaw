@@ -1440,7 +1440,7 @@ describe("TUI PTY real backends", () => {
     LOCAL_TEST_TIMEOUT_MS,
   );
 
-  it(
+  it.skipIf(process.platform === "win32")(
     "reports a flooded local-shell control pipe and reclaims its command group",
     async ({ onTestFinished }) => {
       let rolePidPath = "";
