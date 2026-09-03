@@ -343,9 +343,21 @@ describe("handleAllowlistCommand", () => {
 
     expect(result?.shouldContinue).toBe(false);
     expect(result?.reply?.text).toContain(
-      "Paired allowFrom (store): unavailable (store read failed)",
+      "Paired allowFrom (store): unavailable (read failed). Retry this command; if it still fails, run openclaw doctor.",
     );
-    expect(result?.reply?.text).not.toContain("Paired allowFrom (store): 123");
+  });
+
+  it("omits the pairing-store line when the store is empty", async () => {
+    const cfg = {
+      commands: { text: true },
+      channels: { telegram: { allowFrom: ["123"] } },
+    } as OpenClawConfig;
+    const result = await handleAllowlistCommand(
+      buildAllowlistParams("/allowlist list dm", cfg),
+      true,
+    );
+
+    expect(result?.reply?.text).not.toContain("Paired allowFrom (store):");
   });
 
   it("adds allowlist entries to config and pairing stores", async () => {

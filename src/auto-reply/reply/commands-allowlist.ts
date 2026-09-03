@@ -380,7 +380,9 @@ export const handleAllowlistCommand: CommandHandler = async (params, allowTextCo
       lines.push(`DM allowFrom (config): ${formatEntryList(dmDisplay, resolvedDm)}`);
     }
     if (supportsStore && storeReadFailed) {
-      lines.push("Paired allowFrom (store): unavailable (store read failed)");
+      lines.push(
+        "Paired allowFrom (store): unavailable (read failed). Retry this command; if it still fails, run openclaw doctor.",
+      );
     } else if (supportsStore && storeAllowFrom.length > 0) {
       lines.push(`Paired allowFrom (store): ${formatEntryList(normalizeValues(storeAllowFrom))}`);
     }
