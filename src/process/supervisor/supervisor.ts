@@ -168,6 +168,8 @@ export function createProcessSupervisor(): ProcessSupervisor & {
   const waitForScope = (scopeKey: string): Promise<void> => waitForRuns(scopeKey);
 
   const startRun = async (input: SpawnInput, owner: OwnedRun): Promise<ManagedRun> => {
+    // A scope fence can outlive its caller; reject before replacing the surviving process.
+    input.assertCurrent?.();
     const { runId, scopeKey } = owner;
     const startedAtMs = Date.now();
     const startingTerminationReason = owner.terminationReason;
@@ -238,8 +240,16 @@ export function createProcessSupervisor(): ProcessSupervisor & {
     };
 
     let cancelAdapter: ((reason: TerminationReason) => void) | null = null;
-    let abortAdapterConstruction: (() => void) | null = null;
     const constructionAbort = new AbortController();
+    const constructionAbortError = new Error("adapter construction aborted");
+    const constructionAbortPromise = new Promise<never>((_, reject) => {
+      const rejectConstruction = () => reject(constructionAbortError);
+      if (constructionAbort.signal.aborted) {
+        rejectConstruction();
+      } else {
+        constructionAbort.signal.addEventListener("abort", rejectConstruction, { once: true });
+      }
+    });
 
     const requestCancel = (reason: TerminationReason) => {
       setForcedReason(reason);
@@ -248,7 +258,6 @@ export function createProcessSupervisor(): ProcessSupervisor & {
       // and waiting for ready, and a later deadline must not replace this reason.
       if (!cancelAdapter) {
         constructionAbort.abort();
-        abortAdapterConstruction?.();
       }
     };
     owner.cancel = requestCancel;
@@ -304,6 +313,7 @@ export function createProcessSupervisor(): ProcessSupervisor & {
       const adapterPromise =
         input.mode === "pty"
           ? createPtyAdapter({
+              assertCurrent: input.assertCurrent,
               shell: expectDefined(input.argv[0], "spawn executable"),
               args: input.argv.slice(1),
               cwd: input.cwd,
@@ -312,12 +322,14 @@ export function createProcessSupervisor(): ProcessSupervisor & {
             })
           : input.mode === "anchored-shell"
             ? createChildAdapter({
+                assertCurrent: input.assertCurrent,
                 anchoredShellCommand: input.command,
                 cwd: input.cwd,
                 env: input.env,
                 abortSignal: constructionAbort.signal,
               })
             : createChildAdapter({
+                assertCurrent: input.assertCurrent,
                 argv: input.argv,
                 argv0: input.argv0,
                 cwd: input.cwd,
@@ -331,18 +343,9 @@ export function createProcessSupervisor(): ProcessSupervisor & {
               });
       let adapter: Awaited<typeof adapterPromise>;
       try {
-        adapter = await new Promise((resolve, reject) => {
-          abortAdapterConstruction = () => {
-            abortAdapterConstruction = null;
-            reject(new Error(forcedReason ?? "overall-timeout"));
-          };
-          void adapterPromise.then((value) => {
-            abortAdapterConstruction = null;
-            resolve(value);
-          }, reject);
-        });
+        adapter = await Promise.race([adapterPromise, constructionAbortPromise]);
       } catch (err) {
-        if (!forcedReason) {
+        if (err !== constructionAbortError || !forcedReason) {
           throw err;
         }
         overallDeadline.clear();
