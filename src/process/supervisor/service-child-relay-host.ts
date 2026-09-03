@@ -488,7 +488,7 @@ export async function createServiceChildRelayAdapter(params: {
     // backpressured secret pipe closing as a consequence of that failed admission.
     throw startupError ?? secretDeliveryError;
   }
-  if (params.abortSignal?.aborted || state === "identity-lost") {
+  if (params.abortSignal?.aborted || waitError) {
     removeConstructionAbortListener();
     child.kill("SIGKILL");
     retainedChildren.delete(generation);
