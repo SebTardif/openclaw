@@ -368,6 +368,11 @@ export async function createServiceChildRelayAdapter(params: {
 
   if (control) {
     let pending = "";
+    const rejectControlLine = () => {
+      loseIdentity("control pipe pending line exceeded cap");
+      child.kill("SIGKILL");
+      pending = "";
+    };
     control.setEncoding("utf8");
     control.on("data", (chunk: string) => {
       pending += chunk;
@@ -378,6 +383,12 @@ export async function createServiceChildRelayAdapter(params: {
         }
         const line = pending.slice(0, newline);
         pending = pending.slice(newline + 1);
+        // Apply the cap before parsing complete frames too.
+        // Otherwise a trailing newline clears pending and bypasses the bound.
+        if (Buffer.byteLength(line, "utf8") > CONTROL_PENDING_LINE_LIMIT_BYTES) {
+          rejectControlLine();
+          return;
+        }
         try {
           const message = readChildMessage(JSON.parse(line));
           if (!("sequence" in message)) {
@@ -389,9 +400,7 @@ export async function createServiceChildRelayAdapter(params: {
         }
       }
       if (Buffer.byteLength(pending, "utf8") > CONTROL_PENDING_LINE_LIMIT_BYTES) {
-        loseIdentity("control pipe pending line exceeded cap");
-        child.kill("SIGKILL");
-        pending = "";
+        rejectControlLine();
       }
     });
     control.once("close", () => {

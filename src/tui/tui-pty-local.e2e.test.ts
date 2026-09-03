@@ -1474,7 +1474,7 @@ describe("TUI PTY real backends", () => {
                     "root " + ready.commandPid + "\\n",
                   );
                   const accepted = originalWrite.call(this, chunk, ...args);
-                  setTimeout(() => originalWrite.call(this, "é".repeat(131_073)), 500);
+                  setTimeout(() => originalWrite.call(this, "é".repeat(131_073) + "\\n"), 500);
                   return accepted;
                 }
                 return originalWrite.call(this, chunk, ...args);

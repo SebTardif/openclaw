@@ -252,6 +252,22 @@ it.each([
   close();
 });
 
+it.each([
+  { label: "ASCII", chunk: "x".repeat(64 * 1024), overflow: "x" },
+  { label: "multibyte UTF-8", chunk: "é".repeat(32 * 1024), overflow: "é" },
+])("caps a completed $label control line before parsing", async ({ chunk, overflow }) => {
+  const { adapter, floodControl, killSpy, close } = await createRelay("linux");
+  const parseSpy = vi.spyOn(JSON, "parse");
+  floodControl(`${chunk.repeat(4)}${overflow}\n`);
+  await expect(adapter.wait()).rejects.toThrow("control pipe pending line exceeded cap");
+  await expect(adapter.waitForExtinction()).rejects.toThrow(
+    "control pipe pending line exceeded cap",
+  );
+  expect(parseSpy).not.toHaveBeenCalled();
+  expect(killSpy).toHaveBeenCalledWith("SIGKILL");
+  close();
+});
+
 describe.each(["linux", "win32"] as const)("service closing authority (%s)", (platform) => {
   it.each(["after receipt", "before receipt"])(
     "preserves confirmed extinction when cancellation starts %s",
