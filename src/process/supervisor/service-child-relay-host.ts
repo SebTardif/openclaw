@@ -198,8 +198,10 @@ export async function createServiceChildRelayAdapter(params: {
   }>();
   const extinctionCompletion = createDeferredCore();
   // Failures can arrive before either public wait is requested.
+  void startup.promise.catch(() => {});
   void resultCompletion.promise.catch(() => {});
   void extinctionCompletion.promise.catch(() => {});
+  const constructionAbort = createDeferredCore<never>();
   let startupErrorAckDelivery: Promise<void> | undefined;
 
   const settleWait = () => {
@@ -241,6 +243,7 @@ export async function createServiceChildRelayAdapter(params: {
   const onConstructionAbort = () => {
     child.kill("SIGKILL");
     loseIdentity("construction aborted");
+    constructionAbort.reject(waitError ?? new Error("service child construction aborted"));
   };
   if (constructionAbortSignal) {
     constructionAbortSignal.addEventListener("abort", onConstructionAbort, { once: true });
@@ -450,7 +453,7 @@ export async function createServiceChildRelayAdapter(params: {
     windowsShellCommand: params.windowsShellCommand,
   };
   try {
-    await sendChildMessage(start);
+    await Promise.race([sendChildMessage(start), constructionAbort.promise]);
   } catch (error) {
     removeConstructionAbortListener();
     child.kill("SIGKILL");
