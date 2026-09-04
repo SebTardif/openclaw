@@ -708,6 +708,13 @@ const MERMAID_RENDERER_TEST_TARGETS = [
 const SOURCE_TEST_TARGETS = new Map([
   ...PRECISE_SOURCE_TEST_TARGETS,
   [
+    "extensions/browser/src/browser/chrome-mcp-options.ts",
+    [
+      "extensions/browser/src/browser/chrome-mcp.test.ts",
+      "test/scripts/ci-chrome-mcp-prewarm.test.ts",
+    ],
+  ],
+  [
     "scripts/prepare-apple-mermaid.mjs",
     [
       "test/scripts/build-and-run-mac.test.ts",
@@ -2319,6 +2326,7 @@ const EXACT_TOOLING_TARGETS = new Map<string, string[]>([
       packageAcceptance,
       "upgrade-survivor-probe-gateway",
       "upgrade-survivor-assertions",
+      "upgrade-survivor-mobile-pairing",
       "upgrade-survivor-recovery-cleanup",
       "openclaw-test-state",
     ],
@@ -2327,6 +2335,7 @@ const EXACT_TOOLING_TARGETS = new Map<string, string[]>([
     "scripts/e2e/lib/upgrade-survivor/run.sh",
     [
       "upgrade-survivor-assertions",
+      "upgrade-survivor-mobile-pairing",
       "upgrade-survivor-recovery-cleanup",
       "upgrade-survivor-watchos-direct-node",
     ],
@@ -2334,6 +2343,10 @@ const EXACT_TOOLING_TARGETS = new Map<string, string[]>([
   [
     "scripts/e2e/lib/upgrade-survivor/watchos-direct-node.mjs",
     ["upgrade-survivor-watchos-direct-node"],
+  ],
+  [
+    "scripts/e2e/lib/upgrade-survivor/mobile-pairing-client.mts",
+    ["upgrade-survivor-mobile-pairing"],
   ],
   [
     "scripts/e2e/lib/upgrade-survivor/recovery-cleanup-fixture.mjs",
@@ -3133,7 +3146,7 @@ function resolveDirectToolingReferenceTests(changedPath: string, cwd: string) {
 
 function resolveToolingTestTargets(changedPath: string, cwd = process.cwd()) {
   if (
-    /^test\/scripts\/(?:ci-(?:checkout|git-owner|linux-git|platform-checkout)\.test(?:-support)?\.ts|generated-publisher\.test-support\.ts|openclaw-performance-(?:workflow\.test(?:-support)?|git-lifecycle\.test)\.ts|plugin-release-git-lifecycle\.test\.ts|release-workflow-git-lifecycle\.test\.ts|fixtures\/(?:ci-platform-checkout\.mjs|ci-(?:checkout-auth|windows-process-census)\.py))$/u.test(
+    /^test\/scripts\/(?:ci-(?:checkout|git-owner|linux-git|platform-checkout|windows-process-census)\.test(?:-support)?\.ts|generated-publisher\.test-support\.ts|openclaw-performance-(?:workflow\.test(?:-support)?|git-lifecycle\.test)\.ts|plugin-release-git-lifecycle\.test\.ts|release-workflow-git-lifecycle\.test\.ts|fixtures\/(?:ci-platform-checkout\.mjs|ci-checkout-auth\.py|ci-windows-process-census\.(?:mjs|py)))$/u.test(
       changedPath,
     )
   ) {

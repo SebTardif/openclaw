@@ -1303,7 +1303,13 @@ jobs:
           const uiE2eJobCount = supportsUiE2eProjects
             ? (compactUiE2e ? 7 : 13)
             : usesHostedRunnerProfile ? 14 : 4;
-          const qaSmokeCiPartCount = usesHostedRunnerProfile ? 6 : 4;
+          // The logical profile already owns contributor routing. Reuse the
+          // four-part plan only for normal hybrid first attempts on Blacksmith.
+          const compactHybridQaSmoke = runnerProfile === "hybrid" &&
+            isCanonicalRepository &&
+            (eventName === "push" || eventName === "pull_request") &&
+            process.env.GITHUB_RUN_ATTEMPT === "1";
+          const qaSmokeCiPartCount = usesHostedRunnerProfile && !compactHybridQaSmoke ? 6 : 4;
           const supportsNativeI18n =
             hasPackageScript("native:i18n:check") &&
             hasPackageScript("android:i18n:check") &&
@@ -2523,6 +2529,32 @@ jobs:
       - *cache_playwright_chromium
       - *install_playwright_chromium
 
+      - name: Restore Chrome MCP npm cache
+        id: chrome-mcp-cache
+        if: matrix.task == 'browser-extension' && needs.preflight.outputs.cache_mode != 'off'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with: &chrome_mcp_npm_cache
+          path: |
+            ~/.npm/_cacache
+            ~/.npm/_npx
+          key: ${{ runner.os }}-${{ runner.arch }}-chrome-devtools-mcp@1.8.0-node24-v1
+
+      # Populate metadata and the executable before the 30-second MCP handshake.
+      - name: Pre-warm Chrome MCP
+        if: matrix.task == 'browser-extension' && steps.chrome-mcp-cache.outputs.cache-hit != 'true'
+        run: npx -y chrome-devtools-mcp@1.8.0 --version
+
+      - name: Save Chrome MCP npm cache
+        if: matrix.task == 'browser-extension' && needs.preflight.outputs.cache_write_allowed == 'true' && steps.chrome-mcp-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with: *chrome_mcp_npm_cache
+
+      - name: Configure offline Chrome MCP
+        if: matrix.task == 'browser-extension'
+        # npx revalidates cached pins; MCP filters npm_config_* and Vitest changes
+        # HOME. Project config keeps the warmed cache reachable without the registry.
+        run: npm config set cache="$HOME/.npm" offline=true --location=project
+
       - name: Test Control UI end-to-end
         if: matrix.task == 'control-ui'
         env:
@@ -2764,7 +2796,7 @@ jobs:
               pnpm check:coercion-helpers
               ;;
             baseline-ratchets)
-              for required_script in check:max-lines-ratchet check:assertion-safety; do
+              for required_script in check:max-lines-ratchet check:assertion-safety config:docs:check plugins:inventory:check; do
                 if ! has_package_script "$required_script"; then
                   echo "Current CI targets must provide ${required_script}." >&2
                   exit 1
@@ -2789,6 +2821,8 @@ jobs:
               fi
               pnpm check:max-lines-ratchet --base "$base_ref"
               pnpm check:assertion-safety --base "$base_ref"
+              pnpm config:docs:check
+              pnpm plugins:inventory:check
               ;;
             release-lint-core-*)
               stripe="${TASK#release-lint-core-}"
@@ -4080,6 +4114,12 @@ jobs:
         if: needs.preflight.outputs.run_format_check == 'true'
         run: pnpm format:check
 
+      - name: Check config docs baseline
+        run: pnpm config:docs:check
+
+      - name: Check plugin inventory
+        run: pnpm plugins:inventory:check
+
       - name: Checkout ClawHub docs source
         shell: bash
         env:
@@ -4772,9 +4812,21 @@ jobs:
             -only-testing:OpenClawTests/DelayedActionGateTests \
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/NodeAppModelInvokeTests \
+            -only-testing:OpenClawTests/WatchMessagingInboundTransportTests \
+            -only-testing:OpenClawTests/WatchSessionActivationGateTests \
+            -only-testing:OpenClawTests/OpenClawTypographyTests \
             -only-testing:OpenClawTests/NotificationServingPreferenceTests \
             -only-testing:OpenClawTests/RootTabsSourceGuardTests \
             -only-testing:OpenClawTests/TraceHeadingVisualProofTests \
+            test
+          xcodebuild \
+            -project apps/ios/OpenClaw.xcodeproj \
+            -scheme OpenClawUITests \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${simulator_id}" \
+            -resultBundlePath apps/ios/build/LifecycleTestResults/OpenClawWatchDeliveryUITests.xcresult \
+            -parallel-testing-enabled NO \
+            -only-testing:OpenClawUITests/OpenClawSnapshotUITests/testWatchMessageDeliveryIsReachableFromSettings \
             test
 
       - name: Run focused Apple Watch operation simulator tests
