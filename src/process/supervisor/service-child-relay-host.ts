@@ -379,10 +379,6 @@ export async function createServiceChildRelayAdapter(params: {
       decoder = new StringDecoder("utf8");
     };
     const parseControlLine = (fragment: Buffer): boolean => {
-      if (pendingBytes + fragment.length > CONTROL_PENDING_LINE_LIMIT_BYTES) {
-        rejectControlLine();
-        return false;
-      }
       const line = pending + decoder.end(fragment);
       pending = "";
       pendingBytes = 0;
@@ -403,21 +399,22 @@ export async function createServiceChildRelayAdapter(params: {
     control.on("data", (chunk: Buffer) => {
       let offset = 0;
       for (;;) {
-        const newline = chunk.indexOf(0x0a, offset);
+        const searchLength = CONTROL_PENDING_LINE_LIMIT_BYTES - pendingBytes + 1;
+        const boundedChunk = chunk.subarray(offset, offset + searchLength);
+        const newline = boundedChunk.indexOf(0x0a);
         if (newline < 0) {
-          const fragment = chunk.subarray(offset);
-          if (pendingBytes + fragment.length > CONTROL_PENDING_LINE_LIMIT_BYTES) {
+          if (boundedChunk.length === searchLength) {
             rejectControlLine();
           } else {
-            pending += decoder.write(fragment);
-            pendingBytes += fragment.length;
+            pending += decoder.write(boundedChunk);
+            pendingBytes += boundedChunk.length;
           }
           return;
         }
-        if (!parseControlLine(chunk.subarray(offset, newline))) {
+        if (!parseControlLine(boundedChunk.subarray(0, newline))) {
           return;
         }
-        offset = newline + 1;
+        offset += newline + 1;
       }
     });
     control.once("close", () => {

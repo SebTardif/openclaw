@@ -107,8 +107,8 @@ async function createRelay(platform: "linux" | "win32") {
     stub.disconnectMock();
     stub.emitExit(0);
   };
-  const floodControl = (chunk: string) => {
-    control.push(Buffer.from(chunk));
+  const floodControl = (chunk: string | Buffer) => {
+    control.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   };
   const controlEncoding = () => control.readableEncoding;
   const killSpy = vi.spyOn(stub.child, "kill");
@@ -275,6 +275,23 @@ it.each([
     "control pipe pending line exceeded cap",
   );
   expect(parseSpy).not.toHaveBeenCalled();
+  expect(killSpy).toHaveBeenCalledWith("SIGKILL");
+  close();
+});
+
+it("bounds the newline search before inspecting an oversized control frame", async () => {
+  const { adapter, floodControl, killSpy, close } = await createRelay("linux");
+  const frame = Buffer.alloc(256 * 1024 + 2, 0x78);
+  frame[frame.length - 1] = 0x0a;
+  const fullFrameSearch = vi.spyOn(frame, "indexOf");
+
+  floodControl(frame);
+
+  await expect(adapter.wait()).rejects.toThrow("control pipe pending line exceeded cap");
+  await expect(adapter.waitForExtinction()).rejects.toThrow(
+    "control pipe pending line exceeded cap",
+  );
+  expect(fullFrameSearch).not.toHaveBeenCalled();
   expect(killSpy).toHaveBeenCalledWith("SIGKILL");
   close();
 });
