@@ -12,8 +12,8 @@ import {
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { buildGatewayReloadPlan } from "./config-reload-plan.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
-import type { GatewayPluginReloadResult } from "./server-reload-handlers.js";
-import { startManagedGatewayConfigReloader } from "./server-reload-handlers.js";
+import type { GatewayPluginReloadResult } from "./server-reload-contracts.js";
+import { startManagedGatewayConfigReloader } from "./server-reload-managed.js";
 
 const hoisted = vi.hoisted(() => ({
   hotReloadStatus: { current: "active" as "active" | "disabled" },
@@ -100,18 +100,15 @@ describe("startManagedGatewayConfigReloader hotReloadStatus plumbing", () => {
           reconcileExitWatchers: vi.fn(async () => {}),
           reconcileStreamWatchers: vi.fn(async () => {}),
           stopStreamWatchers: vi.fn(async () => {}),
-          reconcileHeartbeatJobs: vi.fn(async () => "converged" as const),
+          reconcileSystemJobs: vi.fn(async () => "converged" as const),
         } as never,
       }),
       setState: vi.fn(),
       startChannel: vi.fn(async () => new Map()),
       stopChannel: vi.fn(async () => {}),
-      reloadPlugins: vi.fn(
-        async (): Promise<GatewayPluginReloadResult> => ({
-          restartChannels: new Set(),
-          activeChannels: new Set(),
-        }),
-      ),
+      reloadPlugins: vi.fn(async (): Promise<GatewayPluginReloadResult> => ({
+        activeChannels: new Set(),
+      })),
       logHooks: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       logChannels: { info: vi.fn(), error: vi.fn() },
       logCron: { error: vi.fn() },
@@ -134,7 +131,7 @@ describe("startManagedGatewayConfigReloader hotReloadStatus plumbing", () => {
       sharedGatewaySessionGenerationState: { current: undefined, required: null },
       prepareTerminalConfig: vi.fn(),
       reconcileRuntimePolicy: vi.fn(),
-      commitTerminalConfig: vi.fn(),
+      commitRuntimePolicy: vi.fn(),
       acceptTerminalConfig: vi.fn(),
       clients: [],
     });

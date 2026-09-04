@@ -13,7 +13,6 @@ import { sliceUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { FEISHU_HTTP_TIMEOUT_MS } from "./client-timeout.js";
 import { getFeishuUserAgent } from "./client.js";
 import { requestFeishuApi } from "./comment-shared.js";
-import { canonicalizeFeishuDomain } from "./custom-domain.js";
 import { readFeishuJsonResponse } from "./json-response.js";
 import { resolveFeishuCardTemplate, type CardHeaderConfig } from "./send.js";
 import { resolveStreamingCardSendMode } from "./streaming-card-send-mode.js";
@@ -106,24 +105,22 @@ function resolveStreamingTokenExpiresAt(value: unknown, nowMs = Date.now()): num
 }
 
 function resolveApiBase(domain?: FeishuDomain): string {
-  const canonical = canonicalizeFeishuDomain(domain);
-  if (canonical === "lark") {
+  if (domain === "lark") {
     return "https://open.larksuite.com/open-apis";
   }
-  if (canonical && canonical !== "feishu") {
-    return `${canonical}/open-apis`;
+  if (domain && domain !== "feishu" && domain.startsWith("http")) {
+    return `${domain.replace(/\/+$/, "")}/open-apis`;
   }
   return "https://open.feishu.cn/open-apis";
 }
 
 function resolveAllowedHostnames(domain?: FeishuDomain): string[] {
-  const canonical = canonicalizeFeishuDomain(domain);
-  if (canonical === "lark") {
+  if (domain === "lark") {
     return ["open.larksuite.com"];
   }
-  if (canonical && canonical !== "feishu") {
+  if (domain && domain !== "feishu" && domain.startsWith("http")) {
     try {
-      return [new URL(canonical).hostname];
+      return [new URL(domain).hostname];
     } catch {
       return [];
     }

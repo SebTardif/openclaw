@@ -29,15 +29,42 @@ function expectSchemaIssue(
   }
 }
 
-function expectJsonSchemaDomain(value: Record<string, unknown>, accepted: boolean) {
-  const result = validateJsonSchemaValue({
-    schema: FeishuChannelConfigSchema.schema,
-    cacheKey: "feishu-domain-json-schema-test",
-    value,
-    applyDefaults: false,
+describe("Feishu custom domains", () => {
+  it.each([
+    ["feishu", true],
+    ["lark", true],
+    ["https://tenant.example", true],
+    ["HTTPS://tenant.example", true],
+    ["HtTpS://Tenant.Example:8443/Api/Base%2FKeep/", true],
+    ["HTTPS://fixture-user@tenant.example/base", true],
+    ["HTTPS://tenant.example/base?tenant=Keep#Fragment", true],
+    ["HTTPS://tenant.example/base?", true],
+    ["HTTPS://tenant.example/base#", true],
+    ["http://tenant.example", false],
+    ["HTTP://tenant.example", false],
+    ["https://[", false],
+    ["HTTPS://[", false],
+    ["tenant.example/base", false],
+  ])("validates root and account domain %s consistently", (domain, accepted) => {
+    for (const value of [{ domain }, { accounts: { work: { domain } } }]) {
+      const parsed = FeishuConfigSchema.safeParse(value);
+      expect(parsed.success, "Zod validation").toBe(accepted);
+      if (parsed.success) {
+        expect(parsed.data).toMatchObject(value);
+      }
+      const exported = validateJsonSchemaValue({
+        schema: FeishuChannelConfigSchema.schema,
+        cacheKey: "feishu-domain-test",
+        value,
+        applyDefaults: true,
+      });
+      expect(exported.ok, "exported JSON Schema validation").toBe(accepted);
+      if (exported.ok) {
+        expect(exported.value).toMatchObject(value);
+      }
+    }
   });
-  expect(result.ok, "exported JSON Schema validation").toBe(accepted);
-}
+});
 
 describe("FeishuConfigSchema webhook validation", () => {
   it("applies top-level defaults", () => {
@@ -159,64 +186,6 @@ describe("FeishuConfigSchema webhook validation", () => {
     });
 
     expect(result.groupPolicy).toBe("open");
-  });
-
-  it("accepts custom HTTPS domains with a case-insensitive scheme", () => {
-    expect(FeishuConfigSchema.parse({ domain: "HTTPS://tenant.example/" }).domain).toBe(
-      "https://tenant.example",
-    );
-    expect(
-      FeishuConfigSchema.parse({
-        accounts: { work: { domain: "HTTPS://tenant.example/base/" } },
-      }).accounts?.work?.domain,
-    ).toBe("https://tenant.example/base");
-    expectJsonSchemaDomain({ domain: "HTTPS://tenant.example" }, true);
-    expectJsonSchemaDomain({ accounts: { work: { domain: "HTTPS://tenant.example" } } }, true);
-  });
-
-  it("rejects custom HTTP domains", () => {
-    expectSchemaIssue(FeishuConfigSchema.safeParse({ domain: "http://tenant.example" }), "domain");
-    expectSchemaIssue(
-      FeishuConfigSchema.safeParse({
-        accounts: { work: { domain: "http://tenant.example" } },
-      }),
-      "accounts.work.domain",
-    );
-    expectJsonSchemaDomain({ domain: "http://tenant.example" }, false);
-    expectJsonSchemaDomain({ accounts: { work: { domain: "http://tenant.example" } } }, false);
-  });
-
-  it("rejects custom HTTPS domains with credentials, query, or fragment", () => {
-    // Build userinfo via URL setters so secret scanners do not flag fixture literals.
-    const credentialDomain = new URL("https://tenant.example");
-    credentialDomain.username = "fixture-user";
-    credentialDomain.password = "fixture-password";
-    const usernameOnlyDomain = new URL("https://tenant.example/base");
-    usernameOnlyDomain.username = "fixture-user";
-
-    expectSchemaIssue(FeishuConfigSchema.safeParse({ domain: credentialDomain.href }), "domain");
-    expectSchemaIssue(
-      FeishuConfigSchema.safeParse({ domain: "HTTPS://tenant.example/?token=1" }),
-      "domain",
-    );
-    expectSchemaIssue(
-      FeishuConfigSchema.safeParse({ domain: "https://tenant.example/#frag" }),
-      "domain",
-    );
-    expectSchemaIssue(
-      FeishuConfigSchema.safeParse({ domain: "https://tenant.example.com?" }),
-      "domain",
-    );
-    expectSchemaIssue(
-      FeishuConfigSchema.safeParse({ domain: "https://tenant.example.com#" }),
-      "domain",
-    );
-    expectSchemaIssue(
-      FeishuConfigSchema.safeParse({
-        accounts: { work: { domain: usernameOnlyDomain.href } },
-      }),
-      "accounts.work.domain",
-    );
   });
 
   it("accepts the canonical disabled DM policy", () => {

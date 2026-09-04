@@ -32,8 +32,7 @@ import type {
   BoardProvider,
   BoardProviderLease,
 } from "../../lib/board/provider.ts";
-import type { BoardFace, BoardVisibleChatDock } from "../../lib/board/settings.ts";
-import type { BoardTab } from "../../lib/board/types.ts";
+import type { BoardFace } from "../../lib/board/settings.ts";
 import { parseCatalogSessionKey } from "../../lib/sessions/catalog-key.ts";
 import { areUiSessionKeysEquivalent } from "../../lib/sessions/session-key.ts";
 import type { SwarmRosterHydrator } from "../../lib/sessions/swarm-roster.ts";
@@ -43,6 +42,7 @@ import { PollController } from "../../lit/poll-controller.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
 import { ChatComposerCapabilityHost } from "./chat-composer-capability-host.ts";
 import { GitHubPublicationController } from "./chat-github-publication.ts";
+import { getChatHistoryLoadState } from "./chat-history-state.ts";
 import { sendSessionObserverVisibility } from "./chat-observer.ts";
 import type {
   ChatPaneConnectionScope,
@@ -68,7 +68,13 @@ import { handleChatScrollTakeover } from "./scroll.ts";
 import type { ChatMessageCache } from "./session-message-cache.ts";
 import type { SessionSnapshotStore } from "./session-snapshot-store.ts";
 import type { SidebarLayout } from "./sidebar-layout-types.ts";
-import { closeSlot, isSidebarSlotVisible, openSlot, setSidebarOpen } from "./sidebar-layout.ts";
+import {
+  closeSlot,
+  isSidebarSlotVisible,
+  openSlot,
+  promoteSidebarPanel,
+  setSidebarOpen,
+} from "./sidebar-layout.ts";
 
 export abstract class ChatPaneBase extends OpenClawLightDomElement {
   // The first Lit update must render even while hidden; later hidden work parks.
@@ -150,6 +156,11 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     this.presentedChanged(value);
   }
   protected presentedChanged(_presented: boolean): void {}
+  /** True while the authoritative transcript for this pane is still being fetched. */
+  get transcriptLoading(): boolean {
+    const phase = this.state ? getChatHistoryLoadState(this.state).phase : "idle";
+    return phase === "pending-connection" || phase === "in-flight";
+  }
   protected get headerOutcomeOwner(): string {
     return `${this.connectionGeneration}:${this.headerPresentationGeneration}`;
   }
@@ -276,11 +287,6 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   @litState() protected presencePayload: PresencePayload | undefined;
   @litState() protected sessionSharingStates = new Map<string, ChatSessionSharingState>();
   protected readonly sessionParticipationTracker = new SessionParticipationTracker();
-  @litState() protected boardCommandDock: {
-    sessionKey: string;
-    tabId: string;
-    dock: BoardTab["chatDock"];
-  } | null = null;
   @litState() protected resetConfirmationOpen = false;
   protected deferredSessionHydrationRequestVersion = 0;
   protected sessionCompanionHydrationKey = "";
@@ -302,16 +308,28 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     return visible ? "expanded" : "hidden";
   }
 
+  protected restorePaneSidebarLayout(layout: SidebarLayout): SidebarLayout {
+    if (!this.compact) {
+      return layout;
+    }
+    // Home's visibility consumers share the restored Chat-first layout;
+    // the saved full-page task layout stays intact.
+    const conversation = layout.columns[0]?.panels.find((panel) => panel.slot === "conversation");
+    const restored = conversation ? promoteSidebarPanel(layout, conversation.id) : layout;
+    return { ...restored, open: false, expanded: false };
+  }
+
   protected setChatSidePanelOpen(open: boolean, layout?: SidebarLayout): void {
     const state = this.state;
     if (!state) {
       return;
     }
     const renderedLayout = layout ?? state.sidebarLayout;
+    const nextLayout = setSidebarOpen(renderedLayout, open);
     if (renderedLayout.columns[0]?.panels.some((panel) => panel.slot === "companion")) {
-      this.setSessionObserverVisibility(open);
+      this.setSessionObserverVisibility(isSidebarSlotVisible(nextLayout, "companion"));
     }
-    this.commitSidebarLayout(setSidebarOpen(renderedLayout, open));
+    this.commitSidebarLayout(nextLayout);
   }
 
   protected requestSessionRail(intent: "open" | "toggle"): void {
@@ -385,7 +403,6 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
         resolve: (confirmed: boolean) => void;
       }
     | undefined;
-  protected readonly lastVisibleBoardDock = new Map<string, BoardVisibleChatDock>();
   protected retainedBoardSessionKey = "";
   protected readonly observedBoardPresence = new Map<string, boolean>();
   protected dashboardExpandedRouteKey = "";
@@ -504,6 +521,10 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
       .watch(
         () => this.context?.theme,
         (theme, notify) => theme.subscribe(notify),
+      )
+      .watch(
+        () => this.context?.plugins,
+        (plugins, notify) => plugins.subscribe(notify),
       )
       .watch(
         () => this.resolveBoardProvider(),

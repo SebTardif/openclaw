@@ -10,7 +10,6 @@ import {
   buildMultiAccountChannelSchema,
 } from "openclaw/plugin-sdk/channel-config-schema";
 import { z } from "zod";
-import { canonicalizeFeishuDomain, FEISHU_CUSTOM_HTTPS_DOMAIN_PATTERN } from "./custom-domain.js";
 import { FEISHU_EXTERNAL_KEY_PATTERN } from "./external-keys.js";
 import { buildSecretInputSchema, hasConfiguredSecretInput } from "./secret-input.js";
 import { DEFAULT_FEISHU_WEBHOOK_PATH, normalizeFeishuWebhookPath } from "./webhook-path.js";
@@ -58,47 +57,14 @@ const FeishuGroupPolicySchema = z.union([
   // Preserve the shipped Feishu alias while the canonical value remains "open".
   z.literal("allowall").transform(() => "open" as const),
 ]);
-// URL schemes are case-insensitive (RFC 3986). Accept HTTPS://... and normalize
-// via the URL constructor so downstream Feishu clients always see lowercase https://.
-// Only admit a clean HTTPS origin+path base (no credentials, query, or fragment).
-const CustomFeishuDomainSchema = z
-  .string()
-  .url()
-  .and(z.string().regex(FEISHU_CUSTOM_HTTPS_DOMAIN_PATTERN, "Custom Feishu domain must use HTTPS"))
-  .superRefine((value, ctx) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(value);
-    } catch {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid custom Feishu domain URL" });
-      return;
-    }
-    if (parsed.protocol.toLowerCase() !== "https:") {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Custom Feishu domain must use HTTPS" });
-    }
-    if (parsed.username || parsed.password) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Custom Feishu domain must not include credentials",
-      });
-    }
-    // URL.search/hash are empty for bare trailing "?" / "#", but those still
-    // produce invalid request bases when an API path is appended later.
-    if (parsed.search || value.includes("?")) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Custom Feishu domain must not include a query string",
-      });
-    }
-    if (parsed.hash || value.includes("#")) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Custom Feishu domain must not include a fragment",
-      });
-    }
-  })
-  .transform((value) => canonicalizeFeishuDomain(value) ?? value);
-const FeishuDomainSchema = z.union([z.enum(["feishu", "lark"]), CustomFeishuDomainSchema]);
+const FeishuDomainSchema = z.union([
+  z.enum(["feishu", "lark"]),
+  // Keep URL last for its JSON Schema format; regex flags are not exported.
+  z
+    .string()
+    .regex(/^[Hh][Tt][Tt][Pp][Ss]:\/\//)
+    .url(),
+]);
 const FeishuConnectionModeSchema = z.enum(["websocket", "webhook"]);
 const FeishuWebhookPathSchema = z
   .string()

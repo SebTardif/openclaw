@@ -10,12 +10,10 @@ import {
 } from "./validation.js";
 
 const mockLoadPluginManifestRegistry = vi.hoisted(() =>
-  vi.fn(
-    (): PluginManifestRegistry => ({
-      diagnostics: [],
-      plugins: [],
-    }),
-  ),
+  vi.fn((): PluginManifestRegistry => ({
+    diagnostics: [],
+    plugins: [],
+  })),
 );
 
 function createTelegramSchemaRegistry(): PluginManifestRegistry {
@@ -608,25 +606,6 @@ describe("validateConfigObjectWithPlugins DM policy warnings", () => {
 });
 
 describe("validateConfigObjectRawWithPlugins channel metadata", () => {
-  it("rejects HTTP and accepts HTTPS custom Feishu domains in generated metadata", () => {
-    for (const config of [
-      { domain: "http://tenant.example" },
-      { accounts: { work: { domain: "http://tenant.example" } } },
-    ]) {
-      const result = validateConfigObjectRawWithPlugins({ channels: { feishu: config } });
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.issues.some((issue) => issue.path.includes("domain"))).toBe(true);
-      }
-    }
-    for (const config of [
-      { domain: "HTTPS://tenant.example" },
-      { accounts: { work: { domain: "HTTPS://tenant.example" } } },
-    ]) {
-      expect(validateConfigObjectRawWithPlugins({ channels: { feishu: config } }).ok).toBe(true);
-    }
-  });
-
   it("still injects channel AJV defaults even in raw mode — persistence safety is handled by io.ts", () => {
     // Channel and plugin AJV validation always runs with applyDefaults: true
     // (hardcoded) to avoid breaking schemas that mark defaulted fields as
