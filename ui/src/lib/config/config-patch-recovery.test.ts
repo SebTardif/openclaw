@@ -56,6 +56,42 @@ function createPatchServer() {
 }
 
 describe("config patch recovery", () => {
+  it("restores the paused draft's Save prompt after a rejected patch recovers", async () => {
+    vi.useFakeTimers();
+    const server = createPatchServer();
+    let rejectPatch = true;
+    const request = vi.fn(async (method: string, params?: unknown) => {
+      if (method === "config.patch" && rejectPatch) {
+        throw new Error("permission denied");
+      }
+      return server.request(method, params);
+    });
+    const { runtimeConfig, publish } = createRecoveryCapability(
+      request as GatewayBrowserClient["request"],
+    );
+    await runtimeConfig.ensureLoaded();
+    runtimeConfig.patchForm(["count"], 7);
+    publish(false);
+    publish(true);
+    await runtimeConfig.refresh();
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("paused");
+
+    await expect(
+      runtimeConfig.patch({ raw: { enabled: false }, note: "Disable feature" }),
+    ).resolves.toBe(false);
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("error");
+    rejectPatch = false;
+    await expect(runtimeConfig.retry()).resolves.toBe(true);
+
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("paused");
+    expect(runtimeConfig.state.configFormDirty).toBe(true);
+    expect(runtimeConfig.state.configForm).toEqual({ count: 7 });
+    expect(request.mock.calls.filter(([method]) => method === "config.set")).toHaveLength(0);
+    await expect(server.store.request("config.get")).resolves.toMatchObject({
+      config: { count: 1, enabled: false },
+    });
+  });
+
   it("retries the rejected patch and resumes ordinary form autosave", async () => {
     vi.useFakeTimers();
     const server = createPatchServer();

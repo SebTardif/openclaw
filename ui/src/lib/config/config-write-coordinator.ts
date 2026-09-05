@@ -523,6 +523,9 @@ export function createConfigWriteCoordinator({
 
   const patches = createConfigPatchCoordinator({
     state,
+    // Patch errors replace display status; the reconnect latch still owns
+    // whether a surviving draft requires the explicit Save action.
+    reconcileDraft: reconcileAutoSaveDraftConnection,
     dispatch: (task) =>
       afterPendingWritesSettled(task, false, {
         flushScheduledDraft: true,

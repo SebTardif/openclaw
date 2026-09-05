@@ -18,6 +18,7 @@ export function createConfigPatchCoordinator(options: {
   resetConfigLoad: () => void;
   cancelAppliedRefresh: () => void;
   reconcileAppliedRefresh: () => void;
+  reconcileDraft: () => void;
   scheduleAutoSave: () => void;
 }) {
   const { state } = options;
@@ -68,6 +69,9 @@ export function createConfigPatchCoordinator(options: {
           );
           if (isCurrentConfigConnection(state, client, epoch)) {
             failedPatch = patched ? null : resolveOptions;
+            if (patched) {
+              options.reconcileDraft();
+            }
           }
           return patched;
         } finally {
