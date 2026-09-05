@@ -52,13 +52,13 @@ export const WHATSAPP_LOGGED_OUT_QR_MESSAGE =
 export const WHATSAPP_WATCHDOG_TIMEOUT_ERROR = "watchdog-timeout";
 // Last-route SQLite writes share the 15s bound used by socket close and creds flush.
 // An unbounded wait here blocks reconnect and `gateway stop` on a stuck store lock.
-export const BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS = 15_000;
+const BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS = 15_000;
 
-export type BackgroundTasksWaitResult = "drained" | "timed_out" | "aborted";
+type BackgroundTasksWaitResult = "drained" | "timed_out" | "aborted";
 
 const connectionControllerLog = getChildLogger({ module: "whatsapp-connection" });
 
-export async function waitForBackgroundTasksWithTimeout(
+async function waitForBackgroundTasksWithTimeout(
   backgroundTasks: Set<Promise<unknown>>,
   timeoutMs = BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS,
   abortSignal?: AbortSignal,

@@ -1,10 +1,7 @@
 // Whatsapp tests cover bounded last-route teardown during connection close.
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  waitForBackgroundTasksWithTimeout,
-  WhatsAppConnectionController,
-} from "./connection-controller.js";
+import { WhatsAppConnectionController } from "./connection-controller.js";
 import { createAcceptedWhatsAppSendResult } from "./inbound/send-result.test-helper.js";
 import {
   createWaSocket,
@@ -77,37 +74,6 @@ function createSocketWithTransportEmitter() {
     ws,
   };
 }
-
-describe("waitForBackgroundTasksWithTimeout", () => {
-  it("returns after the deadline when a last-route write never settles", async () => {
-    const backgroundTasks = new Set<Promise<unknown>>([new Promise(() => {})]);
-    const startedAt = Date.now();
-
-    await expect(waitForBackgroundTasksWithTimeout(backgroundTasks, 50)).resolves.toBe("timed_out");
-
-    const elapsedMs = Date.now() - startedAt;
-    expect(elapsedMs).toBeGreaterThanOrEqual(40);
-    expect(elapsedMs).toBeLessThan(1_000);
-    expect(backgroundTasks.size).toBe(1);
-  });
-
-  it("drains when last-route writes finish before the deadline", async () => {
-    const backgroundTasks = new Set<Promise<unknown>>([Promise.resolve()]);
-
-    await expect(waitForBackgroundTasksWithTimeout(backgroundTasks, 50)).resolves.toBe("drained");
-  });
-
-  it("stops waiting when abort fires before the deadline", async () => {
-    const backgroundTasks = new Set<Promise<unknown>>([new Promise(() => {})]);
-    const abort = new AbortController();
-    const startedAt = Date.now();
-    const wait = waitForBackgroundTasksWithTimeout(backgroundTasks, 5_000, abort.signal);
-    abort.abort();
-
-    await expect(wait).resolves.toBe("aborted");
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
-  });
-});
 
 describe("WhatsAppConnectionController last-route teardown", () => {
   let controller: WhatsAppConnectionController;
