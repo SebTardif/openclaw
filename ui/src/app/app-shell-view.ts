@@ -391,7 +391,7 @@ export function renderApplicationShell(host: ShellViewHost) {
             runtimeConfig.configSaving ||
             (runtimeConfig.configFormDirty && runtimeConfig.configFormMode === "raw") ||
             updateBusy,
-          onRetry: () => void context.runtimeConfig.save(),
+          onRetry: () => void context.runtimeConfig.retry(),
           onReload: () => void context.runtimeConfig.discardDraft(),
           onApply: () => void context.runtimeConfig.apply(),
         },

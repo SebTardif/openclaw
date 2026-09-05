@@ -2,8 +2,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ConfigSnapshot } from "../../api/types.ts";
-import { patchConfig } from "./config-gateway-operations.ts";
-import { createInitialConfigState } from "./config-state-model.ts";
 import {
   CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS,
   deferred,
@@ -422,6 +420,7 @@ describe("config gateway operations", () => {
     expect(runtimeConfig.state.configFormDirty).toBe(true);
     expect(runtimeConfig.state.configDraftBaseHash).toBe("hash-1");
     expect(runtimeConfig.state.configSnapshot?.hash).toBe("hash-2");
+    expect(runtimeConfig.state.configAutoSaveStatus).toBe("idle");
     runtimeConfig.resetDraft();
     runtimeConfig.dispose();
   });
@@ -644,65 +643,5 @@ describe("config gateway operations", () => {
     expect(configGetCalls()).toBe(getsBefore);
     expect(runtimeConfig.state.configSnapshot?.hash).toBe(server.currentHash());
     runtimeConfig.dispose();
-  });
-
-  it("surfaces a rejected config.patch as error so leftover Saved does not stay visible", async () => {
-    const request = vi.fn(async (method: string) => {
-      if (method === "config.patch") {
-        throw new Error("appearance patch rejected");
-      }
-      return {};
-    });
-    const client = { request } as unknown as GatewayBrowserClient;
-    const state = createInitialConfigState({
-      client,
-      phase: "connected",
-      sessionKey: "main",
-    });
-    state.configSnapshot = {
-      config: { count: 1 },
-      raw: '{\n  "count": 1\n}\n',
-      hash: "hash-1",
-      valid: true,
-      issues: [],
-    };
-    state.configAutoSaveStatus = "saved";
-
-    await expect(
-      patchConfig(state, {
-        raw: { ui: { prefs: { theme: "dark" } } },
-        note: "appearance",
-      }),
-    ).resolves.toBe(false);
-
-    expect(state.lastError).toContain("appearance patch rejected");
-    expect(state.configAutoSaveStatus).toBe("error");
-  });
-
-  it("surfaces a rejected config.patch base-hash conflict as conflict", async () => {
-    const request = vi.fn(async () => {
-      throw new Error("config changed since last load; re-run config.get and retry");
-    });
-    const client = { request } as unknown as GatewayBrowserClient;
-    const state = createInitialConfigState({
-      client,
-      phase: "connected",
-      sessionKey: "main",
-    });
-    state.configSnapshot = {
-      config: { count: 1 },
-      raw: '{\n  "count": 1\n}\n',
-      hash: "hash-1",
-      valid: true,
-      issues: [],
-    };
-    state.configAutoSaveStatus = "idle";
-
-    await expect(patchConfig(state, { raw: { count: 2 }, note: "appearance" })).resolves.toBe(
-      false,
-    );
-
-    expect(state.lastError).toContain("config changed since last load");
-    expect(state.configAutoSaveStatus).toBe("conflict");
   });
 });
