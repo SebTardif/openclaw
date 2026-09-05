@@ -303,6 +303,19 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
     return this.getSessionNavigationState().selectedAgentId;
   }
 
+  sidebarSessionHref(session: SidebarRecentSession): string {
+    // Build links only for rendered rows, after full-roster projection and pagination.
+    return sessionNavigationTarget({
+      face: resolveSessionPreferredFace(session),
+      sessionKey: session.key,
+      fallbackAgentId: this.selectedAgentIdForSessions(),
+      basePath: this.context?.basePath ?? "",
+      row: session,
+      mainKey: this.context ? this.sessionMainKey() : undefined,
+      preferenceDerivedFace: true,
+    }).href;
+  }
+
   sidebarSessionStatusFilter(): SidebarSessionStatusFilter {
     return this.sessionsStatusFilter;
   }
@@ -372,10 +385,7 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
     return buildReconciledSidebarZone({
       sidebarEntries: this.sidebarEntries,
       rows,
-      workboardBoards: this.workboardBoards,
-      enabledRouteIds: this.enabledRouteIds,
-      workboardBoardsReady: this.workboardBoardsReady,
-      controlUiTabs: this.context?.gateway.snapshot.hello?.controlUiTabs,
+      pluginNavigationKeys: new Set(this.pluginNavigation().map((entry) => entry.key)),
     });
   }
 
@@ -464,7 +474,7 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
     }
   }
 
-  /** Chip switching selects the agent and refreshes its session list. */
+  /** Chip switching selects the agent for the application. */
   protected readonly expandAgent = (agentId: string) => {
     const context = this.context;
     if (!context) {
@@ -479,7 +489,6 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
     this.sessionProjection.resetMembership();
     this.sessionData.visibleSessionLimits.clear();
     context.agentSelection.set(nextAgentId);
-    void this.sessionData.refreshSidebarSessions(nextAgentId);
   };
 
   expandedAgentId(): string {

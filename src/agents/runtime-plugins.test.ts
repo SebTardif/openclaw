@@ -137,6 +137,22 @@ describe("agent runtime plugin registries", () => {
     );
   });
 
+  it("uses harness runtimes prepared by the lifecycle batch", () => {
+    const configuredHarnessRuntimes = ["codex"];
+
+    loadAgentRuntimePluginRegistryHandle({
+      config: {},
+      configuredHarnessRuntimes,
+      workspaceDir: "/tmp/workspace",
+    });
+
+    expect(hoisted.resolveAgentRuntimePluginSelections).toHaveBeenCalledWith(
+      {},
+      [],
+      configuredHarnessRuntimes,
+    );
+  });
+
   it.each([true, false])("reuses only an imported selected owner (imported=%s)", (imported) => {
     const base = createEmptyPluginRegistry();
     base.plugins.push(
@@ -554,10 +570,37 @@ describe("agent runtime plugin registries", () => {
     expect(hoisted.resolveAgentRuntimePluginLoadPlan).toHaveBeenCalledWith({
       config,
       workspaceDir: "/tmp/workspace",
-      basePluginIds: [],
+      basePluginIds: undefined,
       selections: [],
       metadataSnapshot: expect.any(Object),
     });
+  });
+
+  it("inherits active runtime ids for direct hosts without a request registry", async () => {
+    const config = {} as never;
+    hoisted.getActivePluginRegistry.mockReturnValue({
+      plugins: [
+        createPluginRecord({ id: "startup-channel", status: "loaded" }),
+        createPluginRecord({ id: "startup-provider", status: "loaded" }),
+      ],
+    });
+    const pluginRegistry = createEmptyPluginRegistry();
+    hoisted.loadPluginRegistryHandle.mockReturnValue(pluginRegistry);
+
+    await withAgentPluginRegistry({
+      config,
+      workspaceDir: "/tmp/workspace",
+      run: async () => {},
+    });
+
+    expect(hoisted.resolveAgentRuntimePluginLoadPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        basePluginIds: ["startup-channel", "startup-provider"],
+      }),
+    );
+    expect(hoisted.loadPluginRegistryHandle).toHaveBeenCalledWith(
+      expect.objectContaining({ onlyPluginIds: ["codex", "memory-core"] }),
+    );
   });
 
   it.each([

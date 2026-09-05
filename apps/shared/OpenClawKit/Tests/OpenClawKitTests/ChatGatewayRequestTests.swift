@@ -5,6 +5,38 @@ import Testing
 @testable import OpenClawChatUI
 
 struct ChatGatewayRequestTests {
+    @Test(arguments: [
+        ("global", "research", "global", Optional("research")),
+        ("agent:research:global", "research", "agent:research:global", nil),
+        ("main", "research", "agent:research:main", nil),
+        ("agent:research:workbench", "research", "agent:research:workbench", nil),
+    ])
+    func `progress requests retain raw global owner and preserve old qualified schema`(
+        key: String,
+        owner: String,
+        expectedKey: String,
+        expectedOwner: String?)
+    {
+        let request = OpenClawChatGatewayRequests.progressCardGet(sessionKey: key, agentID: owner)
+        #expect(request.method == "progressCard.get")
+        #expect(request.params["sessionKey"]?.value as? String == expectedKey)
+        #expect(request.params["agentId"]?.value as? String == expectedOwner)
+        #expect(Set(request.params.keys) == (expectedOwner == nil ? ["sessionKey"] : ["sessionKey", "agentId"]))
+    }
+
+    @Test func `progress payloads validate the captured agent without replacing null`() throws {
+        let valid = Data(
+            #"{"card":{"sessionKey":"agent:research:global","revision":1,"updatedAt":10,"markdown":"Research","steps":[]}}"#
+                .utf8)
+        #expect(try OpenClawChatGatewayPayloadCodec.decodeProgressCard(valid, agentID: "research")?
+            .markdown == "Research")
+        #expect(throws: (any Error).self) {
+            try OpenClawChatGatewayPayloadCodec.decodeProgressCard(valid, agentID: "main")
+        }
+        #expect(try OpenClawChatGatewayPayloadCodec.decodeProgressCard(
+            Data(#"{"card":null}"#.utf8), agentID: "research") == nil)
+    }
+
     @Test(arguments: [[String]?.none, [], ["api.example.test"]])
     func `question host consent uses protocol field`(hosts: [String]?) throws {
         let request = OpenClawChatGatewayRequests.resolveQuestion(
@@ -31,6 +63,20 @@ struct ChatGatewayRequestTests {
                 try OpenClawChatGatewayPayloadCodec.decodeQuestionAnswer(Data(invalid.utf8))
             }
         }
+    }
+
+    @Test(arguments: [[String]?.none, [], ["watch-run", "queued-source"]])
+    func `history requests consumption only for supplied input runs`(inputRunIDs: [String]?) {
+        let request = OpenClawChatGatewayRequests.history(
+            sessionKey: "global",
+            agentID: "reviewer",
+            inputRunIDs: inputRunIDs)
+
+        #expect(request.method == "chat.history")
+        #expect(request.params["sessionKey"]?.value as? String == "global")
+        #expect(request.params["agentId"]?.value as? String == "reviewer")
+        #expect(request.params["inputRunIds"]?.value as? [String] ==
+            (inputRunIDs?.isEmpty == false ? inputRunIDs : nil))
     }
 
     @Test func `models list scopes worker catalogs and preserves default scope`() {
@@ -623,6 +669,23 @@ struct ChatGatewayPayloadCodecTests {
 
         #expect(hello.advertisedOperatorScopes() == ["operator.read", "operator.admin"])
         #expect(missing.advertisedOperatorScopes() == nil)
+    }
+
+    @Test(arguments: [
+        nil,
+        [],
+        [["runId": "watch-run", "consumedByEventId": "aggregate-user"]],
+    ] as [[[String: String]]?])
+    func `history decoding preserves optional input consumption receipts`(consumptions: [[String: String]]?) throws {
+        var object: [String: Any] = ["sessionKey": "main", "messages": []]
+        object["inputConsumptions"] = consumptions
+        let payload = try JSONDecoder().decode(
+            OpenClawChatHistoryPayload.self,
+            from: JSONSerialization.data(withJSONObject: object))
+        let encoded = try #require(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(payload)) as? [String: Any])
+
+        #expect(encoded["inputConsumptions"] as? [[String: String]] == consumptions)
     }
 
     @Test func `session row decodes permission and every tool override family`() throws {

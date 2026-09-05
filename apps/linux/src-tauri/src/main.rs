@@ -456,18 +456,25 @@ impl DesktopState {
                 return self.connect_remote_locked(app, remote);
             }
         }
-        let cli = match self.resolve_cli() {
+        let cli = self.resolve_cli();
+        if !explicit_local && !remote_gateway::has_configured_gateway()? {
+            // First-run setup belongs to the pending bootstrap reply. Navigating
+            // here replaces its WebView and loses the local/remote choice.
+            let snapshot = match cli {
+                Ok(_) => GatewaySnapshot::unconfigured(),
+                Err(CliError::Missing) => GatewaySnapshot::missing_cli(),
+                Err(error) => return Err(error.to_string()),
+            };
+            self.update_tray(&snapshot);
+            return Ok(snapshot);
+        }
+        let cli = match cli {
             Ok(cli) => cli,
             Err(CliError::Missing) => {
                 return self.show_missing_cli(app, explicit_local, None);
             }
             Err(error) => return Err(error.to_string()),
         };
-        if !explicit_local && !remote_gateway::has_configured_gateway()? {
-            let snapshot = GatewaySnapshot::unconfigured();
-            self.update_tray(&snapshot);
-            return Ok(snapshot);
-        }
         if explicit_local {
             self.inner
                 .remote_tunnel
@@ -583,8 +590,22 @@ impl DesktopState {
     }
 
     pub fn connect_explicit_local(&self, app: &AppHandle) -> Result<GatewaySnapshot, String> {
-        // The click returns immediately; a later remote selection still wins while connect runs.
-        self.show_local(app, "reconnecting", true, None)?;
+        let mut navigation = self
+            .inner
+            .navigation
+            .lock()
+            .map_err(|_| "Dashboard navigation lock is unavailable.".to_string())?;
+        navigation.permit_local(true, None);
+        // First-run setup owns the pending bootstrap reply. Replacing its page
+        // drops the error callback and leaves a reconnect screen with no watchdog.
+        if !self.main_window_has_local_content(&main_window(app)?) {
+            let mut url = self.inner.local_url.clone();
+            url.query_pairs_mut()
+                .clear()
+                .append_pair("mode", "reconnecting");
+            self.navigate_locked(app, url, false)?;
+        }
+        drop(navigation);
         self.connect_selected(app, true)
     }
 

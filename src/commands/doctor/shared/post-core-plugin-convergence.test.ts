@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PLUGIN_CAPABILITY_CONSENT_REQUIRED } from "../../../../packages/gateway-protocol/src/capability-consent-error-details.js";
 import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
 
 const mocks = vi.hoisted(() => ({
@@ -45,10 +46,7 @@ import {
   runActivePluginPayloadSmokeCheck,
 } from "../../../plugins/active-payload-verification.js";
 import { VERSION } from "../../../version.js";
-import {
-  convergenceWarningsToOutcomes,
-  runPostCorePluginConvergence,
-} from "./post-core-plugin-convergence.js";
+import { runPostCorePluginConvergence } from "./post-core-plugin-convergence.js";
 
 describe("runPostCorePluginConvergence", () => {
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -456,6 +454,7 @@ describe("runPostCorePluginConvergence", () => {
       env: {},
     });
     expect(result.errored).toBe(false);
+    expect(result.outcomes).toBeUndefined();
     expect(result.warnings).toStrictEqual([
       {
         reason:
@@ -476,7 +475,14 @@ describe("runPostCorePluginConvergence", () => {
       changes: [],
       warnings: ['Plugin "consent-fixture" requires capability consent.'],
       failedPluginIds: ["consent-fixture"],
-      capabilityConsentRequired: true,
+      outcomes: [
+        {
+          pluginId: "consent-fixture",
+          status: "error",
+          code: PLUGIN_CAPABILITY_CONSENT_REQUIRED,
+          message: 'Plugin "consent-fixture" requires capability consent.',
+        },
+      ],
       records: {},
     });
 
@@ -550,11 +556,6 @@ describe("runPostCorePluginConvergence", () => {
         guidance: [],
       },
     ]);
-    expect(convergenceWarningsToOutcomes(result)).toStrictEqual({
-      warnings: result.notices,
-      outcomes: [],
-      errored: false,
-    });
   });
 
   it("flags errored=true when smoke check finds a missing main entry", async () => {
@@ -633,7 +634,7 @@ describe("runPostCorePluginConvergence", () => {
     ]);
   });
 
-  it("uses ownership guidance and a coherent update outcome for unreadable package.json", async () => {
+  it("uses ownership guidance for unreadable package.json", async () => {
     mocks.repairMissingConfiguredPluginInstalls.mockResolvedValue({
       changes: [],
       warnings: [],
@@ -673,11 +674,7 @@ describe("runPostCorePluginConvergence", () => {
         guidance,
       },
     ]);
-    expect(convergenceWarningsToOutcomes(result)).toStrictEqual({
-      warnings: result.warnings,
-      outcomes: [{ pluginId: "brave", status: "error", message }],
-      errored: true,
-    });
+    expect(result.errored).toBe(true);
   });
 
   it("does not duplicate a package-scoped repair error owned by a smoke failure", async () => {
@@ -853,46 +850,6 @@ describe("runPostCorePluginConvergence", () => {
         OPENCLAW_UPDATE_POST_CORE_CONVERGENCE: "1",
       },
     });
-  });
-});
-
-describe("convergenceWarningsToOutcomes", () => {
-  it("emits per-plugin error outcomes for warnings that name a pluginId", () => {
-    const folded = convergenceWarningsToOutcomes({
-      changes: [],
-      warnings: [
-        {
-          pluginId: "brave",
-          reason: "missing-main-entry: …",
-          message: 'Plugin "brave" failed payload smoke check.',
-          guidance: ["Run `openclaw update repair`."],
-        },
-        {
-          reason: "Failed install",
-          message: "Failed install for some plugin.",
-          guidance: ["Run `openclaw update repair`."],
-        },
-      ],
-      errored: true,
-      smokeFailures: [],
-      installRecords: {},
-    });
-    expect(folded.errored).toBe(true);
-    expect(folded.outcomes).toEqual([
-      { pluginId: "brave", status: "error", message: 'Plugin "brave" failed payload smoke check.' },
-    ]);
-    expect(folded.warnings).toHaveLength(2);
-  });
-
-  it("returns errored=false and no outcomes for a clean convergence", () => {
-    const folded = convergenceWarningsToOutcomes({
-      changes: ["Repaired."],
-      warnings: [],
-      errored: false,
-      smokeFailures: [],
-      installRecords: {},
-    });
-    expect(folded).toEqual({ warnings: [], outcomes: [], errored: false });
   });
 });
 

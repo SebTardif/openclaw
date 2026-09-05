@@ -24,6 +24,8 @@ Scheduled heartbeats require automations. When `cron.enabled` is `false` or `OPE
 
 Setting `heartbeat.every: "0m"` also disables only the recurring cadence. A targeted event-driven wake can still run one agent turn, such as the completion follow-up requested by a background exec task. It does not create or re-enable a recurring schedule. Use tool policy and sandboxing, rather than heartbeat cadence, to control whether those agent turns may execute commands.
 
+Targeted event wakes retain the same per-agent rate limits when recurring cadence is disabled: a 30-second minimum between event turns, and a flood guard after five starts within 60 seconds. Deferred work resumes when its guard expires. Config reloads preserve this accounting without enrolling the agent in recurring or broadcast heartbeats.
+
 Troubleshooting: [Automations](/automation/cron-jobs#troubleshooting)
 
 ## Quick start (beginner)
@@ -252,7 +254,7 @@ Use `accountId` to target a specific account on multi-account channels like Tele
   When true, heartbeat runs use lightweight bootstrap context and skip workspace bootstrap files. Monitor scratch is injected by the heartbeat runner either way.
 </ParamField>
 <ParamField path="isolatedSession" type="boolean" default="false">
-  When true, each heartbeat runs in a fresh session with no prior conversation history. Uses the same isolation pattern as automation jobs with `sessionTarget: "isolated"`. Dramatically reduces per-heartbeat token cost. Combine with `lightContext: true` for maximum savings. Delivery routing still uses the main session context.
+  When true, each heartbeat runs in a fresh session with no prior conversation history. Uses the same isolation pattern as automation jobs with `sessionTarget: "isolated"`. Dramatically reduces per-heartbeat token cost. Combine with `lightContext: true` for maximum savings. Delivery routing and conversation context still follow the selected conversation, including its channel, account, and topic. A background command's completion keeps its original event route if that conversation later moves; it does not borrow the new room's description or activation policy.
 </ParamField>
 <ParamField path="session" type="string">
   Optional session key for heartbeat runs.
@@ -320,6 +322,7 @@ Heartbeat configuration is strict: only the fields listed above are accepted. Ac
 
   </Accordion>
   <Accordion title="Visibility and skip behavior">
+    - If the heartbeat turn fails before the model can reply, the failure notice names the reason whenever OpenClaw itself refused the run (for example, the session's runtime is still busy in another runner). Raw provider or runtime errors stay behind the verbose failure-detail setting (`/verbose on` or `/verbose full`), as in normal chats.
     - If `showOk`, `showAlerts`, and `useIndicator` are all disabled, the run is skipped up front as `reason=alerts-disabled`.
     - If only alert delivery is disabled, OpenClaw can still run the heartbeat, update due-task timestamps, restore the session idle timestamp, and suppress the outward alert payload.
     - If the channel readiness check blocks an alert, OpenClaw records the non-delivery and retries the heartbeat after a one-minute grace period without consuming its cadence slot. This retry runs the heartbeat again; it does not replay the exact earlier alert. Once a send enters the durable delivery queue, that queue owns transport retries.

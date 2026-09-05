@@ -27,7 +27,7 @@ function resolvePrimaryRoot(checkoutRoot) {
   return path.basename(resolved) === ".git" ? path.dirname(resolved) : null;
 }
 
-function resolveTsxImport(checkoutRoot) {
+export function resolveTsxImport(checkoutRoot) {
   const modulesDir =
     process.env.PNPM_CONFIG_MODULES_DIR?.trim() || process.env.npm_config_modules_dir?.trim();
   const hydratedTsxRoot = modulesDir
@@ -114,11 +114,15 @@ async function runCliShimInner(moduleUrl, options, nodeArgs) {
   for (const signal of FORWARDED_SIGNALS) {
     const handler = () => {
       signalChild(child, signal, detached);
-      forceKillTimer ??= setTimeout(
-        () => signalChild(child, "SIGKILL", detached),
-        forceKillDelayMs,
-      );
-      forceKillTimer.unref();
+      // A lifecycle-owning implementation must finish killing its own child groups.
+      // A competing shim deadline can kill that owner and orphan those children.
+      if (options.terminationOwner !== "implementation") {
+        forceKillTimer ??= setTimeout(
+          () => signalChild(child, "SIGKILL", detached),
+          forceKillDelayMs,
+        );
+        forceKillTimer.unref();
+      }
     };
     signalHandlers.set(signal, handler);
     process.on(signal, handler);
