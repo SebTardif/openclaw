@@ -594,6 +594,10 @@ export async function patchConfig(
   } catch (err) {
     if (isCurrentConfigConnection(state, client, connectionEpoch)) {
       state.lastError = formatUiError(err);
+      // Match autoSaveConfig: the save indicator only shows Failed/Conflict
+      // when status is error/conflict. lastError alone would leave a leftover
+      // Saved claw after an Appearance observer patch reject.
+      state.configAutoSaveStatus = isConfigBaseHashConflictError(err) ? "conflict" : "error";
     }
     return false;
   }
