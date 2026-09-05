@@ -120,7 +120,12 @@ export async function readMemoryFile(params: {
           allowedAdditional = "file";
           break;
         }
-      } catch {}
+      } catch (err) {
+        if (isFileMissingError(err)) {
+          continue;
+        }
+        throw err;
+      }
     }
   }
   if (!allowedWorkspace && !allowedAdditional) {

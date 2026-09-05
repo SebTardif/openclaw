@@ -54,6 +54,46 @@ describe("readMemoryFile", () => {
     }
   });
 
+  it.each(["EACCES", "EIO"] as const)(
+    "surfaces extra-path lstat %s instead of path required",
+    async (code) => {
+      const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-read-file-"));
+      try {
+        const workspaceDir = path.join(tmpRoot, "workspace");
+        const extraDir = path.join(tmpRoot, "extra");
+        const target = path.join(extraDir, "note.md");
+        await fs.mkdir(workspaceDir, { recursive: true });
+        await fs.mkdir(extraDir, { recursive: true });
+        await fs.writeFile(target, "secret", "utf-8");
+
+        const scanError = Object.assign(new Error(`${code}: extra path unreadable`), { code });
+        const realLstat = fs.lstat;
+        const lstatSpy = vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+          if (path.resolve(String(args[0])) === extraDir) {
+            throw scanError;
+          }
+          return await realLstat(...args);
+        });
+        try {
+          await expect(
+            readMemoryFile({
+              workspaceDir,
+              extraPaths: [extraDir],
+              relPath: target,
+            }),
+          ).rejects.toMatchObject({
+            code,
+            message: `${code}: extra path unreadable`,
+          });
+        } finally {
+          lstatSpy.mockRestore();
+        }
+      } finally {
+        await fs.rm(tmpRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("rejects extra path reads through symlinked directory components", async () => {
     const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "memory-read-file-"));
     try {
