@@ -112,6 +112,16 @@ export function resolveTaskLauncherScriptPath(env: GatewayServiceEnv, scriptPath
   return path.join(parsed.dir, `${parsed.name}.vbs`);
 }
 
+function parseCmdWorkingDirectory(directoryArg: string): string {
+  const recovered = parseCmdScriptCommandLine(directoryArg)[0] ?? "";
+  // Older quoteCmdScriptArg wrapped trailing-backslash dirs as `..."\`.
+  // cmd.exe still treats that closer as a closer; CRT does not.
+  if (directoryArg.startsWith('"') && recovered.endsWith('"') && /[^\\]\\"$/.test(directoryArg)) {
+    return directoryArg.slice(1, -1);
+  }
+  return recovered;
+}
+
 function assertStaticTaskPath(value: string): void {
   if (!/^(?:[a-z]:[\\/]|\\\\)/i.test(value) || /[%\r\n"]/.test(value)) {
     throw new Error("Scheduled Task launcher path is not absolute and literal");
@@ -466,6 +476,7 @@ async function readWindowsTaskCommand(
         throw new Error("Dynamic Scheduled Task launcher command");
       }
       if (lower.startsWith("cd /d ")) {
+        const directoryArg = line.slice("cd /d ".length).trim();
         const cdArguments = parseCmdScriptCommandLine(line);
         if (
           requireEffective &&
@@ -473,7 +484,7 @@ async function readWindowsTaskCommand(
         ) {
           throw new Error("Ambiguous Scheduled Task working directory");
         }
-        workingDirectory = cdArguments[2] ?? "";
+        workingDirectory = parseCmdWorkingDirectory(directoryArg);
         continue;
       }
       // Generated stdin and operator-added output redirections are shell syntax,
