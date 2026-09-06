@@ -215,6 +215,16 @@ export function resolveTaskLauncherScriptPath(env: GatewayServiceEnv, scriptPath
   return path.join(parsed.dir, `${parsed.name}.vbs`);
 }
 
+function parseCmdWorkingDirectory(directoryArg: string): string {
+  const recovered = parseCmdScriptCommandLine(directoryArg)[0] ?? "";
+  // Older quoteCmdScriptArg wrapped trailing-backslash dirs as `..."\`.
+  // cmd.exe still treats that closer as a closer; CRT does not.
+  if (directoryArg.startsWith('"') && recovered.endsWith('"') && /[^\\]\\"$/.test(directoryArg)) {
+    return directoryArg.slice(1, -1);
+  }
+  return recovered;
+}
+
 export async function readScheduledTaskCommand(
   env: GatewayServiceEnv,
   options?: GatewayServiceReadOptions,
@@ -249,7 +259,8 @@ export async function readScheduledTaskCommand(
         continue;
       }
       if (lower.startsWith("cd /d ")) {
-        workingDirectory = line.slice("cd /d ".length).trim().replace(/^"|"$/g, "");
+        const directoryArg = line.slice("cd /d ".length).trim();
+        workingDirectory = parseCmdWorkingDirectory(directoryArg);
         continue;
       }
       // Generated launchers redirect stdin so a hidden service console never
