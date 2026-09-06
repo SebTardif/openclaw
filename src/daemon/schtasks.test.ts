@@ -303,6 +303,22 @@ describe("readScheduledTaskCommand", () => {
     );
   });
 
+  it("reads an unquoted working directory that contains spaces", async () => {
+    await withScheduledTaskScript(
+      {
+        scriptLines: ["@echo off", "cd /d C:\\Program Files\\OpenClaw", "node gateway.js"],
+      },
+      async (env) => {
+        const result = await readScheduledTaskCommand(env);
+        expect(result).toEqual({
+          programArguments: ["node", "gateway.js"],
+          workingDirectory: "C:\\Program Files\\OpenClaw",
+          sourcePath: resolveTaskScriptPath(env),
+        });
+      },
+    );
+  });
+
   it("reads legacy quoted working directories that ended with a single backslash", async () => {
     await withScheduledTaskScript(
       {

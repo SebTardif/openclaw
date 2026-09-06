@@ -216,11 +216,19 @@ export function resolveTaskLauncherScriptPath(env: GatewayServiceEnv, scriptPath
 }
 
 function parseCmdWorkingDirectory(directoryArg: string): string {
-  const recovered = parseCmdScriptCommandLine(directoryArg)[0] ?? "";
+  const trimmed = directoryArg.trim();
+  if (!trimmed) {
+    return "";
+  }
+  // cmd.exe `cd` with extensions accepts unquoted spaces. Do not argv-split.
+  if (!trimmed.startsWith('"')) {
+    return trimmed;
+  }
+  const recovered = parseCmdScriptCommandLine(trimmed)[0] ?? "";
   // Older quoteCmdScriptArg wrapped trailing-backslash dirs as `..."\`.
   // cmd.exe still treats that closer as a closer; CRT does not.
-  if (directoryArg.startsWith('"') && recovered.endsWith('"') && /[^\\]\\"$/.test(directoryArg)) {
-    return directoryArg.slice(1, -1);
+  if (recovered.endsWith('"') && /[^\\]\\"$/.test(trimmed)) {
+    return trimmed.slice(1, -1);
   }
   return recovered;
 }
