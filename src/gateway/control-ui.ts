@@ -687,7 +687,7 @@ export async function handleControlUiAssistantMediaRequest(
       }
     }
     assertCurrentPolicy();
-    if (media.outsideRoots && mediaKind === "image") {
+    if (mediaKind === "image") {
       applyHttpImageContentSecurityPolicy(res);
     }
     res.setHeader("Content-Type", contentType);

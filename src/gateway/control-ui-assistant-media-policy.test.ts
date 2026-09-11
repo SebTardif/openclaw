@@ -312,6 +312,26 @@ describe("assistant image session policy", () => {
     },
   );
 
+  it("applies the image-document sandbox to workspace SVG as well as outside SVG", async () => {
+    entry.permissionMode = "workspace";
+    const source = path.join(project, "workspace-diagram.svg");
+    await fs.writeFile(
+      source,
+      '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><script href="/probe.js"></script></svg>',
+    );
+    const result = await request(source);
+    expect(result.payload).toMatchObject({ available: true, mimeType: "image/svg+xml" });
+    const bytes = await request(source, {
+      ticket: String(result.payload!.mediaTicket),
+      bytes: true,
+    });
+    expect(bytes.res.statusCode).toBe(200);
+    expect(bytes.setHeader).toHaveBeenCalledWith(
+      "content-security-policy",
+      expect.stringContaining("sandbox"),
+    );
+  });
+
   it("denies incognito images to a named profile while preserving administrator access", async () => {
     const source = path.join(project, "private.png");
     await fs.writeFile(source, PNG);
