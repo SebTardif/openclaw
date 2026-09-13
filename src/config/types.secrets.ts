@@ -7,7 +7,6 @@ import {
   DEFAULT_SECRET_PROVIDER_ALIAS,
   ENV_SECRET_REF_ID_RE,
   isSecretRef,
-  isValidEnvSecretRefId,
   type SecretRef,
   type SecretRefSource,
 } from "../secrets/ref-contract.js";
