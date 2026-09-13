@@ -1,6 +1,7 @@
 import { getRuntimeConfig } from "../config/io.js";
 import { retireQuestionChannelGateway } from "../infra/question-channel-runtime.js";
 import type { createSubsystemLogger } from "../logging/subsystem.js";
+import { bindLegacyPluginSdkResourceHost } from "../plugins/legacy-sdk-resource-host.js";
 import { bindGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
 import { createGatewayChatMetadataLifecycle } from "./server-chat-metadata-lifecycle.js";
 import type { startGatewayCoreRuntime } from "./server-core-runtime.js";
@@ -30,7 +31,6 @@ export async function prepareGatewayKernelRequestRuntime(params: {
     gatewayInstanceRuntimeRef,
     lifecycle,
     startupState,
-    kernel,
     shutdownRuntime,
   } = runtime;
   const chatMetadataLifecycle = await createGatewayChatMetadataLifecycle({
@@ -55,7 +55,7 @@ export async function prepareGatewayKernelRequestRuntime(params: {
       logHealth,
     });
   });
-  kernel.addGatewayLifetimeSidecar({
+  runtime.registerGatewayLifetimeSidecars({
     stop: async () => {
       // Received mutations and their finalizers join before lifetime sidecars stop.
       // Retire this exact context too when no request ever bound its coordinator.
@@ -74,7 +74,7 @@ export async function prepareGatewayKernelRequestRuntime(params: {
     ...(!workerPlacementRuntime && githubPublicationRuntime
       ? { reconcileGitHubPublications: githubPublicationRuntime.reconcilePublications }
       : {}),
-    sidecars: runtimeState.gatewayLifetimeSidecars,
+    publishSidecars: runtimeState.gatewayLifetimeSidecars.publish,
   });
   pluginGatewayContext.current = gatewayRequestContext;
   gatewayRequestContext.dispatchHookAgentTurn = async (pluginId, hookParams) => {
@@ -94,6 +94,10 @@ export async function prepareGatewayKernelRequestRuntime(params: {
   gatewayInstanceRuntimeRef.current = gatewayInstanceRuntime;
   gatewayRequestContext.resolveGatewayContext = () =>
     gatewayInstanceRuntime.isAvailable() ? gatewayRequestContext : undefined;
+  bindLegacyPluginSdkResourceHost(
+    gatewayRequestContext.resolveGatewayContext,
+    runtime.sdkResourceHost,
+  );
   // Detached RPC replies retain this availability fence after the request ends.
   // Shutdown must still recognize them as work owned by this exact Gateway.
   bindGatewayContextResolver(

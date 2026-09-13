@@ -24,6 +24,9 @@ export async function createServiceActivationFixture() {
   vi.spyOn(os, "userInfo").mockReturnValue({ ...os.userInfo(), homedir: root });
   const keys = [
     "HOME",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "SUDO_USER",
     "OPENCLAW_HOME",
     "OPENCLAW_STATE_DIR",
     "OPENCLAW_CONFIG_PATH",
@@ -44,6 +47,8 @@ export async function createServiceActivationFixture() {
     delete process.env[key];
   }
   process.env.HOME = root;
+  process.env.XDG_RUNTIME_DIR = path.join(root, ".runtime");
+  process.env.DBUS_SESSION_BUS_ADDRESS = `unix:path=${process.env.XDG_RUNTIME_DIR}/bus`;
   // This fixture models an installed service even though its manager calls are simulated.
   const unitPath = path.join(root, ".config/systemd/user/openclaw-gateway.service");
   await fs.mkdir(path.dirname(unitPath), { recursive: true });
@@ -75,7 +80,8 @@ export function readyRecoveryHealth(
   return {
     healthy: true,
     staleGatewayPids: [],
-    runtime: { status: running ? "running" : "stopped" },
+    runtime: { status: running ? "running" : "stopped", pid: running ? 4242 : undefined },
+    gatewayBootId: "service-boot",
     portUsage: { port, status: "busy", listeners: [], hints: [] },
   };
 }
@@ -112,7 +118,7 @@ export function registerRecoveryTests(params: {
 }): void {
   it.each([
     { startup: "fast", readyAfterMs: 0, needsRecovery: false },
-    { startup: "slow", readyAfterMs: 20_000, needsRecovery: false },
+    { startup: "slow", readyAfterMs: 20_000, needsRecovery: true },
     { startup: "unready", readyAfterMs: Infinity, needsRecovery: true },
     { startup: "wrong version", readyAfterMs: 0, needsRecovery: true },
   ])(
@@ -198,6 +204,7 @@ export function registerRecoveryTests(params: {
         refreshServiceEnv: true,
         serviceInstallEnv: process.env,
         serviceUpdateVerdict: before.serviceUpdateVerdict,
+        serviceManagerUid: before.serviceManagerUid,
         serviceEnv: before.serviceEnv,
         gatewayPort: 19305,
         requireRunningServiceAfterRestart: true,
@@ -218,8 +225,8 @@ export function registerRecoveryTests(params: {
       ]);
       expect(mocks.script).not.toHaveBeenCalled();
       expect(mocks.restart).not.toHaveBeenCalled();
-      if (startup === "unready") {
-        expect(healthResults[0]?.elapsedMs).toBeGreaterThanOrEqual(60_000);
+      if (startup === "unready" || startup === "slow") {
+        expect(healthResults[0]?.elapsedMs).toBe(6_500);
       } else if (!needsRecovery) {
         expect(nowMs).toBeGreaterThanOrEqual(readyAfterMs + 5_500);
       }

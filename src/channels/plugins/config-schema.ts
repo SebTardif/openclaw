@@ -21,14 +21,6 @@ import type {
   ChannelConfigUiHint,
 } from "./types.config.js";
 
-type ZodSchemaWithToJsonSchema = ZodTypeAny & {
-  toJSONSchema?: (params?: Record<string, unknown>) => unknown;
-};
-
-type ExtendableZodObject = ZodTypeAny & {
-  extend: (shape: Record<string, ZodTypeAny>) => ZodTypeAny;
-};
-
 /** Shared allowlist entry shape for channel sender/user ids. */
 const AllowFromEntrySchema = z.union([z.string(), z.number()]);
 /** Optional allowlist array used by channel config schema builders. */
@@ -113,12 +105,12 @@ export function buildNestedDmConfigSchema(extraShape?: ZodRawShape) {
 }
 
 /** Add `accounts` catchall and `defaultAccount` fields to a channel account schema. */
-export function buildCatchallMultiAccountChannelSchema<T extends ExtendableZodObject>(
+export function buildCatchallMultiAccountChannelSchema<T extends z.ZodObject>(
   accountSchema: T,
-): T {
-  return buildMultiAccountChannelSchema(accountSchema as unknown as z.ZodObject, {
+): MultiAccountChannelSchema<T, T, false> {
+  return buildMultiAccountChannelSchema(accountSchema, {
     accountsMode: "catchall",
-  }) as unknown as T;
+  });
 }
 
 type MultiAccountSchemaBaseOptions<TAccount extends ZodTypeAny, TOptional extends boolean> = {
@@ -158,7 +150,10 @@ type MultiAccountChannelSchema<
   T extends z.ZodObject,
   TAccount extends ZodTypeAny,
   TOptional extends boolean,
-> = z.ZodObject<z.util.Extend<T["shape"], MultiAccountEnvelopeShape<TAccount, TOptional>>>;
+> = z.ZodObject<
+  z.util.Extend<T["shape"], MultiAccountEnvelopeShape<TAccount, TOptional>>,
+  T["_zod"]["config"]
+>;
 
 /** Add the standard accounts/defaultAccount envelope and optional shared account/root refinement. */
 export function buildMultiAccountChannelSchema<
@@ -279,10 +274,10 @@ export function buildChannelConfigSchema(
   schema: ZodTypeAny,
   options?: BuildChannelConfigSchemaOptions,
 ): ChannelConfigSchema {
-  const schemaWithJson = schema as ZodSchemaWithToJsonSchema;
-  if (typeof schemaWithJson.toJSONSchema === "function") {
+  if ("_zod" in schema) {
     return {
-      schema: schemaWithJson.toJSONSchema({
+      // Plugin roots can contain newer SDK schemas; the host must own their conversion context.
+      schema: z.toJSONSchema(schema, {
         target: "draft-07",
         ...(options?.jsonSchemaMode ? { io: options.jsonSchemaMode } : {}),
         unrepresentable: "any",

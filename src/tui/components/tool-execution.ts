@@ -1,10 +1,13 @@
 // Tool execution component renders tool call status and output in the TUI.
 import { Box, Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { formatToolDetail, resolveToolDisplay } from "../../agents/tool-display.js";
 import { markdownTheme, tuiTheme as theme } from "../theme/theme.js";
 import * as tuiFormatters from "../tui-formatters.js";
+import { extractTuiImageSources } from "../tui-images.js";
 import { HyperlinkMarkdown } from "./hyperlink-markdown.js";
+import { MessageImages, type TuiImageRenderer } from "./message-images.js";
 
 // Rendering model for live tool calls in the chat log.
 type ToolResultContent = {
@@ -13,6 +16,10 @@ type ToolResultContent = {
   mimeType?: string;
   bytes?: number;
   omitted?: boolean;
+  data?: string;
+  url?: string;
+  artifactId?: string;
+  source?: unknown;
 };
 
 type ToolResult = {
@@ -29,13 +36,16 @@ class ToolOutputComponent extends HyperlinkMarkdown {
   private sourceText = "";
   private renderedSource: string | undefined;
   private expanded = false;
+  private literal = false;
+  private literalOutput = new Text("", 0, 0);
 
-  override setText(text: string): void {
-    const sourceText = tuiFormatters.sanitizeMarkdownSource(text);
-    if (this.sourceText === sourceText) {
+  override setText(text: string, literal = false): void {
+    const sourceText = tuiFormatters.sanitizeTerminalControlsAndBinary(text);
+    if (this.sourceText === sourceText && this.literal === literal) {
       return;
     }
     this.sourceText = sourceText;
+    this.literal = literal;
     this.renderedSource = undefined;
     super.invalidate();
   }
@@ -57,11 +67,17 @@ class ToolOutputComponent extends HyperlinkMarkdown {
       : truncateUtf16Safe(this.sourceText, previewBudget);
 
     if (this.renderedSource !== text) {
-      super.setText(text);
+      if (this.literal) {
+        this.literalOutput.setText(theme.toolOutput(text));
+      } else {
+        super.setText(text);
+      }
       this.renderedSource = text;
     }
 
-    const lines = super.render(safeWidth);
+    const lines = this.literal
+      ? this.literalOutput.render(safeWidth).map(tuiFormatters.isolateRtlRenderedLine)
+      : super.render(safeWidth);
     if (
       this.expanded ||
       (text.length === this.sourceText.length && lines.length <= PREVIEW_LINES)
@@ -106,6 +122,19 @@ function extractText(result?: ToolResult): string {
   return lines.join("\n");
 }
 
+function isCodeModeResult(toolName: string, result?: ToolResult): boolean {
+  if (toolName !== "exec" && toolName !== "wait") {
+    return false;
+  }
+  const visibleTools = asOptionalObjectRecord(result?.details?.telemetry)?.visibleTools;
+  return (
+    Array.isArray(visibleTools) &&
+    visibleTools.length === 2 &&
+    visibleTools[0] === "exec" &&
+    visibleTools[1] === "wait"
+  );
+}
+
 /** Displays a running or completed tool call with optional expandable output. */
 export class ToolExecutionComponent extends Container {
   private box: Box;
@@ -115,8 +144,9 @@ export class ToolExecutionComponent extends Container {
   private toolName: string;
   private title = "";
   private isPartial = true;
+  private images: MessageImages;
 
-  constructor(toolName: string, args: unknown) {
+  constructor(toolName: string, args: unknown, imageRenderer?: TuiImageRenderer) {
     super();
     this.toolName = toolName;
     this.box = new Box(1, 1, theme.toolPendingBg);
@@ -130,6 +160,8 @@ export class ToolExecutionComponent extends Container {
     this.box.addChild(this.header);
     this.box.addChild(this.argsLine);
     this.box.addChild(this.output);
+    this.images = new MessageImages(imageRenderer);
+    this.box.addChild(this.images);
     this.setArgs(args);
     this.setPartialResult(undefined);
   }
@@ -158,6 +190,10 @@ export class ToolExecutionComponent extends Container {
     this.updateResult(result, true);
   }
 
+  dispose() {
+    this.images.dispose();
+  }
+
   private refreshTitle() {
     const title = tuiFormatters.sanitizeRenderableLine(
       `${this.title}${this.isPartial ? " (running)" : ""}`,
@@ -174,6 +210,11 @@ export class ToolExecutionComponent extends Container {
       isPartial ? theme.toolPendingBg : isError ? theme.toolErrorBg : theme.toolSuccessBg,
     );
     const raw = extractText(result);
-    this.output.setText(raw.trim() ? raw : isPartial ? "…" : "");
+    // Code Mode JSON is literal data; prose normalization can change values and escapes.
+    this.output.setText(
+      raw.trim() ? raw : isPartial ? "…" : "",
+      isCodeModeResult(this.toolName, result),
+    );
+    this.images.setImages(extractTuiImageSources(result));
   }
 }

@@ -7,6 +7,9 @@ enum DashboardGatewaysRequest: Equatable {
     case select(DashboardGatewayTarget)
     case openWindow(DashboardGatewayTarget)
     case setPrimary(DashboardGatewayTarget)
+    case reconnect(DashboardGatewayTarget)
+    case reconnectCancel(DashboardGatewayTarget)
+    case reconnectBrowser(DashboardGatewayTarget, UUID)
     case openSettings
 }
 
@@ -82,10 +85,17 @@ extension DashboardWindowController {
         else {
             return nil
         }
+        if type == "reconnect-browser" {
+            guard let rawAttempt = payload["attempt"] as? String,
+                  let attempt = UUID(uuidString: rawAttempt) else { return nil }
+            return .reconnectBrowser(target, attempt)
+        }
         return switch type {
         case "select": .select(target)
         case "open-window": .openWindow(target)
         case "set-primary": .setPrimary(target)
+        case "reconnect": .reconnect(target)
+        case "reconnect-cancel": .reconnectCancel(target)
         default: nil
         }
     }
@@ -94,11 +104,21 @@ extension DashboardWindowController {
         guard message.name == Self.gatewaysMessageHandlerName,
               message.webView === self.webView,
               message.frameInfo.isMainFrame,
-              Self.isTrustedLinkSource(message.frameInfo.request.url, dashboardURL: self.currentURL),
               let request = Self.gatewaysRequest(from: message.body)
         else {
             return
         }
+        let isSignedOutAction = self.signedOut.map { page in
+            if case let .reconnectBrowser(target, _) = request { return target == page.target }
+            return request == .reconnect(page.target) || request == .reconnectCancel(page.target)
+        } ?? false
+        let isSignedOutDocument = self.isShowingFailurePage && isSignedOutAction &&
+            message.frameInfo.request.url?.absoluteString == "about:blank" &&
+            self.webView.url?.absoluteString == "about:blank"
+        // The recovery capability belongs to the native failure document, never a loaded Gateway page.
+        if case .reconnectBrowser = request, !isSignedOutDocument { return }
+        guard isSignedOutDocument ||
+            Self.isTrustedLinkSource(message.frameInfo.request.url, dashboardURL: self.currentURL) else { return }
         DashboardManager.shared.handleGatewayRequest(request, from: self)
     }
 

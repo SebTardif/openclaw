@@ -1255,6 +1255,112 @@ describe("plugin sdk alias helpers", () => {
     });
   });
 
+  it.each([
+    { preference: "src", layout: "both", expected: "srcFile" },
+    { preference: "dist", layout: "both", expected: "distFile" },
+    { preference: "dist", layout: "source-only", expected: "srcFile" },
+    { preference: "src", layout: "dist-only", expected: "distFile" },
+    { preference: "src", layout: "missing-diagnostics", expected: "srcFile" },
+    { preference: "src", layout: "no-package", expected: null },
+    { preference: "dist", layout: "no-package", expected: null },
+  ] as const)(
+    "resolves llm-core exports without flattening paths ($preference/$layout)",
+    ({ preference, layout, expected }) => {
+      const fixture = createPluginSdkAliasFixture();
+      const workspace = writeWorkspaceAliasFixtures(fixture.root, [
+        ["@openclaw/llm-core", "llm-core", "index"],
+        ["@openclaw/llm-core/diagnostics", "llm-core", "utils/diagnostics"],
+        ["@openclaw/llm-core/event-stream", "llm-core", "utils/event-stream"],
+        ["@openclaw/llm-core/types", "llm-core", "types"],
+        ["@openclaw/llm-core/validation", "llm-core", "validation"],
+      ]);
+      const manifest = path.join(fixture.root, "packages", "llm-core", "package.json");
+      fs.writeFileSync(
+        manifest,
+        JSON.stringify({
+          name: "@openclaw/llm-core",
+          type: "module",
+          exports: {
+            ".": {
+              types: "./dist/index.d.mts",
+              import: "./dist/index.mjs",
+              default: "./dist/index.mjs",
+            },
+            "./types": {
+              types: "./dist/types.d.mts",
+              import: "./dist/types.mjs",
+              default: "./dist/types.mjs",
+            },
+            "./diagnostics": {
+              types: "./dist/utils/diagnostics.d.mts",
+              import: "./dist/utils/diagnostics.mjs",
+              default: "./dist/utils/diagnostics.mjs",
+            },
+            "./event-stream": {
+              types: "./dist/utils/event-stream.d.mts",
+              import: "./dist/utils/event-stream.mjs",
+              default: "./dist/utils/event-stream.mjs",
+            },
+            "./validation": {
+              types: "./dist/validation.d.mts",
+              import: "./dist/validation.mjs",
+              default: "./dist/validation.mjs",
+            },
+          },
+        }),
+        "utf-8",
+      );
+      writeWorkspacePackageEntry({
+        root: fixture.root,
+        packageDir: "llm-core",
+        srcFile: "internal.ts",
+        distFile: "internal.mjs",
+      });
+      if (layout === "no-package") {
+        fs.unlinkSync(manifest);
+      }
+      for (const entry of workspace) {
+        if (
+          layout === "dist-only" ||
+          (layout === "missing-diagnostics" && entry.alias === "@openclaw/llm-core/diagnostics")
+        ) {
+          fs.unlinkSync(entry.srcFile);
+        }
+        if (
+          layout === "source-only" ||
+          (layout === "missing-diagnostics" && entry.alias === "@openclaw/llm-core/diagnostics")
+        ) {
+          fs.unlinkSync(entry.distFile);
+        }
+      }
+      const sourcePluginEntry = writePluginEntry(
+        fixture.root,
+        bundledPluginFile("demo", "src/index.ts"),
+      );
+      const prepared = withEnv({ NODE_ENV: undefined }, () =>
+        preparePluginLoaderAliases({
+          modulePath: sourcePluginEntry,
+          pluginSdkResolution: preference,
+        }),
+      );
+      for (const entry of workspace) {
+        const target = prepared.resolveAlias(entry.alias);
+        const missing =
+          expected === null ||
+          (layout === "missing-diagnostics" && entry.alias === "@openclaw/llm-core/diagnostics");
+        if (missing) {
+          expect(target, entry.alias).toBeUndefined();
+        } else {
+          expect(target, entry.alias).toBeDefined();
+          expect(fs.realpathSync(target ?? ""), entry.alias).toBe(fs.realpathSync(entry[expected]));
+        }
+        expect(prepared.getAliasMap()[entry.alias], entry.alias).toBe(target);
+      }
+      expect(prepared.resolveAlias("@openclaw/llm-core/internal")).toBeUndefined();
+      expect(prepared.getAliasMap()["@openclaw/llm-core/internal"]).toBeUndefined();
+    },
+  );
+
   it("aliases workspace packages to source when dist artifacts are missing", () => {
     const fixture = createPluginSdkAliasFixture();
     writeWorkspacePackageExports(fixture.root, "media-core", ["", "attachment-classify", "mime"]);
@@ -1553,6 +1659,58 @@ describe("plugin sdk alias helpers", () => {
     });
   });
 
+  it.each(
+    (["src", "dist"] as const).flatMap((preference) =>
+      ["sibling-argv", "missing-argv", "no-argv", "development", "no-host", "invalid-host"].map(
+        (mode) => ({ preference, mode }),
+      ),
+    ),
+  )("selects the running SDK host across checkouts ($preference/$mode)", ({ preference, mode }) => {
+    const fixtureOptions = {
+      srcFile: "plugin-state-store-runtime.ts",
+      distFile: "plugin-state-store-runtime.js",
+      srcBody: 'throw new Error("SDK metadata selection must not execute source");\n',
+      distBody: 'throw new Error("SDK metadata selection must not execute dist");\n',
+      packageExports: {
+        "./plugin-sdk/plugin-state-store-runtime": {
+          default: "./dist/plugin-sdk/plugin-state-store-runtime.js",
+        },
+      },
+    };
+    const host = createPluginSdkAliasFixture(fixtureOptions);
+    const sibling = createPluginSdkAliasFixture(fixtureOptions);
+    const pluginEntry = writePluginEntry(sibling.root, ".artifacts/plugin/index.ts");
+    const loader = writePluginEntry(host.root, "src/plugins/loader.ts");
+    const noHost = mode === "no-host" || mode === "invalid-host";
+    const expected = noHost || mode === "development" ? sibling : host;
+    const prepared = preparePluginLoaderAliases({
+      modulePath: pluginEntry,
+      cwd: sibling.root,
+      moduleUrl:
+        mode === "no-host"
+          ? undefined
+          : mode === "invalid-host"
+            ? "not-a-file-url"
+            : pathToFileURL(loader).href,
+      argv1:
+        mode === "no-argv"
+          ? undefined
+          : mode === "missing-argv"
+            ? path.join(makeTempDir(), "missing-launcher")
+            : path.join(noHost ? host.root : sibling.root, "openclaw.mjs"),
+      devSourceRoot: mode === "development" ? sibling.root : null,
+      pluginSdkResolution: preference,
+    });
+    for (const prefix of ["openclaw/plugin-sdk", "@openclaw/plugin-sdk"]) {
+      const specifier = `${prefix}/plugin-state-store-runtime`;
+      const target = prepared.resolveAlias(specifier);
+      expect(fs.realpathSync(target ?? "")).toBe(
+        fs.realpathSync(preference === "src" ? expected.srcFile : expected.distFile),
+      );
+      expect(prepared.getAliasMap()[specifier]).toBe(target);
+    }
+  });
+
   it("resolves plugin-sdk aliases for user-installed plugins via moduleUrl hint", () => {
     const {
       externalPluginEntry,
@@ -1566,16 +1724,11 @@ describe("plugin sdk alias helpers", () => {
     // This covers installations where argv1 does not resolve to the openclaw root
     // (e.g. single-binary distributions or custom process launchers).
     // Use openclaw.mjs which is created by createPluginSdkAliasFixture (bin+marker mode).
-    // Use fixture.root as cwd so process.cwd() fallback also resolves to fixture, not the
-    // real openclaw repo root in the test runner environment.
     const loaderModuleUrl = pathToFileURL(path.join(fixture.root, "openclaw.mjs")).href;
 
     // Use externalPluginRoot as cwd so process.cwd() fallback cannot accidentally
     // resolve to the fixture root — only the moduleUrl hint can bridge the gap.
-    // Pass "" for argv1: undefined would trigger the STARTUP_ARGV1 default (the vitest
-    // runner binary, inside the openclaw repo), which resolves before moduleUrl is checked.
-    // An empty string is falsy so resolveTrustedOpenClawRootFromArgvHint returns null,
-    // meaning only the moduleUrl hint can bridge the gap.
+    // Disable the startup argv hint so this row exercises the explicit host alone.
     const aliases = withCwd(externalPluginRoot, () =>
       withEnv({ NODE_ENV: undefined }, () =>
         buildPluginLoaderAliasMap(
@@ -1639,8 +1792,8 @@ describe("plugin sdk alias helpers", () => {
   it.each([
     ["node", "linux", "dist/plugins/runtime/index.js", false, true],
     ["node", "linux", "extensions/demo/index.ts", false, false],
-    ["bun", "linux", "dist/plugins/runtime/index.js", false, false],
-    ["bun", "linux", "dist/extensions/demo/index.js", true, false],
+    ["bun", "linux", "dist/plugins/runtime/index.js", false, true],
+    ["bun", "linux", "dist/extensions/demo/index.js", true, true],
     ["node", "win32", "dist/plugins/runtime/index.js", false, true],
     ["node", "win32", "dist/extensions/demo/index.js", true, true],
     ["node", "win32", "dist/extensions/demo/helper.ts", true, false],

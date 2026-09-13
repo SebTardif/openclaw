@@ -15,7 +15,7 @@ import {
   createOpenAIProviderAcceptanceHook,
   isOpenAICompletionsThinkingEnabled,
 } from "../transports/openai-transport-shared.js";
-import { resolveOpencodeSessionHeaders } from "../transports/session-affinity.js";
+import { resolveProviderSimpleCompletionHeaders } from "../transports/provider-transport-turn-state.js";
 import {
   assignTransportErrorDetails,
   transportAbortError,
@@ -72,7 +72,7 @@ export const streamOpenAICompletions: StreamFunction<
         model,
         context,
         apiKey,
-        resolveOpencodeSessionHeaders(model, options),
+        resolveProviderSimpleCompletionHeaders(model, options),
         cacheSessionId,
         compat,
       );
@@ -231,12 +231,7 @@ export const streamSimpleOpenAICompletions: StreamFunction<
   const clampedReasoning = options?.reasoning
     ? clampThinkingLevel(model, options.reasoning)
     : undefined;
-  const reasoningEffort =
-    clampedReasoning === "off"
-      ? undefined
-      : clampedReasoning === "max"
-        ? "xhigh"
-        : clampedReasoning;
+  const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
   const toolChoice = (options as OpenAICompletionsOptions | undefined)?.toolChoice;
 
   return streamOpenAICompletions(model, context, {

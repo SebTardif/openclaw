@@ -17,7 +17,7 @@ import {
   cleanupAgedMemoryReindexTempFiles,
   closeMemoryDatabase,
   openMemoryDatabaseAtPath,
-  publishMemoryDatabaseTables,
+  prepareMemoryDatabasePublication,
   readMemoryDatabaseRevision,
   MemoryIndexRevisionConflictError,
   resetMemoryDatabase,
@@ -34,6 +34,13 @@ function ensureTestMemorySchema(db: DatabaseSync, cacheEnabled = true, ftsEnable
 
 async function expectPathMissing(targetPath: string): Promise<void> {
   await expect(fs.access(targetPath)).rejects.toThrow("ENOENT");
+}
+
+async function publishPreparedMemoryDatabase(
+  params: Parameters<typeof prepareMemoryDatabasePublication>[0],
+): Promise<void> {
+  const publish = await prepareMemoryDatabasePublication(params);
+  publish();
 }
 
 describe("memory manager database publication", () => {
@@ -174,7 +181,7 @@ describe("memory manager database publication", () => {
         .run("new", 9, "when flying");
       sourceDb.close();
 
-      await publishMemoryDatabaseTables({
+      await publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
         sourceHasVectors: false,
@@ -209,7 +216,7 @@ describe("memory manager database publication", () => {
         .run("stale", "[]");
       sourceDb.close();
 
-      await publishMemoryDatabaseTables({
+      await publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
         sourceHasVectors: false,
@@ -261,7 +268,7 @@ describe("memory manager database publication", () => {
       const expectedRevision = readMemoryDatabaseRevision(targetDb);
       sourceDb.close();
 
-      await publishMemoryDatabaseTables({
+      await publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
         sourceHasVectors: false,
@@ -334,7 +341,7 @@ describe("memory manager database publication", () => {
       const expectedRevision = readMemoryDatabaseRevision(targetDb);
       sourceDb.close();
 
-      await publishMemoryDatabaseTables({
+      await publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
         sourceHasVectors: false,
@@ -408,7 +415,7 @@ describe("memory manager database publication", () => {
           return originalLoad(params);
         });
       try {
-        await publishMemoryDatabaseTables({
+        await publishPreparedMemoryDatabase({
           targetDb,
           sourcePath,
           sourceHasVectors: true,
@@ -461,7 +468,7 @@ describe("memory manager database publication", () => {
       concurrentDb.close();
       concurrentDb = undefined;
 
-      const publication = publishMemoryDatabaseTables({
+      const publication = publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
         sourceHasVectors: false,
@@ -486,24 +493,31 @@ describe("memory manager database publication", () => {
     }
   });
 
-  it("preserves the live embedding cache when the shadow index has caching disabled", async () => {
+  it("preserves the live embedding cache instead of publishing the shadow cache", async () => {
     const targetPath = path.join(fixtureRoot, "target.sqlite");
     const sourcePath = path.join(fixtureRoot, "source.sqlite");
     const targetDb = new DatabaseSync(targetPath);
     const sourceDb = new DatabaseSync(sourcePath);
     try {
       ensureTestMemorySchema(targetDb);
-      ensureTestMemorySchema(sourceDb, false);
+      ensureTestMemorySchema(sourceDb);
       targetDb
         .prepare(
           `INSERT INTO memory_embedding_cache (
              provider, model, provider_key, hash, embedding, dims, updated_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run("test", "model", "key", "hash", "[]", 0, 1);
+        .run("test", "model", "key", "live-hash", "[]", 0, 1);
+      sourceDb
+        .prepare(
+          `INSERT INTO memory_embedding_cache (
+             provider, model, provider_key, hash, embedding, dims, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run("test", "model", "key", "shadow-hash", "[1]", 1, 2);
       sourceDb.close();
 
-      await publishMemoryDatabaseTables({
+      await publishPreparedMemoryDatabase({
         targetDb,
         sourcePath,
         sourceHasVectors: false,
@@ -512,7 +526,7 @@ describe("memory manager database publication", () => {
       });
 
       expect(targetDb.prepare("SELECT hash FROM memory_embedding_cache").all()).toEqual([
-        { hash: "hash" },
+        { hash: "live-hash" },
       ]);
     } finally {
       try {
@@ -540,7 +554,7 @@ describe("memory manager database publication", () => {
     try {
       cleanupAgedMemoryReindexTempFiles(databasePath);
     } finally {
-      lock.release();
+      await lock.release();
     }
 
     await expectPathMissing(oldShadow);

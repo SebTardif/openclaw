@@ -221,6 +221,7 @@ export function createProcessSupervisor(): ProcessSupervisor & {
     // A queued replacement must still own authority before stopping the surviving run.
     if (!owner.terminationReason) {
       input.assertCurrent?.();
+      input.beforeSpawn?.();
       // Native PTY has no tree-extinction owner. Reject before spawning so exec's
       // existing PTY-unavailable fallback can run once under the child anchor.
       if (input.mode === "pty" && requireProcessTree) {
@@ -259,6 +260,17 @@ export function createProcessSupervisor(): ProcessSupervisor & {
       // its command or terminate the surviving scope after that cancellation.
       return settleConstructionResult(startingTerminationReason);
     }
+
+    // Finish fallible argument preparation before affecting a surviving scope or arming cancellation.
+    if (input.mode !== "anchored-shell" && input.argv.length === 0) {
+      throw new Error("spawn argv cannot be empty");
+    }
+    const resolvedArgs = input.mode === "child" ? input.resolveArgs?.() : undefined;
+    if (owner.terminationReason) {
+      return settleConstructionResult(owner.terminationReason);
+    }
+    input.assertCurrent?.();
+    input.beforeSpawn?.();
 
     if (input.replaceExistingScope && scopeKey) {
       // Scope admission already waited for predecessor startups. Do not
@@ -356,9 +368,6 @@ export function createProcessSupervisor(): ProcessSupervisor & {
     };
 
     try {
-      if (input.mode !== "anchored-shell" && input.argv.length === 0) {
-        throw new Error("spawn argv cannot be empty");
-      }
       // Reserve the join before construction: a timeout result does not release
       // resources acquired later, or hide cleanup when readiness rejects after spawn.
       const cleanup = createDeferredCore();
@@ -376,6 +385,7 @@ export function createProcessSupervisor(): ProcessSupervisor & {
         input.mode === "pty"
           ? createPtyAdapter({
               assertCurrent: input.assertCurrent,
+              beforeSpawn: input.beforeSpawn,
               shell: expectDefined(input.argv[0], "spawn executable"),
               args: input.argv.slice(1),
               cwd: input.cwd,
@@ -386,6 +396,7 @@ export function createProcessSupervisor(): ProcessSupervisor & {
           : input.mode === "anchored-shell"
             ? createChildAdapter({
                 assertCurrent: input.assertCurrent,
+                beforeSpawn: input.beforeSpawn,
                 anchoredShellCommand: input.command,
                 cwd: input.cwd,
                 env: input.env,
@@ -394,8 +405,9 @@ export function createProcessSupervisor(): ProcessSupervisor & {
               })
             : createChildAdapter({
                 assertCurrent: input.assertCurrent,
+                beforeSpawn: input.beforeSpawn,
                 ...(requireProcessTree && !external ? { ownProcessTree: true as const } : {}),
-                argv: input.argv,
+                argv: resolvedArgs ? [...input.argv, ...resolvedArgs] : input.argv,
                 argv0: input.argv0,
                 cwd: input.cwd,
                 env: input.env,

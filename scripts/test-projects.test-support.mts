@@ -28,9 +28,19 @@ import {
   channelSessionContractPatterns,
   channelSurfaceContractPatterns,
 } from "../test/vitest/vitest.contracts-paths.mjs";
+import {
+  DATABASE_WORKER_WATCH_OWNER_ENV_KEY,
+  DATABASE_WORKER_WATCH_TESTS_ENV_KEY,
+  databaseWorkerCoreFormerFastKinds,
+  databaseWorkerCoreTestFiles,
+  isDatabaseWorkerCoreTestFile,
+} from "../test/vitest/vitest.database-worker-core-paths.mjs";
 import { codexExtensionTestRoots } from "../test/vitest/vitest.extension-codex-paths.mjs";
+import { databaseWorkerExtensionTestFiles } from "../test/vitest/vitest.extension-database-workers-paths.mjs";
 import { matrixExtensionTestRoots } from "../test/vitest/vitest.extension-matrix-paths.mjs";
 import { telegramExtensionTestRoots } from "../test/vitest/vitest.extension-telegram-paths.mjs";
+import { gatewayPluginTestFiles } from "../test/vitest/vitest.gateway-server-paths.mjs";
+import { packageContractTestFiles } from "../test/vitest/vitest.package-contract-paths.mjs";
 import { resolveVitestFsModuleCacheRoot } from "../test/vitest/vitest.performance-config.ts";
 import {
   isPluginSdkLightTarget,
@@ -85,7 +95,11 @@ import {
 import { readTestSelectorSourceFacts } from "./lib/test-selector-source-facts.mts";
 // CI imports planning before dependency installation; execution owners stay outside this closure.
 import { resolveVitestCliEntry } from "./lib/vitest-build-prerequisites.mts";
-import { resolveBooleanModeFlag, vitestOptionConsumesNextArg } from "./lib/vitest-cli-mode.mts";
+import {
+  collectVitestFileFilters,
+  resolveBooleanModeFlag,
+  vitestOptionConsumesNextArg,
+} from "./lib/vitest-cli-mode.mts";
 import {
   isCiLikeEnv,
   resolveLocalFullSuiteProfile,
@@ -105,7 +119,10 @@ import {
 
 type VitestRunPlan = {
   config: string;
+  databaseWorkerWatchOwner?: string;
+  databaseWorkerWatchTests?: string[];
   forwardedArgs: string[];
+  timingTargets?: string[];
   includePatterns: string[] | null;
   watchMode: boolean;
 };
@@ -128,6 +145,7 @@ type ChangedTestTargetOptions = {
   combineSiblingWithImportGraph?: boolean;
   forceFullImportGraph?: boolean;
   includeExtensionImpact?: boolean;
+  watchMode?: boolean;
 };
 
 type ChangedTestTargetPlan = {
@@ -243,6 +261,8 @@ const EXTENSION_PROVIDERS_VITEST_CONFIG = "test/vitest/vitest.extension-provider
 const EXTENSION_QA_VITEST_CONFIG = "test/vitest/vitest.extension-qa.config.ts";
 const EXTENSION_SIGNAL_VITEST_CONFIG = "test/vitest/vitest.extension-signal.config.ts";
 const EXTENSION_SLACK_VITEST_CONFIG = "test/vitest/vitest.extension-slack.config.ts";
+const EXTENSION_DATABASE_WORKERS_VITEST_CONFIG =
+  "test/vitest/vitest.extension-database-workers.config.ts";
 const EXTENSION_TELEGRAM_VITEST_CONFIG = "test/vitest/vitest.extension-telegram.config.ts";
 const EXTENSION_VOICE_CALL_VITEST_CONFIG = "test/vitest/vitest.extension-voice-call.config.ts";
 const EXTENSION_WHATSAPP_VITEST_CONFIG = "test/vitest/vitest.extension-whatsapp.config.ts";
@@ -364,7 +384,7 @@ function resolveSpecSortWeight(
   }
   // Exact selections use their file costs; a whole-config sample would price a
   // single worker proof like all tooling. Globs keep the whole-config fallback.
-  const includes = spec.includePatterns;
+  const includes = spec.timingTargets ?? spec.includePatterns;
   const estimateFileSeconds =
     spec.config === TOOLING_VITEST_CONFIG
       ? estimateVitestToolingFileSeconds
@@ -427,12 +447,10 @@ const RUNTIME_CONFIG_VITEST_CONFIG = "test/vitest/vitest.runtime-config.config.t
 const SECRETS_VITEST_CONFIG = "test/vitest/vitest.secrets.config.ts";
 const SHARED_CORE_VITEST_CONFIG = "test/vitest/vitest.shared-core.config.ts";
 const TASKS_VITEST_CONFIG = "test/vitest/vitest.tasks.config.ts";
-const PACKAGE_DOCKER_VITEST_CONFIG = "test/vitest/vitest.package-docker.config.ts";
+const PACKAGE_CONTRACT_VITEST_CONFIG = "test/vitest/vitest.package-contract.config.ts";
 const TOOLING_DOCKER_VITEST_CONFIG = "test/vitest/vitest.tooling-docker.config.ts";
 const TOOLING_ISOLATED_VITEST_CONFIG = "test/vitest/vitest.tooling-isolated.config.ts";
 const TOOLING_VITEST_CONFIG = "test/vitest/vitest.tooling.config.ts";
-const PACKAGE_DOCKER_TEST_TARGET =
-  "test/e2e/qa-lab/runtime/package-openclaw-for-docker.e2e.test.ts";
 const TOOLING_DOCKER_TEST_TARGET = "test/scripts/docker-build-helper.test.ts";
 const BROAD_TOOLING_SCRIPT_TEST_PATTERNS = new Set([
   "test/scripts/**/*.test.ts",
@@ -480,7 +498,7 @@ const VITEST_CONFIG_BY_KIND: Record<string, string> = {
   daemon: DAEMON_VITEST_CONFIG,
   media: MEDIA_VITEST_CONFIG,
   logging: LOGGING_VITEST_CONFIG,
-  packageDocker: PACKAGE_DOCKER_VITEST_CONFIG,
+  packageContract: PACKAGE_CONTRACT_VITEST_CONFIG,
   pluginSdkLight: PLUGIN_SDK_LIGHT_VITEST_CONFIG,
   pluginSdk: PLUGIN_SDK_VITEST_CONFIG,
   process: PROCESS_VITEST_CONFIG,
@@ -534,6 +552,7 @@ const VITEST_CONFIG_BY_KIND: Record<string, string> = {
   extensionIrc: EXTENSION_IRC_VITEST_CONFIG,
   extensionLine: EXTENSION_LINE_VITEST_CONFIG,
   extensionMattermost: EXTENSION_MATTERMOST_VITEST_CONFIG,
+  extensionDatabaseWorkers: EXTENSION_DATABASE_WORKERS_VITEST_CONFIG,
   extensionTelegram: EXTENSION_TELEGRAM_VITEST_CONFIG,
   extensionVoiceCall: EXTENSION_VOICE_CALL_VITEST_CONFIG,
   extensionWhatsApp: EXTENSION_WHATSAPP_VITEST_CONFIG,
@@ -577,7 +596,7 @@ const PRECISE_SOURCE_TEST_TARGETS = new Map<string, string[]>([
     ["test/scripts/vitest-runner-task-updates.test.ts"],
   ]),
   ...[
-    "src/system-agent/setup-inference-persist.ts",
+    "src/system-agent/setup-inference-turn.ts",
     "src/agents/embedded-agent-runner/run/run-attempt-dispatch.ts",
   ].map<[string, string[]]>((sourcePath) => [
     sourcePath,
@@ -696,6 +715,8 @@ const MERMAID_RENDERER_TEST_TARGETS = [
 ];
 const SOURCE_TEST_TARGETS = new Map([
   ...PRECISE_SOURCE_TEST_TARGETS,
+  ["src/plugin-sdk/memory-host-events.ts", ["src/plugin-sdk/memory-host-events.test.ts"]],
+  ["src/plugin-sdk/persistent-dedupe.ts", ["src/plugin-sdk/memory-host-events.test.ts"]],
   [
     "extensions/browser/src/browser/chrome-mcp-options.ts",
     [
@@ -876,11 +897,19 @@ const SOURCE_ROOTS_FOR_IMPORT_GRAPH = [
   "packages",
   "ui/src",
   "ui/config",
+  "ui/public",
   "test",
 ];
 const IMPORTABLE_FILE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
-const IMPORT_GRAPH_GREP_PATHS = SOURCE_ROOTS_FOR_IMPORT_GRAPH.flatMap((root) =>
-  IMPORTABLE_FILE_EXTENSIONS.map((ext) => `:(glob)${root}/**/*${ext}`),
+function importGraphPathspecs(roots: string[], suffixes: readonly string[]) {
+  return [
+    ...roots.flatMap((root) => suffixes.map((suffix) => `:(glob)${root}/**/*${suffix}`)),
+    ...suffixes.map((suffix) => `:(glob)ui/*${suffix}`),
+  ];
+}
+const IMPORT_GRAPH_GREP_PATHS = importGraphPathspecs(
+  SOURCE_ROOTS_FOR_IMPORT_GRAPH,
+  IMPORTABLE_FILE_EXTENSIONS,
 );
 const TOOLING_IMPORT_GRAPH_ROOTS = [...SOURCE_ROOTS_FOR_IMPORT_GRAPH, "scripts"];
 const TOOLING_IMPORTABLE_FILE_EXTENSIONS = [
@@ -890,8 +919,9 @@ const TOOLING_IMPORTABLE_FILE_EXTENSIONS = [
   ".mjs",
   ".cjs",
 ];
-const TOOLING_IMPORT_GRAPH_GREP_PATHS = TOOLING_IMPORT_GRAPH_ROOTS.flatMap((root) =>
-  TOOLING_IMPORTABLE_FILE_EXTENSIONS.map((ext) => `:(glob)${root}/**/*${ext}`),
+const TOOLING_IMPORT_GRAPH_GREP_PATHS = importGraphPathspecs(
+  TOOLING_IMPORT_GRAPH_ROOTS,
+  TOOLING_IMPORTABLE_FILE_EXTENSIONS,
 );
 const BROAD_CHANGED_ENV_KEY = "OPENCLAW_TEST_CHANGED_BROAD";
 const VITEST_NO_OUTPUT_TIMEOUT_ENV_KEY = "OPENCLAW_VITEST_NO_OUTPUT_TIMEOUT_MS";
@@ -1268,7 +1298,7 @@ function includePatternMatchesAnyFile(pattern: string, files: string[]) {
 function resolveExplicitSourceTestTargets(
   targetArg: string,
   cwd: string,
-  options: Pick<ChangedTestTargetOptions, "forceFullImportGraph"> = {},
+  options: Pick<ChangedTestTargetOptions, "forceFullImportGraph" | "watchMode"> = {},
 ) {
   const relative = toRepoRelativeTarget(targetArg, cwd);
   const kind = classifyTarget(targetArg, cwd);
@@ -1281,11 +1311,14 @@ function resolveExplicitSourceTestTargets(
   if (isTestFileTarget(relative)) {
     return null;
   }
-  const preciseTargets = resolvePreciseChangedTestTargets(relative, {
-    cwd,
-    forceFullImportGraph: options.forceFullImportGraph === true,
-  });
-  if (preciseTargets && preciseTargets.length > 0) {
+  const preciseTargets = [
+    ...(resolvePreciseChangedTestTargets(relative, {
+      cwd,
+      forceFullImportGraph: options.forceFullImportGraph === true,
+    }) ?? []),
+    ...(options.watchMode ? [] : resolveKovaSchemaTestTargets(relative)),
+  ];
+  if (preciseTargets.length > 0) {
     return [...new Set(preciseTargets)].toSorted((left, right) => left.localeCompare(right));
   }
   if (!isTestSupportFileTarget(relative)) {
@@ -1300,7 +1333,7 @@ function resolveExplicitSourceTestTargets(
   ].toSorted((left, right) => left.localeCompare(right));
 }
 
-function expandExplicitSourceTestTargets(targetArgs: string[], cwd: string) {
+function expandExplicitSourceTestTargets(targetArgs: string[], cwd: string, watchMode: boolean) {
   const sourceTargetCount = targetArgs.filter((targetArg) => {
     const relative = toRepoRelativeTarget(targetArg, cwd);
     return isExistingFileTarget(targetArg, cwd) && !isTestFileTarget(relative);
@@ -1308,6 +1341,18 @@ function expandExplicitSourceTestTargets(targetArgs: string[], cwd: string) {
   const forceFullImportGraph = sourceTargetCount > EXPLICIT_SOURCE_FULL_IMPORT_GRAPH_THRESHOLD;
   return targetArgs.flatMap((targetArg) => {
     const relative = toRepoRelativeTarget(targetArg, cwd);
+    if (classifyTarget(targetArg, cwd) === "extensionFull") {
+      // The full aggregate already includes the dedicated database-worker project.
+      return [targetArg];
+    }
+    const databaseWorkerTargets = databaseWorkerExtensionTestFiles.filter((file) =>
+      isGlobTarget(relative)
+        ? path.matchesGlob(file, relative)
+        : isExistingDirectoryTarget(targetArg, cwd) && isPathAtOrUnder(file, relative),
+    );
+    if (databaseWorkerTargets.length > 0) {
+      return [...databaseWorkerTargets, targetArg];
+    }
     if (
       (isPathAtOrUnder(relative, "ui") || isPluginControlUiPath(relative)) &&
       isGlobTarget(relative)
@@ -1347,6 +1392,7 @@ function expandExplicitSourceTestTargets(targetArgs: string[], cwd: string) {
     }
     const targets = resolveExplicitSourceTestTargets(targetArg, cwd, {
       forceFullImportGraph,
+      watchMode,
     });
     return targets && targets.length > 0 ? targets : [targetArg];
   });
@@ -1422,7 +1468,7 @@ function isCanonicalAgentOwnerDirectoryTarget(targetArg: string, cwd: string) {
  * Finds explicit test path targets that do not match any known project plan.
  */
 export function findUnmatchedExplicitTestTargets(args: string[], cwd = process.cwd()) {
-  const { targetArgs } = parseTestProjectsArgs(args, cwd);
+  const { targetArgs, watchMode } = parseTestProjectsArgs(args, cwd);
   if (targetArgs.length === 0) {
     return [];
   }
@@ -1474,7 +1520,7 @@ export function findUnmatchedExplicitTestTargets(args: string[], cwd = process.c
       continue;
     }
 
-    const explicitSupportTargets = resolveExplicitSourceTestTargets(targetArg, cwd);
+    const explicitSupportTargets = resolveExplicitSourceTestTargets(targetArg, cwd, { watchMode });
     if (explicitSupportTargets) {
       if (explicitSupportTargets.length === 0) {
         unmatched.push({
@@ -1506,6 +1552,7 @@ function listImportGraphFiles(
   directory: string,
   files: string[] = [],
   extensions: readonly string[] = IMPORTABLE_FILE_EXTENSIONS,
+  recursive = true,
 ) {
   let entries;
   try {
@@ -1517,7 +1564,7 @@ function listImportGraphFiles(
   for (const entry of entries) {
     const relative = normalizePathPattern(path.posix.join(directory, entry.name));
     if (entry.isDirectory()) {
-      if (!isSkippedImportGraphDirectory(entry.name)) {
+      if (recursive && !isSkippedImportGraphDirectory(entry.name)) {
         listImportGraphFiles(cwd, relative, files, extensions);
       }
       continue;
@@ -1577,11 +1624,14 @@ function listImportGraphFilesForCwd(cwd: string, options: ImportGraphOptions = {
   }
   const roots = tooling ? TOOLING_IMPORT_GRAPH_ROOTS : SOURCE_ROOTS_FOR_IMPORT_GRAPH;
   const extensions = tooling ? TOOLING_IMPORTABLE_FILE_EXTENSIONS : IMPORTABLE_FILE_EXTENSIONS;
-  const files =
-    listTrackedTestPlanFiles(
-      cwd,
-      tooling ? TOOLING_IMPORT_GRAPH_GREP_PATHS : IMPORT_GRAPH_GREP_PATHS,
-    ) ?? roots.flatMap((root) => listImportGraphFiles(cwd, root, [], extensions));
+  const files = listTrackedTestPlanFiles(
+    cwd,
+    tooling ? TOOLING_IMPORT_GRAPH_GREP_PATHS : IMPORT_GRAPH_GREP_PATHS,
+  ) ?? [
+    ...roots.flatMap((root) => listImportGraphFiles(cwd, root, [], extensions)),
+    // Root configs are inputs; UI caches and generated sibling trees are not.
+    ...listImportGraphFiles(cwd, "ui", [], extensions, false),
+  ];
   cachedImportGraphFiles.set(cacheKey, files);
   return files;
 }
@@ -1678,9 +1728,7 @@ function listImportGraphGrepMatches(
   const suffixes = testFilesOnly
     ? extensions.flatMap((ext) => [`.test${ext}`, `.spec${ext}`])
     : extensions;
-  const grepPaths = roots.flatMap((root) =>
-    suffixes.map((suffix) => `:(glob)${root}/**/*${suffix}`),
-  );
+  const grepPaths = importGraphPathspecs(roots, suffixes);
   const spawnOptions: SpawnSyncOptionsWithStringEncoding = {
     cwd,
     encoding: "utf8",
@@ -1758,6 +1806,33 @@ function findDirectImporters(
     }
   }
   return skippedBroadTerm && importers.length === 0 && !isTestHelper ? null : importers;
+}
+
+/** Prove an entry is unshared using the canonical targeted reverse-import scan. */
+export function hasImportGraphConsumers(
+  changedPaths: string[],
+  cwd = process.cwd(),
+  options: ImportGraphOptions = {},
+) {
+  const tracked = listTrackedTestPlanFiles(
+    cwd,
+    options.tooling ? TOOLING_IMPORT_GRAPH_GREP_PATHS : IMPORT_GRAPH_GREP_PATHS,
+  );
+  // An incomplete archive/filesystem inventory cannot prove that an entry is unshared.
+  if (tracked === null) {
+    return true;
+  }
+  cachedImportGraphFiles.set(`${cwd}\0${options.tooling ? "tooling" : "source"}`, tracked);
+  const files = new Set(tracked);
+  const extensions = options.tooling
+    ? TOOLING_IMPORTABLE_FILE_EXTENSIONS
+    : IMPORTABLE_FILE_EXTENSIONS;
+  const terms = changedPaths.flatMap((file) => resolveImportGraphSearchTerms(file, extensions));
+  const matches = listImportGraphGrepMatches(cwd, terms, options);
+  return changedPaths.some((file) => {
+    const consumers = files.has(file) ? findDirectImporters(file, matches, extensions) : null;
+    return consumers === null || consumers.length > 0;
+  });
 }
 
 function resolveAffectedTestsFromTargetedImportScan(
@@ -2193,9 +2268,10 @@ const EXACT_TOOLING_TARGETS = new Map<string, string[]>([
   [".github/workflows/update-migration.yml", [packageAcceptance, workflowGuards]],
   [
     ".github/actions/setup-node-env/action.yml",
-    ["install-trufflehog", packageAcceptance, workflowGuards],
+    ["setup-node-env-bun", packageAcceptance, workflowGuards],
   ],
   [".github/actions/setup-node-env/dependency-fingerprint.mjs", [workflowGuards]],
+  [".github/actions/setup-node-env/seed-bun-from-image.mjs", ["setup-node-env-bun"]],
   [".github/actions/setup-pnpm-store-cache/action.yml", [packageAcceptance, workflowGuards]],
   [".github/actions/setup-pnpm-store-cache/ensure-node.sh", ["setup-pnpm-store-cache-ensure-node"]],
   ["test/e2e/qa-lab/runtime/mcp-channels-docker-client.ts", [dockerE2e, pluginPrerelease]],
@@ -2401,17 +2477,11 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
   ],
   [
     /^\.github\/workflows\/ci-check-testbox\.yml$/u,
-    [workflowGuards, packageAcceptance, "changed-lanes", "install-trufflehog"],
+    [workflowGuards, packageAcceptance, "changed-lanes"],
   ],
-  [
-    /^\.github\/workflows\/ci-check-arm-testbox\.yml$/u,
-    [workflowGuards, packageAcceptance, "install-trufflehog"],
-  ],
+  [/^\.github\/workflows\/ci-check-arm-testbox\.yml$/u, [workflowGuards, packageAcceptance]],
   [/^\.github\/workflows\/crabbox-hydrate\.yml$/u, [workflowGuards, packageAcceptance]],
-  [
-    /^\.github\/workflows\/ci-build-artifacts-testbox\.yml$/u,
-    ["install-trufflehog", packageAcceptance, workflowGuards],
-  ],
+  [/^\.github\/workflows\/ci-build-artifacts-testbox\.yml$/u, [packageAcceptance, workflowGuards]],
   [
     /^\.github\/workflows\/full-release-validation\.yml$/u,
     [
@@ -2522,7 +2592,10 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
   [/^scripts\/ci-changed-scope\.mjs$/u, [...changedScopeTests, "control-ui-i18n"]],
   [/^scripts\/check-changed\.(?:mjs|mts)$/u, ["changed-lanes"]],
   [/^scripts\/changed-lanes\.(?:mjs|mts)$/u, ["changed-lanes"]],
-  [/^scripts\/(?:lib\/tsx-cli-shim|tsx)\.mjs$/u, ["direct-run-entrypoints", "lint-status"]],
+  [
+    /^scripts\/(?:lib\/tsx-cli-shim|tsx)\.mjs$/u,
+    ["direct-run-entrypoints", "lint-status", "local-check-runtime"],
+  ],
   [
     new RegExp(
       [
@@ -2933,7 +3006,6 @@ const SEMANTIC_TOOLING_TARGET_PATTERNS: Array<[RegExp, string[]]> = [
       "src/system-agent/system-agent.test.ts",
       "src/system-agent/operations.test.ts",
       "src/system-agent/overview.test.ts",
-      "src/system-agent/setup-inference.test.ts",
       "src/system-agent/audit.test.ts",
     ],
   ],
@@ -3267,7 +3339,11 @@ function resolveSiblingTestTarget(changedPath: string, cwd: string) {
 }
 
 function shouldCombineSiblingTestWithImportGraph(changedPath: string) {
-  return changedPath.startsWith("test/helpers/");
+  const sourcePrefix = `${changedPath.replace(/\.[cm]?tsx?$/u, "")}.`;
+  return (
+    changedPath.startsWith("test/helpers/") ||
+    databaseWorkerExtensionTestFiles.some((file) => file.startsWith(sourcePrefix))
+  );
 }
 
 function shouldRouteChangedTargetWithoutImportGraph(changedPath: string) {
@@ -3298,13 +3374,25 @@ function resolveAppcastTargets(changedPath: string) {
   return changedPath === "appcast.xml" ? APPCAST_TEST_TARGETS : null;
 }
 
+function resolveKovaSchemaTestTargets(changedPath: string) {
+  // The workflow fixture reads schema bytes, so imports cannot express this dependency.
+  return changedPath === "src/config/zod-schema.agent-defaults.ts" ||
+    changedPath === "src/config/zod-schema.agent-defaults-base.ts"
+    ? ["test/scripts/openclaw-performance-workflow.test.ts"]
+    : [];
+}
+
 function resolvePreciseChangedTestTargets(
   changedPath: string,
   options: ChangedTestTargetOptions & { skipImportGraph?: boolean },
 ) {
   const cwd = options.cwd ?? process.cwd();
+  const pluginSdkInclude = resolvePluginSdkLightIncludePattern(changedPath);
   const mappedTargets =
     SOURCE_TEST_TARGETS.get(changedPath) ??
+    (pluginSdkInclude
+      ? pluginSdkLightTestFiles.filter((file) => path.matchesGlob(file, pluginSdkInclude))
+      : null) ??
     (/^extensions\/[^/]+\/openclaw\.plugin\.json$/u.test(changedPath)
       ? [changedPath, DOCS_CONFIG_EXAMPLES_TEST_TARGET]
       : null) ??
@@ -3416,7 +3504,10 @@ export function resolveChangedTestTargetPlan(
   }
   const plan: ChangedTestTargetPlan = {
     mode: "targets",
-    targets: [...new Set(targets)],
+    targets: uniqueOrdered([
+      ...targets,
+      ...(options.watchMode ? [] : executableChangedPaths.flatMap(resolveKovaSchemaTestTargets)),
+    ]),
   };
   if (skippedBroadFallbackPaths.length > 0) {
     plan.skippedBroadFallbackPaths = [...new Set(skippedBroadFallbackPaths)];
@@ -3461,14 +3552,29 @@ export function resolveChangedTestTargetPlanForArgs(
   return resolveChangedTestTargetPlan(changedPaths, {
     cwd,
     ...options,
+    watchMode: parseTestProjectsArgs(args, cwd).watchMode,
   });
 }
 
-function classifyTarget(arg: string, cwd: string) {
+function classifyTarget(arg: string, cwd: string, beforeDatabaseWorkerOwnership = false) {
   const relative = toRepoRelativeTarget(arg, cwd);
+  if (databaseWorkerExtensionTestFiles.includes(relative)) {
+    return "extensionDatabaseWorkers";
+  }
   const configTargetKind = resolveVitestConfigTargetKind(relative);
   if (configTargetKind) {
     return configTargetKind;
+  }
+  if (gatewayPluginTestFiles.includes(relative)) {
+    return "gatewayMethods";
+  }
+  if (beforeDatabaseWorkerOwnership) {
+    const formerFastKind = databaseWorkerCoreFormerFastKinds.get(relative);
+    if (formerFastKind) {
+      return formerFastKind;
+    }
+  } else if (isDatabaseWorkerCoreTestFile(relative)) {
+    return "infra";
   }
   if (isAgentsCoreIsolatedTestFile(relative)) {
     return agentVitestProjectOwners.coreIsolated.kind;
@@ -3479,8 +3585,8 @@ function classifyTarget(arg: string, cwd: string) {
   if (isControlUiE2eTarget(relative)) {
     return "uiE2e";
   }
-  if (relative === PACKAGE_DOCKER_TEST_TARGET) {
-    return "packageDocker";
+  if (packageContractTestFiles.includes(relative)) {
+    return "packageContract";
   }
   if (isUiIsolatedTestFile(relative)) {
     return "uiIsolated";
@@ -3499,8 +3605,7 @@ function classifyTarget(arg: string, cwd: string) {
   }
   if (
     relative === "src/gateway/gateway.test.ts" ||
-    relative === "src/gateway/server.startup-matrix-migration.integration.test.ts" ||
-    relative === "src/gateway/sessions-history-http.test.ts"
+    relative === "src/gateway/server.startup-matrix-migration.integration.test.ts"
   ) {
     return "e2e";
   }
@@ -3815,7 +3920,7 @@ export function buildVitestRunPlans(
     );
   }
   const activeTargetArgs = expandBroadToolingScriptTargets(
-    expandExplicitSourceTestTargets(requestedTargetArgs, cwd),
+    expandExplicitSourceTestTargets(requestedTargetArgs, cwd, watchMode),
     cwd,
     watchMode,
   );
@@ -3836,31 +3941,58 @@ export function buildVitestRunPlans(
   }
 
   const nonTargetArgs = changedTargetArgs !== null ? activeForwardedArgs : remainingArgs;
-  const explicitConfigTargets = activeTargetArgs.map((targetArg) =>
-    toRepoRelativeTarget(targetArg, cwd),
+  const classifiedTargets = activeTargetArgs.map((targetArg) => ({
+    targetArg,
+    relative: toRepoRelativeTarget(targetArg, cwd),
+    kind: classifyTarget(targetArg, cwd),
+  }));
+  const explicitConfigTargets = classifiedTargets.map(({ relative }) => relative);
+  const impliedDatabaseWorkerTargets = databaseWorkerCoreTestFiles.filter((file) =>
+    [...requestedTargetArgs, ...activeTargetArgs].some((targetArg) => {
+      const relative = toRepoRelativeTarget(targetArg, cwd);
+      return (
+        (isTestFileTarget(relative) ||
+          isGlobTarget(relative) ||
+          isExistingDirectoryTarget(targetArg, cwd)) &&
+        includePatternMatchesAnyFile(toScopedIncludePattern(targetArg, cwd), [file])
+      );
+    }),
   );
+  const hasPackageFileTarget = classifiedTargets.some(
+    ({ kind, relative }) =>
+      kind === "packageContract" && relative !== PACKAGE_CONTRACT_VITEST_CONFIG,
+  );
+  // The wrapper removes its separator; remaining positional filters can widen
+  // a package file run beyond the package inventory. Option operands cannot.
+  const hasE2eTarget =
+    classifiedTargets.some(({ kind }) => kind === "e2e") ||
+    (!explicitConfigTargets.includes(PACKAGE_CONTRACT_VITEST_CONFIG) &&
+      hasPackageFileTarget &&
+      collectVitestFileFilters(["run", ...nonTargetArgs]).length > 0);
   if (explicitConfigTargets.every(isVitestConfigFileTarget)) {
     if (watchMode && explicitConfigTargets.length > 1) {
       throw new Error(
         "watch mode with mixed test suites is not supported; target one suite at a time or use a dedicated suite command",
       );
     }
-    return explicitConfigTargets.flatMap((config) =>
-      createBoundedExtensionPlans(
-        {
-          config,
-          forwardedArgs: nonTargetArgs,
-          includePatterns: null,
-          watchMode,
-        },
-        options.env,
-      ),
-    );
+    return explicitConfigTargets
+      .filter((config) => !hasE2eTarget || config !== PACKAGE_CONTRACT_VITEST_CONFIG)
+      .flatMap((config) =>
+        createBoundedExtensionPlans(
+          {
+            config,
+            forwardedArgs: nonTargetArgs,
+            includePatterns: null,
+            watchMode,
+          },
+          options.env,
+        ),
+      );
   }
 
   const groupedTargets = new Map<string, string[]>();
-  for (const targetArg of activeTargetArgs) {
-    if (!watchMode && toRepoRelativeTarget(targetArg, cwd) === AGENTS_EMBEDDED_AGENT_TEST_ROOT) {
+  for (const { targetArg, relative, kind: targetKind } of classifiedTargets) {
+    if (!watchMode && relative === AGENTS_EMBEDDED_AGENT_TEST_ROOT) {
       // The recursive parent spans four harness owners; keep every isolated project intact.
       for (const { kind, include: targets } of embeddedAgentVitestProjectOwners) {
         const current = groupedTargets.get(kind) ?? [];
@@ -3874,10 +4006,25 @@ export function buildVitestRunPlans(
       continue;
     }
 
-    const kind = classifyTarget(targetArg, cwd);
+    // Package builds clean shared outputs. Mixed E2E selections keep their
+    // original serial owner instead of introducing a concurrent artifact writer.
+    const kind = hasE2eTarget && targetKind === "packageContract" ? "e2e" : targetKind;
     const current = groupedTargets.get(kind) ?? [];
-    current.push(targetArg);
+    current.push(
+      ...(hasE2eTarget && relative === PACKAGE_CONTRACT_VITEST_CONFIG
+        ? packageContractTestFiles
+        : [targetArg]),
+    );
     groupedTargets.set(kind, current);
+  }
+  if (impliedDatabaseWorkerTargets.length > 0) {
+    const current = groupedTargets.get("infra") ?? [];
+    for (const target of impliedDatabaseWorkerTargets) {
+      if (!current.includes(target)) {
+        current.push(target);
+      }
+    }
+    groupedTargets.set("infra", current);
   }
   const toolingTargets = groupedTargets.get("tooling") ?? [];
   if (
@@ -3960,7 +4107,32 @@ export function buildVitestRunPlans(
     groupedTargets.set("cliProcess", current);
   }
 
-  if (watchMode && groupedTargets.size > 1) {
+  const previousWatchKinds = watchMode
+    ? new Set(classifiedTargets.map(({ targetArg }) => classifyTarget(targetArg, cwd, true)))
+    : new Set<string>();
+  if (watchMode && (groupedTargets.size > 1 || previousWatchKinds.size > 1)) {
+    if (impliedDatabaseWorkerTargets.length > 0 && previousWatchKinds.size === 1) {
+      const previousKind = [...previousWatchKinds][0]!;
+      const wholeOwner = classifiedTargets.some(({ targetArg }) =>
+        shouldUseWholeConfigTarget(previousKind, targetArg, cwd),
+      );
+      return [
+        {
+          config: "test/vitest/vitest.database-worker-watch.config.ts",
+          databaseWorkerWatchOwner: VITEST_CONFIG_BY_KIND[previousKind] ?? DEFAULT_VITEST_CONFIG,
+          databaseWorkerWatchTests: wholeOwner
+            ? databaseWorkerCoreTestFiles.filter(
+                (file) => classifyTarget(file, cwd, true) === previousKind,
+              )
+            : impliedDatabaseWorkerTargets,
+          forwardedArgs: nonTargetArgs,
+          includePatterns: wholeOwner
+            ? null
+            : uniqueOrdered(activeTargetArgs.map((target) => toScopedIncludePattern(target, cwd))),
+          watchMode: true,
+        },
+      ];
+    }
     throw new Error(
       "watch mode with mixed test suites is not supported; target one suite at a time or use a dedicated suite command",
     );
@@ -3992,14 +4164,15 @@ export function buildVitestRunPlans(
     const config = VITEST_CONFIG_BY_KIND[kind] ?? DEFAULT_VITEST_CONFIG;
     const useCliTargetArgs =
       kind === "e2e" ||
-      kind === "packageDocker" ||
+      kind === "packageContract" ||
       grouped.every((targetArg) => isCanonicalAgentOwnerDirectoryTarget(targetArg, cwd)) ||
       (kind === "default" &&
         grouped.every((targetArg) => isFileLikeTarget(toRepoRelativeTarget(targetArg, cwd))));
     const useWholeConfigTarget = grouped.some((targetArg) =>
       shouldUseWholeConfigTarget(kind, targetArg, cwd),
     );
-    const scopedTargetArgs = useCliTargetArgs ? uniqueOrdered(grouped) : [];
+    const scopedTargetArgs =
+      useCliTargetArgs && !useWholeConfigTarget ? uniqueOrdered(grouped) : [];
     const forwardedPlanArgs = [...nonTargetArgs, ...scopedTargetArgs];
     const unitCliIncludes =
       kind === "default" &&
@@ -4079,7 +4252,7 @@ export function buildVitestRunPlans(
   return plans;
 }
 
-export function buildFullSuiteVitestRunPlans(args: string[], cwd = process.cwd()) {
+export function buildFullSuiteVitestRunPlans(args: string[], cwd = process.cwd()): VitestRunPlan[] {
   const { forwardedArgs, targetArgs, watchMode } = parseTestProjectsArgs(args, cwd);
   if (watchMode) {
     return [
@@ -4151,6 +4324,7 @@ export function buildFullSuiteVitestRunPlans(args: string[], cwd = process.cwd()
           return chunks.map((targets) => ({
             config,
             forwardedArgs: [...forwardedArgs, ...targets],
+            timingTargets: targets,
             includePatterns: null,
             watchMode: false,
           }));
@@ -4414,12 +4588,22 @@ export function createVitestRunSpecs(
       : null;
     return {
       config: plan.config,
-      env: includeFilePath
-        ? {
-            ...baseEnv,
-            [INCLUDE_FILE_ENV_KEY]: includeFilePath,
-          }
-        : baseEnv,
+      timingTargets: plan.timingTargets,
+      env:
+        includeFilePath || plan.databaseWorkerWatchOwner
+          ? {
+              ...baseEnv,
+              ...(includeFilePath ? { [INCLUDE_FILE_ENV_KEY]: includeFilePath } : {}),
+              ...(plan.databaseWorkerWatchOwner
+                ? {
+                    [DATABASE_WORKER_WATCH_OWNER_ENV_KEY]: plan.databaseWorkerWatchOwner,
+                    [DATABASE_WORKER_WATCH_TESTS_ENV_KEY]: JSON.stringify(
+                      plan.databaseWorkerWatchTests,
+                    ),
+                  }
+                : {}),
+            }
+          : baseEnv,
       includeFilePath,
       includePatterns: plan.includePatterns,
       pnpmArgs: createVitestArgs(plan),

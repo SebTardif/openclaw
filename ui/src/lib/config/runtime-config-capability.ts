@@ -11,6 +11,7 @@ import {
   loadConfigSchema,
   lookupConfigSchemaPath,
   openConfigFile,
+  type ConfigLoadOptions,
   type ConfigPatchBuilder,
   type ConfigWriteCoordinator,
   type ConfigMethod,
@@ -24,7 +25,6 @@ import {
   clearConfigRequestVersions,
   createInitialConfigState,
   type AgentConfigEntryTarget,
-  type LoadConfigOptions,
   type RuntimeConfigGateway,
   type RuntimeConfigState,
 } from "./config-state-model.ts";
@@ -38,7 +38,7 @@ export type RuntimeConfigCapability = {
   readonly canOpenFile?: boolean;
   ensureLoaded: () => Promise<void>;
   ensureSchemaLoaded: () => Promise<void>;
-  refresh: (options?: LoadConfigOptions) => Promise<void>;
+  refresh: (options?: ConfigLoadOptions) => Promise<void>;
   refreshSchema: () => Promise<void>;
   patchForm: (path: Array<string | number>, value: unknown) => void;
   removeFormValue: (path: Array<string | number>) => void;
@@ -47,7 +47,7 @@ export type RuntimeConfigCapability = {
   /** Discards pending edits: reloads from disk when connected, else resets locally. */
   discardDraft: () => Promise<void>;
   /** Pauses/resumes all config writes (autosave + manual) while e.g. the app updater runs. */
-  setWritesSuspended: (suspended: boolean) => void;
+  setWritesSuspended: (suspended: boolean, refreshAdmission?: () => Promise<void>) => void;
   /** Resolves once no config write is in flight (used as an updater barrier). */
   waitForPendingWrites: () => Promise<void>;
   save: (options?: RuntimeConfigDispatchOptions) => Promise<boolean>;

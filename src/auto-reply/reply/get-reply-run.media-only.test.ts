@@ -16,6 +16,7 @@ import { normalizeSessionDeliveryState } from "../../utils/delivery-context.shar
 import { hasControlCommand } from "../command-detection.js";
 import { runReplyAgent } from "./agent-runner.runtime.js";
 import { resolveReplyDirectiveRouting } from "./get-reply-directives-routing.js";
+import { shouldUseReplyFastTestRuntime } from "./get-reply-fast-path.js";
 import { prepareReplyRunContext } from "./get-reply-run-context.js";
 import {
   loadAgentRunnerRuntime,
@@ -65,7 +66,7 @@ vi.mock("../../agents/harness/hook-helpers.js", () => ({
 }));
 
 // Harness selection and built-in execution are owned by their focused suites. These tests keep
-// the real visible-reply policy resolver while supplying its default OpenClaw harness leaf.
+// the real visible-reply policy resolver while supplying its default delivery metadata.
 const preparedReplyMockState = vi.hoisted(() => ({
   unexpectedCalls: [] as string[],
 }));
@@ -120,7 +121,7 @@ vi.mock("../../agents/subagents/spawn/subagent-capabilities.js", () => ({
   resolveSubagentCapabilityStore: vi.fn().mockReturnValue(undefined),
 }));
 
-const selectAgentHarnessMock = vi.hoisted(() =>
+const resolveAgentHarnessDeliveryDefaultsMock = vi.hoisted(() =>
   vi.fn(
     (params: {
       provider: string;
@@ -136,14 +137,14 @@ const selectAgentHarnessMock = vi.hoisted(() =>
         params.agentHarnessId ||
         params.agentHarnessRuntimeOverride
       ) {
-        preparedReplyMockState.unexpectedCalls.push("selectAgentHarness");
+        preparedReplyMockState.unexpectedCalls.push("resolveAgentHarnessDeliveryDefaults");
       }
-      return { id: "openclaw", deliveryDefaults: {} };
+      return {};
     },
   ),
 );
-vi.mock("../../agents/harness/selection.js", () => ({
-  selectAgentHarness: selectAgentHarnessMock,
+vi.mock("../../agents/harness/selection-decision.js", () => ({
+  resolveAgentHarnessDeliveryDefaults: resolveAgentHarnessDeliveryDefaultsMock,
 }));
 
 vi.mock("../../agents/model-selection.js", () => ({
@@ -549,7 +550,7 @@ describe("runPreparedReply media-only handling", () => {
       expect(ensureSkillSnapshot).toHaveBeenCalledWith(
         expect.objectContaining({
           workspaceDir: "/tmp/agent-workspace",
-          executionSkillsDir: "/tmp/project/packages/app/skills",
+          executionWorkspaceDir: "/tmp/project/packages/app",
         }),
       );
     } finally {
@@ -896,6 +897,29 @@ describe("runPreparedReply media-only handling", () => {
     expect(call.followupRun.run.thinkLevel).toBe("off");
     expect(sessionEntry.thinkingLevel).toBe("high");
     expect(sessionStore["session-key"]?.thinkingLevel).toBe("high");
+  });
+
+  it.each([
+    ["telegram", "direct", "automatic"],
+    ["telegram", "group", "automatic"],
+    ["slack", "direct", "automatic"],
+    ["slack", "group", "automatic"],
+    ["telegram", "direct", "message_tool_only"],
+    ["telegram", "group", "message_tool_only"],
+    ["slack", "direct", "message_tool_only"],
+    ["slack", "group", "message_tool_only"],
+  ] as const)("allows a silent heartbeat for %s %s %s", async (channel, chatType, deliveryMode) => {
+    await runPrepared({
+      opts: { isHeartbeat: true, sourceReplyDeliveryMode: deliveryMode },
+      ctx: { ...createInboundTurn("Heartbeat check-in", channel, chatType), WasMentioned: true },
+      sessionCtx: createSessionTurn("Heartbeat check-in", channel, chatType),
+    });
+
+    const call = requireRunReplyAgentCall();
+    expect(call.followupRun.run).toMatchObject({
+      allowEmptyAssistantReplyAsSilent: true,
+      terminalReplyExpectation: "optional",
+    });
   });
 
   it("keeps empty-assistant silence disabled for direct runs by default", async () => {
@@ -2412,6 +2436,72 @@ describe("runPreparedReply media-only handling", () => {
 
     expect(getActiveReplyRunCount()).toBe(activeBefore);
   });
+
+  it.each([false, true])(
+    "validates the configured heartbeat profile before dispatch (fast: %s)",
+    async (fast) => {
+      const { resolveSessionAuthSelection } =
+        await import("../../agents/auth-profiles/session-override.js");
+      vi.mocked(shouldUseReplyFastTestRuntime).mockReturnValueOnce(fast);
+      const sessionEntry: SessionEntry = {
+        sessionId: "heartbeat-profile-session",
+        updatedAt: 1,
+        authProfileOverride: "openai:subscription",
+        authProfileOverrideSource: "auto",
+      };
+      vi.mocked(resolveSessionAuthSelection).mockImplementationOnce(
+        async ({ configuredProfileId, sessionEntry: selectedSession }) => {
+          if (!configuredProfileId) {
+            return undefined;
+          }
+          if (selectedSession) {
+            selectedSession.authProfileOverride = configuredProfileId;
+          }
+          return { profileId: configuredProfileId, source: "user", routeRequirement: "api-key" };
+        },
+      );
+      const params = {
+        ...baseParams({
+          provider: "openai",
+          model: "gpt-5.5",
+          opts: { isHeartbeat: true },
+          sessionEntry,
+          sessionStore: { "session-key": sessionEntry },
+        }),
+        configuredProfileId: "openai:metered",
+      };
+      await runPreparedReply(params);
+      expect(resolveSessionAuthSelection).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider: "openai",
+          modelId: "gpt-5.5",
+          configuredProfileId: "openai:metered",
+        }),
+      );
+      expect(requireRunReplyAgentCall().followupRun.run).toMatchObject({
+        authProfileId: "openai:metered",
+        authProfileIdSource: "user",
+      });
+      expect(sessionEntry.authProfileOverride).toBe("openai:subscription");
+    },
+  );
+
+  it("does not bypass heartbeat profile rejection on the fast reply path", async () => {
+    const { resolveSessionAuthSelection } =
+      await import("../../agents/auth-profiles/session-override.js");
+    vi.mocked(shouldUseReplyFastTestRuntime).mockReturnValueOnce(true);
+    vi.mocked(resolveSessionAuthSelection).mockRejectedValueOnce(
+      new Error("Auth profile is not configured for openai."),
+    );
+    const params = {
+      ...baseParams({ provider: "openai", model: "gpt-5.5", opts: { isHeartbeat: true } }),
+      configuredProfileId: "anthropic:other",
+    };
+    await expect(runPreparedReply(params)).rejects.toThrow(
+      "Auth profile is not configured for openai.",
+    );
+    expect(runReplyAgent).not.toHaveBeenCalled();
+  });
   it("waits for the previous active run to clear before registering a new reply operation", async () => {
     const queueSettings = await import("./queue/settings-runtime.js");
     vi.mocked(queueSettings.resolveQueueSettings).mockReturnValueOnce({ mode: "interrupt" });
@@ -2789,7 +2879,7 @@ describe("runPreparedReply media-only handling", () => {
     expect(call?.shouldSteer).toBe(false);
     expect(call?.shouldFollowup).toBe(true);
     expect(call?.isActive).toBe(true);
-    expect(call?.followupRun.run.terminalReplyExpectation).toBeUndefined();
+    expect(call?.followupRun.run.terminalReplyExpectation).toBe("optional");
   });
 
   it.each([
@@ -3121,6 +3211,9 @@ describe("runPreparedReply media-only handling", () => {
     const call = requireLastRunReplyAgentCall();
     expect(call?.followupRun.run.authProfileId).toBe("profile-after-wait");
     expect(vi.mocked(resolveSessionAuthSelection)).toHaveBeenCalledTimes(1);
+    expect(resolveSessionAuthSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "default" }),
+    );
   });
 
   it("re-resolves same-session ownership after session-id rotation during async prep", async () => {
@@ -3766,9 +3859,15 @@ describe("runPreparedReply media-only handling", () => {
     expect(call?.followupRun.run.sourceReplyDeliveryMode).toBe("message_tool_only");
   });
 
-  it.each(["heartbeat", "cron", "exec"] as const)(
-    "keeps %s heartbeat metadata out of the model prompt",
-    async (source) => {
+  it.each([
+    ["heartbeat", undefined, "heartbeat", "[OpenClaw heartbeat poll]"],
+    ["cron", undefined, "cron", "[OpenClaw cron wake]"],
+    ["exec", undefined, "exec", "[OpenClaw exec completion]"],
+    ["heartbeat", "background-task", "background-task", "[OpenClaw session event]"],
+    ["heartbeat", "exec-event", "exec-event", "[OpenClaw exec completion]"],
+  ] as const)(
+    "keeps %s wake metadata private and preserves %s event provenance",
+    async (source, suppliedSourceTool, expectedSourceTool, transcriptPrompt) => {
       const heartbeatPrompt = "Read HEARTBEAT.md and run any due maintenance.";
       const syntheticConversationInfo =
         'Conversation info:\n```json\n{"chat_id":"discord:channel-123"}\n```';
@@ -3781,6 +3880,14 @@ describe("runPreparedReply media-only handling", () => {
           RawBody: heartbeatPrompt,
           CommandBody: heartbeatPrompt,
           InternalTurnSource: source,
+          ...(suppliedSourceTool
+            ? {
+                InputProvenance: {
+                  kind: "internal_system" as const,
+                  sourceTool: suppliedSourceTool,
+                },
+              }
+            : {}),
           ChatType: "direct",
           OriginatingChannel: "discord",
           OriginatingTo: "discord:channel-123",
@@ -3804,10 +3911,10 @@ describe("runPreparedReply media-only handling", () => {
         OriginatingChannel: "discord",
         OriginatingTo: "discord:channel-123",
       });
-      expect(call?.transcriptCommandBody).toBe("[OpenClaw heartbeat poll]");
-      expect(call?.followupRun.transcriptPrompt).toBe("[OpenClaw heartbeat poll]");
+      expect(call?.transcriptCommandBody).toBe(transcriptPrompt);
+      expect(call?.followupRun.transcriptPrompt).toBe(transcriptPrompt);
       expect(call?.followupRun.userTurnTranscriptRecorder?.message).toMatchObject({
-        provenance: { kind: "internal_system", sourceTool: "heartbeat" },
+        provenance: { kind: "internal_system", sourceTool: expectedSourceTool },
       });
     },
   );
@@ -4245,7 +4352,7 @@ describe("runPreparedReply media-only handling", () => {
 
   it("resolves origin-less sessions as internal for synthetic stable facts", async () => {
     vi.mocked(buildDirectChatContext).mockReturnValue("direct-context");
-    selectAgentHarnessMock.mockClear();
+    resolveAgentHarnessDeliveryDefaultsMock.mockClear();
     // An entry with no persisted delivery origin has only ever been driven
     // internally; its wake source must not leak into the
     // stable context as a non-internal surface or the fact diverges from
@@ -4278,7 +4385,7 @@ describe("runPreparedReply media-only handling", () => {
     const run = requireRunReplyAgentCall(0).followupRun.run;
     expect(run.cliSessionBindingFacts?.sourceReplyDeliveryMode).toBe("automatic");
     expect(
-      selectAgentHarnessMock.mock.calls.map(([params]) => ({
+      resolveAgentHarnessDeliveryDefaultsMock.mock.calls.map(([params]) => ({
         provider: params.provider,
         modelId: params.modelId,
       })),
@@ -4737,6 +4844,50 @@ describe("runPreparedReply media-only handling", () => {
     expect(call?.followupRun.run.agentAccountId).toBe("work");
     expect(call?.followupRun.run.chatType).toBe("direct");
   });
+
+  it.each(["heartbeat", "cron", "exec"] as const)(
+    "keeps cross-channel %s reply policy independent of remembered chat type",
+    async (source) => {
+      for (const liveChatType of [undefined, "direct"] as const) {
+        vi.mocked(runReplyAgent).mockClear();
+        const route = {
+          InternalTurnSource: source,
+          OriginatingChannel: "slack" as const,
+          OriginatingTo: "user:U1",
+          ChatType: liveChatType,
+        };
+        await runPrepared({
+          cfg: {
+            session: {},
+            channels: {
+              slack: {
+                replyToMode: "all",
+                replyToModeByChatType: { channel: "off", direct: "first" },
+              },
+            },
+            agents: { defaults: {} },
+          },
+          opts: { isHeartbeat: true },
+          ctx: { ...createInboundBody("scheduled wake"), ...route },
+          sessionCtx: { ...createSessionBody("scheduled wake"), ...route },
+          sessionEntry: {
+            sessionId: "session-1",
+            updatedAt: 1,
+            chatType: "channel",
+            delivery: normalizeSessionDeliveryState({
+              context: { channel: "discord", to: "channel:remembered" },
+            }),
+          },
+        });
+
+        const call = requireRunReplyAgentCall();
+        expect(call.followupRun.originatingChannel).toBe("slack");
+        expect(call.followupRun.originatingChatType).toBe(liveChatType);
+        expect(call.followupRun.run.chatType).toBe(liveChatType);
+        expect(call.followupRun.originatingReplyToMode).toBe(liveChatType ? "first" : "all");
+      }
+    },
+  );
 
   it("uses transport thread metadata for followup originatingThreadId", async () => {
     await runPrepared({

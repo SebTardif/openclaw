@@ -6,6 +6,7 @@ import { createDeferred as deferred } from "../../../../test/helpers/promise.js"
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ModelCatalogEntry, ModelCatalogResult } from "../../api/types.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
+import { invalidateChatMetadataStore } from "../../lib/chat/chat-metadata-cache.ts";
 import * as modelCatalogStore from "../../lib/model-catalog-store.ts";
 import {
   createApplicationContextProvider,
@@ -57,7 +58,6 @@ async function mount(client: GatewayBrowserClient) {
     sessionObserverModels: ModelCatalogEntry[];
     sessionObserverModelsUnavailable: boolean;
     sessionObserverModelsTask: {
-      run: () => Promise<void>;
       taskComplete: Promise<unknown>;
     };
   };
@@ -140,23 +140,25 @@ describe("ConfigPage session observer models", () => {
     await writerLoad;
     expect(state.sessionObserverModels).toEqual(writerModels);
 
-    modelCatalogStore.invalidateModelCatalogCache(client);
     selection.selectedId = "main";
     page.requestUpdate();
     await settleLitElement(page);
     const secondMainLoad = state.sessionObserverModelsTask.taskComplete;
     const currentMainModels = [{ id: "current-main", name: "Current Main", provider: "openai" }];
+    expect(mainRequests).toBe(1);
+    expect(state.sessionObserverModels).toEqual([]);
+    firstMain.resolve({ models: [{ id: "stale-main", name: "Stale Main", provider: "openai" }] });
+    await settleLitElement(page);
+    expect(mainRequests).toBe(2);
+    expect(state.sessionObserverModels).toEqual([]);
     secondMain.resolve({ models: currentMainModels });
     await secondMainLoad;
-    firstMain.resolve({ models: [{ id: "stale-main", name: "Stale Main", provider: "openai" }] });
-    await firstMain.promise;
     await settleLitElement(page);
     expect(state.sessionObserverModels).toEqual(currentMainModels);
     expect(request.mock.calls.filter(([method]) => method === "models.list")).toEqual(
       ["main", "writer", "main"].map((agentId) => [
         "models.list",
         { agentId, preparedOnly: true, view: "configured" },
-        { signal: expect.any(AbortSignal) },
       ]),
     );
 
@@ -168,40 +170,45 @@ describe("ConfigPage session observer models", () => {
     expect(request.mock.calls.filter(([method]) => method === "models.list")).toHaveLength(3);
   });
 
-  it("keeps a slow refresh through status polls and retires it on disconnect", async () => {
+  it("keeps a slow refresh through status polls and retires its page reader on detach", async () => {
     const stale = deferred<ModelCatalogResult>();
     const original = [{ id: "original", name: "Original", provider: "openai" }];
     const fresh = [{ id: "fresh", name: "Fresh", provider: "openai" }];
-    const signals: AbortSignal[] = [];
-    const request = vi.fn((method: string, _params: unknown, options: { signal: AbortSignal }) => {
+    let catalogReads = 0;
+    const request = vi.fn((method: string) => {
       if (method === "system.info") {
         return Promise.resolve({});
       }
-      signals.push(options.signal);
-      return signals.length === 2
-        ? stale.promise
-        : Promise.resolve({ models: signals.length === 1 ? original : fresh });
+      catalogReads += 1;
+      if (catalogReads !== 2) {
+        return Promise.resolve({ models: catalogReads === 1 ? original : fresh });
+      }
+      return stale.promise;
     });
     const client = { request } as unknown as GatewayBrowserClient;
     const { page, state, provider } = await mount(client);
-    modelCatalogStore.invalidateModelCatalogCache(client);
-    const pending = state.sessionObserverModelsTask.run();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(catalogReads).toBe(1);
+
+    // The application retires catalogs on publication; the next status poll reads that generation.
+    invalidateChatMetadataStore(client);
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(state.sessionObserverModels).toEqual(original);
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(request.mock.calls.filter(([method]) => method === "system.info")).toHaveLength(4);
-    expect(signals).toHaveLength(2);
-    expect(signals[1]?.aborted).toBe(false);
+    expect(request.mock.calls.filter(([method]) => method === "system.info")).toHaveLength(6);
+    expect(catalogReads).toBe(2);
     page.remove();
-    expect(signals[1]?.aborted).toBe(true);
     expect(state.sessionObserverModels).toEqual([]);
-    await pending;
+    await settleLitElement(page);
 
     provider.append(page);
     await settleLitElement(page);
+    expect(catalogReads).toBe(2);
+    expect(state.sessionObserverModels).toEqual([]);
     stale.resolve({ models: original });
     await settleLitElement(page);
     expect(state.sessionObserverModels).toEqual(fresh);
-    expect(signals).toHaveLength(3);
+    expect(catalogReads).toBe(3);
   });
 
   it("stops status polling outside Appearance while the page remains mounted", async () => {

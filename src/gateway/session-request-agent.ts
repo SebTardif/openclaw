@@ -3,7 +3,11 @@ import {
   type ErrorShape,
   errorShape,
 } from "../../packages/gateway-protocol/src/index.js";
-import { AgentSelectionRequiredError, listAgentIds } from "../agents/agent-scope.js";
+import {
+  AgentSelectionRequiredError,
+  listAgentIds,
+  tryResolveSoleAgentId,
+} from "../agents/agent-scope.js";
 import { tryResolveLegacyCompatibilityAgentId } from "../config/legacy.default-agent-owner.js";
 import { resolvePersistedSessionStoreOwnerForKey } from "../config/sessions/session-store-owner.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -13,11 +17,24 @@ import {
   normalizeMainKey,
   parseAgentSessionKey,
 } from "../routing/session-key.js";
+import { readAgentDatabaseAdmissionRefusal } from "../state/agent-database-admission.js";
 import { resolveSessionSubscriptionKeys } from "./session-subscription-keys.js";
 
 type RequestedSessionAgentIdResolution =
   | { ok: true; agentId: string }
   | { ok: false; error: ErrorShape };
+
+function admitRequestedAgent(agentId: string): RequestedSessionAgentIdResolution {
+  const refusal = readAgentDatabaseAdmissionRefusal(agentId);
+  return refusal
+    ? {
+        ok: false,
+        error: errorShape(ErrorCodes.UNAVAILABLE, `${refusal.reason}\n${refusal.repairHint}`, {
+          details: refusal,
+        }),
+      }
+    : { ok: true, agentId };
+}
 
 /** Public identity, private routing identity, then raw-global compatibility owner. */
 export type SessionEventAgentScope = readonly [
@@ -87,7 +104,7 @@ export function tryResolveSessionCompatibilityOwnerAgentId(
   }
   return persistedStoreOwner.kind === "retired"
     ? undefined
-    : tryResolveLegacyCompatibilityAgentId(cfg);
+    : (tryResolveLegacyCompatibilityAgentId(cfg) ?? tryResolveSoleAgentId(cfg));
 }
 
 // An absent key selects an agent before a session exists; a synthetic main key
@@ -136,7 +153,7 @@ export function resolveRequestedSessionAgentId(
       };
     }
     if (!keyIsGlobalMainAlias || !normalizedRequestedAgentId) {
-      return { ok: true, agentId: keyAgentId };
+      return admitRequestedAgent(keyAgentId);
     }
     // Explicit targets must also match the fixed store after losing their prefix.
     ownerKey = "global";
@@ -165,11 +182,11 @@ export function resolveRequestedSessionAgentId(
         ),
       };
     }
-    return { ok: true, agentId: normalizedRequestedAgentId };
+    return admitRequestedAgent(normalizedRequestedAgentId);
   }
   const inferredAgentId = tryResolveSessionCompatibilityOwnerAgentId(cfg, key);
   if (inferredAgentId) {
-    return { ok: true, agentId: inferredAgentId };
+    return admitRequestedAgent(inferredAgentId);
   }
   const selectionError = new AgentSelectionRequiredError(configuredAgentIds, {
     surface: `session key "${key}"`,

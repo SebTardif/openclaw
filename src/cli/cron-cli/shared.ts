@@ -1,11 +1,14 @@
 // Shared cron CLI formatting, parsing, delivery preview, and warning helpers.
 import {
   MAX_DATE_TIMESTAMP_MS,
+  parseStrictNonNegativeInteger,
+  parseStrictPositiveInteger,
   resolveExpiresAtMsFromDurationMs,
   timestampMsToIsoString,
 } from "@openclaw/normalization-core/number-coercion";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { GatewayClientRequestError } from "../../../packages/gateway-client/src/request-error.js";
 import { readCronJobNotFoundError } from "../../../packages/gateway-protocol/src/index.js";
 import { truncateToVisibleWidth, visibleWidth } from "../../../packages/terminal-core/src/ansi.js";
 import { sanitizeTerminalText } from "../../../packages/terminal-core/src/safe-text.js";
@@ -23,12 +26,42 @@ import { formatTimestamp } from "../../logging/timestamps.js";
 import { defaultRuntime, ExitError, type RuntimeEnv } from "../../runtime.js";
 import { isOffsetlessIsoDateTime } from "../../shared/iso-time.js";
 import { formatLookupMiss } from "../error-format.js";
-import { rethrowExpectedCliError } from "../failure-output.js";
+import {
+  ExpectedCliError,
+  formatCliOperatorError,
+  rethrowExpectedCliError,
+} from "../failure-output.js";
 import type { GatewayRpcOpts } from "../gateway-rpc.js";
 import { callGatewayFromCli } from "../gateway-rpc.js";
 import { isJsonOutputModeActive } from "../json-output-mode.js";
 import { exitCliAfterOutput } from "../one-shot-exit.js";
 import { parseDurationMs as parseSharedDurationMs } from "../parse-duration.js";
+import { CronCliError } from "./cron-cli-error.js";
+
+export function parseCronIntegerOption(
+  value: unknown,
+  flag: string,
+  kind: "positive" | "non-negative" = "positive",
+): number | undefined {
+  const parsed =
+    kind === "non-negative"
+      ? parseStrictNonNegativeInteger(value)
+      : parseStrictPositiveInteger(value);
+  if (value !== undefined && parsed === undefined) {
+    throw new CronCliError(`Invalid ${flag} (must be a ${kind} integer).`);
+  }
+  return parsed;
+}
+
+export function parseCronNoOutputTimeoutOption(opts: Record<string, unknown>): number | undefined {
+  // Commander strips the leading no- from this option's attribute name.
+  const raw =
+    opts.noOutputTimeoutSeconds ??
+    (typeof opts.outputTimeoutSeconds === "string" || typeof opts.outputTimeoutSeconds === "number"
+      ? opts.outputTimeoutSeconds
+      : undefined);
+  return parseCronIntegerOption(raw, "--no-output-timeout-seconds");
+}
 
 function parseCronArgv(value: unknown, flag: string): string[] | undefined {
   if (typeof value !== "string") {
@@ -38,14 +71,14 @@ function parseCronArgv(value: unknown, flag: string): string[] | undefined {
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error(`${flag} must be a JSON array of strings`);
+    throw new CronCliError(`${flag} must be a JSON array of strings`);
   }
   if (
     !Array.isArray(parsed) ||
     parsed.length === 0 ||
     parsed.some((entry) => typeof entry !== "string" || entry.length === 0)
   ) {
-    throw new Error(`${flag} must be a non-empty JSON array of non-empty strings`);
+    throw new CronCliError(`${flag} must be a non-empty JSON array of non-empty strings`);
   }
   return parsed;
 }
@@ -66,12 +99,12 @@ export function parseCronCommandEnv(values: unknown): Record<string, string> | u
   const env: Record<string, string> = {};
   for (const raw of rawValues) {
     if (typeof raw !== "string") {
-      throw new Error("--command-env must be KEY=VALUE");
+      throw new CronCliError("--command-env must be KEY=VALUE");
     }
     const idx = raw.indexOf("=");
     const key = idx > 0 ? raw.slice(0, idx).trim() : "";
     if (!key) {
-      throw new Error("--command-env must be KEY=VALUE");
+      throw new CronCliError("--command-env must be KEY=VALUE");
     }
     env[key] = raw.slice(idx + 1);
   }
@@ -215,7 +248,7 @@ function formatCronStatusForDisplay(job: CronJob) {
           ? theme.success
           : theme.muted;
   let label = decorateStatusWithFailures(status, state.consecutiveErrors);
-  if (streamDisabled) {
+  if (streamDisabled && status !== "running") {
     label = "disabled";
   } else if (status === "disabled" && state.autoDisabled) {
     label =
@@ -235,10 +268,29 @@ export function handleCronCliError(err: unknown) {
   }
   rethrowExpectedCliError(err);
   const missingJob = readCronJobNotFoundError(err);
-  const message = missingJob ? formatCronLookupMiss(missingJob.jobId) : formatErrorMessage(err);
+  const diagnostic = err instanceof CronCliError ? (err.originalError ?? err) : err;
   if (isJsonOutputModeActive(process.argv)) {
-    throw missingJob ? new Error(message) : err;
+    if (
+      !missingJob &&
+      !(err instanceof CronCliError) &&
+      !(err instanceof GatewayClientRequestError)
+    ) {
+      throw err;
+    }
+    // Both machine-mode streams share the canonical debug gate. Unexpected
+    // exceptions keep their identity and reach the root crash renderer.
+    const message = missingJob
+      ? formatCronLookupMiss(missingJob.jobId)
+      : formatCliOperatorError(diagnostic);
+    throw new ExpectedCliError({
+      message,
+      humanOutput: danger(message),
+      machineOutput: message,
+    });
   }
+  const message = missingJob
+    ? formatCronLookupMiss(missingJob.jobId)
+    : formatErrorMessage(diagnostic);
   defaultRuntime.error(danger(message));
   exitCliAfterOutput(defaultRuntime, 1);
 }
@@ -250,6 +302,16 @@ export const formatCronLookupMiss = (jobId: string) =>
     listCommand: "openclaw cron list",
     valueLabel: "automation id",
   });
+
+// A blank id usually comes from an empty shell variable; reject it here instead of
+// letting the Gateway answer with a raw params-schema error.
+export function requireCronJobId(id: unknown, accepted = "Pass it positionally."): string {
+  const jobId = normalizeOptionalString(id);
+  if (!jobId) {
+    throw new CronCliError(`Missing job id. ${accepted}`);
+  }
+  return jobId;
+}
 
 export async function warnIfCronSchedulerDisabled(opts: GatewayRpcOpts) {
   // Old/offline gateways should not make successful cron mutations fail after the fact.
@@ -272,7 +334,7 @@ export async function warnIfCronSchedulerDisabled(opts: GatewayRpcOpts) {
     defaultRuntime.error(
       [
         "warning: the automations scheduler is disabled in the Gateway; jobs are saved but will not run automatically.",
-        "Re-enable with `cron.enabled: true` (or remove `cron.enabled: false`) and restart the Gateway.",
+        "To enable automatic runs, set `cron.enabled: true` (or remove `cron.enabled: false`), remove `OPENCLAW_SKIP_CRON=1` from the Gateway's launch environment, and restart the Gateway.",
         store ? `store: ${store}` : "",
       ]
         .filter(Boolean)
@@ -304,7 +366,7 @@ export function parseCronStaggerMs(params: {
   }
   const parsed = parsePositiveCronDurationMs(params.staggerRaw);
   if (!parsed) {
-    throw new Error("Invalid --stagger; use e.g. 30s, 1m, 5m");
+    throw new CronCliError("Invalid --stagger; use e.g. 30s, 1m, 5m");
   }
   return parsed;
 }

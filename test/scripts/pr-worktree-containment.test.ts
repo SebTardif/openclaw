@@ -149,6 +149,7 @@ function runShell(fixture: Fixture, commands: string[], env?: NodeJS.ProcessEnv)
         `gh_plain() { printf 'HTTP/2.0 200 OK\\n\\n{"data":{"viewer":{"login":"fixture-user"}}}\\n'; }`,
         "mark_pr_operation_side_effects_started() { :; }",
         'pr_meta_json() { local head; head=$(git rev-parse refs/pull/42/head); jq -cn --arg head "$head" \'{number:42,title:"fixture",url:"https://example.invalid/42",state:"OPEN",isDraft:false,author:{login:"fixture"},baseRefName:"main",headRefName:"review/pr",headRefOid:$head,headRepository:{nameWithOwner:"fixture/repo",url:""},headRepositoryOwner:{login:"fixture"},additions:1,deletions:0,changedFiles:3}\'; }',
+        'gh() { if [ "$#" = 5 ] && [ "$1 $2 $3 $4" = "pr view 42 --json" ]; then pr_meta_json 42 | jq --arg fields "$5" \'with_entries(select(.key as $key | $fields | split(",") | index($key)))\'; else echo "Unexpected fixture GitHub request" >&2; return 99; fi; }',
         ...commands,
       ].join("\n"),
       "pr-worktree-containment",
@@ -197,6 +198,7 @@ function reviewState(worktree: string) {
     head: git(worktree, "rev-parse", "HEAD"),
     branch: git(worktree, "branch", "--show-current"),
     index: git(worktree, "write-tree"),
+    resolveUndo: git(worktree, "ls-files", "--resolve-undo"),
     status: git(worktree, "status", "--porcelain=v1"),
     diff: git(worktree, "diff", "HEAD"),
     journal: existsSync(join(worktree, ".local", "review-transition.json"))
@@ -560,6 +562,13 @@ describePosix("scripts/pr worktree containment", () => {
   for (const mode of ["branch", "detached"] as const) {
     it.each([
       {
+        name: "worktree writes before the index commit",
+        setup: [
+          'git restore --source="$target_sha" --worktree -- transition-a.txt main-only.txt pr-only.txt',
+          'git diff --cached --quiet "$source_sha"',
+        ],
+      },
+      {
         name: "partially restored index",
         setup: ['git restore --source="$target_sha" --staged --worktree -- pr-only.txt'],
       },
@@ -602,6 +611,32 @@ describePosix("scripts/pr worktree containment", () => {
       expect(existsSync(join(worktree, ".local", "review-transition.json"))).toBe(false);
       expectCanonicalCheckoutUnchanged(fixture);
     });
+
+    it(`recovers target index entries with source worktree entries (${mode})`, () => {
+      const fixture = createReviewFixture();
+      const worktree = join(fixture.root, ".worktrees", "pr-42");
+      const result = runShell(fixture, [
+        "review_init 42",
+        "review_checkout_pr 42",
+        "source_sha=$(git rev-parse HEAD)",
+        "target_sha=$(git rev-parse origin/main)",
+        `write_review_transition_journal 42 "$source_sha" "$target_sha" ${mode} temp/pr-42`,
+        'git restore --source="$target_sha" --staged -- .',
+        'git diff --cached --quiet "$target_sha"',
+        "test -f pr-only.txt",
+        "test ! -e main-only.txt",
+        "recover_review_transition 42",
+      ]);
+
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(git(worktree, "rev-parse", "HEAD")).toBe(fixture.mainSha);
+      expect(git(worktree, "branch", "--show-current")).toBe(mode === "branch" ? "temp/pr-42" : "");
+      expect(git(worktree, "status", "--porcelain=v1", "--untracked-files=no")).toBe("");
+      expect(existsSync(join(worktree, "pr-only.txt"))).toBe(false);
+      expect(readFileSync(join(worktree, "main-only.txt"), "utf8")).toBe("main-only\n");
+      expect(existsSync(join(worktree, ".local", "review-transition.json"))).toBe(false);
+      expectCanonicalCheckoutUnchanged(fixture);
+    });
   }
 
   for (const testCase of [
@@ -620,11 +655,35 @@ describePosix("scripts/pr worktree containment", () => {
       dirtyContent: "foreign unstaged\n",
     },
     {
+      name: "zero-byte non-endpoint",
+      setup: [": > overlap.txt"],
+      expectedStatus: "M overlap.txt",
+      dirtyFile: "overlap.txt",
+      dirtyContent: "",
+    },
+    {
       name: "untracked",
       setup: ['printf "foreign untracked\\n" > foreign.txt'],
       expectedStatus: "?? foreign.txt",
       dirtyFile: "foreign.txt",
       dirtyContent: "foreign untracked\n",
+    },
+    {
+      name: "untracked target path with foreign bytes",
+      setup: ['printf "foreign addition\\n" > main-only.txt'],
+      expectedStatus: "?? main-only.txt",
+      dirtyFile: "main-only.txt",
+      dirtyContent: "foreign addition\n",
+    },
+    {
+      name: "BOM-prefixed untracked target lookalike",
+      setup: [
+        'printf "/.local/\\n" >> "$(git rev-parse --git-path info/exclude)"',
+        "printf 'foreign BOM\\n' > '\ufeffmain-only.txt'",
+      ],
+      expectedStatus: "main-only.txt",
+      dirtyFile: "\ufeffmain-only.txt",
+      dirtyContent: "foreign BOM\n",
     },
   ]) {
     it(`refuses and preserves ${testCase.name} foreign state`, () => {
@@ -654,6 +713,80 @@ describePosix("scripts/pr worktree containment", () => {
       expectCanonicalCheckoutUnchanged(fixture);
     });
   }
+
+  it.each([
+    { name: "executable bit", setup: ["chmod +x overlap.txt"], symlink: false },
+    {
+      name: "symlink with a known blob but foreign mode",
+      setup: ["rm overlap.txt", "ln -s $'pr-a-overlap\\n' overlap.txt"],
+      symlink: true,
+    },
+    {
+      name: "assume-unchanged flag hiding foreign bytes",
+      setup: [
+        "git update-index --assume-unchanged overlap.txt",
+        'printf "foreign hidden\\n" > overlap.txt',
+      ],
+      symlink: false,
+    },
+  ])("refuses and preserves a foreign $name", ({ setup, symlink }) => {
+    const fixture = createReviewFixture();
+    const worktree = join(fixture.root, ".worktrees", "pr-42");
+    const prepared = runShell(fixture, [
+      "review_init 42",
+      "review_checkout_pr 42",
+      `write_review_transition_journal 42 ${fixture.prASha} ${fixture.mainSha} detached ''`,
+      ...setup,
+    ]);
+    expect(prepared.status, prepared.stdout + prepared.stderr).toBe(0);
+    const before = reviewState(worktree);
+    const pathname = join(worktree, "overlap.txt");
+    const bytes = symlink ? readlinkSync(pathname) : readFileSync(pathname, "utf8");
+    const result = runShell(fixture, ["review_init 42"]);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Refusing scripts/pr transition for PR #42");
+    expect(reviewState(worktree)).toEqual(before);
+    expect(symlink ? readlinkSync(pathname) : readFileSync(pathname, "utf8")).toBe(bytes);
+    expectCanonicalCheckoutUnchanged(fixture);
+  });
+
+  it.each(["intent-to-add", "resolve-undo"])(
+    "refuses and preserves hidden %s index metadata on endpoint entries",
+    (metadata) => {
+      const fixture = createReviewFixture();
+      if (metadata === "intent-to-add") {
+        git(fixture.root, "checkout", "main");
+        writeFileSync(join(fixture.root, "main-only.txt"), "");
+        git(fixture.root, "commit", "-am", "empty target fixture");
+        fixture.mainSha = git(fixture.root, "rev-parse", "HEAD");
+        git(fixture.root, "checkout", fixture.siblingBranch);
+      }
+      const worktree = join(fixture.root, ".worktrees", "pr-42");
+      const prepared = runShell(fixture, [
+        "review_init 42",
+        "review_checkout_pr 42",
+        `write_review_transition_journal 42 ${fixture.prASha} ${fixture.mainSha} detached ''`,
+        ...(metadata === "intent-to-add"
+          ? [": > main-only.txt", "git add --intent-to-add main-only.txt"]
+          : [
+              `base_blob=$(git rev-parse ${fixture.mainSha}:overlap.txt)`,
+              `ours_blob=$(git rev-parse ${fixture.prASha}:overlap.txt)`,
+              'printf "0 %040d\\toverlap.txt\\n100644 %s 1\\toverlap.txt\\n100644 %s 2\\toverlap.txt\\n100644 %s 3\\toverlap.txt\\n" 0 "$base_blob" "$ours_blob" "$base_blob" | git update-index --index-info',
+              "git add overlap.txt",
+              'test -n "$(git ls-files --resolve-undo)"',
+            ]),
+      ]);
+      expect(prepared.status, prepared.stdout + prepared.stderr).toBe(0);
+      const before = reviewState(worktree);
+      const result = runShell(fixture, ["review_init 42"]);
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("Refusing scripts/pr transition for PR #42");
+      expect(reviewState(worktree)).toEqual(before);
+      expectCanonicalCheckoutUnchanged(fixture);
+    },
+  );
 
   for (const recovery of [false, true]) {
     it.each([
@@ -753,7 +886,7 @@ describePosix("scripts/pr worktree containment", () => {
     git(fixture.root, "commit", "-m", "reserved namespace fixture");
     git(fixture.root, "update-ref", "refs/pull/42/head", "HEAD");
     git(fixture.root, "checkout", fixture.siblingBranch);
-    const setup = runShell(fixture, ["review_checkout_main 42"]);
+    const setup = runShell(fixture, ["review_init 42"]);
     expect(setup.status, setup.stdout + setup.stderr).toBe(0);
     const worktree = join(fixture.root, ".worktrees", "pr-42");
     const before = reviewState(worktree);
@@ -801,7 +934,7 @@ describePosix("scripts/pr worktree containment", () => {
     git(fixture.root, "checkout", fixture.siblingBranch);
 
     const worktree = join(fixture.root, ".worktrees", "pr-42");
-    const setup = runShell(fixture, ["review_checkout_main 42"]);
+    const setup = runShell(fixture, ["review_init 42"]);
     expect(setup.status, setup.stdout + setup.stderr).toBe(0);
     writeFileSync(git(worktree, "rev-parse", "--git-path", "info/exclude"), "zz-*\n");
     const lookalike = join(worktree, "zz-transition-literal1\n雪\\name.txt");

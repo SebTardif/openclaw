@@ -16,7 +16,7 @@ import {
   SESSION_RESTART_RECOVERY_TOMBSTONE_ERROR_CODE,
   SessionRestartRecoveryTombstoneError,
 } from "../../config/sessions/lifecycle.js";
-import { loadSessionEntryWithDatabase } from "../../config/sessions/session-accessor.sqlite-entry.js";
+import { loadSessionEntryForAdmission } from "../../config/sessions/session-accessor.sqlite-entry.js";
 import type { InternalSessionEntry, SessionEntry } from "../../config/sessions/types.js";
 import type { GatewayContextResolver } from "../../gateway/server-methods/types.js";
 import { racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
@@ -172,9 +172,9 @@ function resolveVisibleActiveWaitMs(operation: ReplyOperation | undefined): numb
 }
 
 type ReplyTurnAdmissionParams = {
+  agentId?: string;
   sessionKey: string;
   sessionId: string;
-  agentId?: string;
   expectedSessionId?: string;
   expectedActiveOperation?: ReplyOperation;
   storePath?: string;
@@ -256,7 +256,7 @@ export async function admitReplyTurn(
     if (
       admittedDatabaseClaim &&
       (!admittedDatabaseClaim.isCurrent() ||
-        (nextClaim && nextClaim.database.db !== admittedDatabaseClaim.database.db))
+        (nextClaim && nextClaim.incarnation !== admittedDatabaseClaim.incarnation))
     ) {
       nextClaim?.release();
       rejectLifecycleInvalidatedWork({
@@ -322,7 +322,8 @@ export async function admitReplyTurn(
               },
               assertAllowed: () => {
                 assertDatabaseOwnerCurrent();
-                const current = loadSessionEntryWithDatabase({
+                const current = loadSessionEntryForAdmission({
+                  agentId: params.agentId,
                   storePath,
                   sessionKey: params.sessionKey,
                   readConsistency: "latest",
@@ -392,6 +393,10 @@ export async function admitReplyTurn(
                   },
                 );
                 if (archivedSessionError) {
+                  const tombstone = currentEntry?.mainRestartRecovery?.tombstone;
+                  if (params.kind === "visible" && tombstone) {
+                    log.warn(`${archivedSessionError} Recovery reason: ${tombstone.reason}`);
+                  }
                   rejectLifecycleInvalidatedWork({
                     kind: params.kind,
                     message: archivedSessionError,
@@ -430,7 +435,7 @@ export async function admitReplyTurn(
             const ownerClaim = await claimMainSessionRecoveryOwner({
               lifecycleGeneration: getAgentEventLifecycleGeneration(),
               sessionId,
-              target: { sessionKey: params.sessionKey, storePath },
+              target: { agentId: params.agentId, sessionKey: params.sessionKey, storePath },
             });
             if (ownerClaim.kind === "invalidated") {
               rejectLifecycleInvalidatedWork({

@@ -1,7 +1,39 @@
 // Runtime launchers and the package build share these subprocess locations.
 const currentModuleUrl = import.meta.url;
 
+export const SQLITE_READONLY_CHILD_ARG = "--openclaw-sqlite-readonly-child";
+
 export const runtimeProcessEntrypoints = {
+  imageProcessor: {
+    currentModuleUrl,
+    sourceWorkerName: "../media/image-processor.worker",
+    distWorkerPath: "media/image-processor.worker.js",
+  },
+  gitOperations: {
+    currentModuleUrl,
+    sourceWorkerName: "git-operation.worker",
+    distWorkerPath: "infra/git-operation.worker.js",
+  },
+  fsSafeCopy: {
+    currentModuleUrl,
+    sourceWorkerName: "fs-safe-copy.worker",
+    distWorkerPath: "infra/fs-safe-copy.worker.js",
+  },
+  sharedStateStore: {
+    currentModuleUrl,
+    sourceWorkerName: "../state/openclaw-state.worker",
+    distWorkerPath: "state/openclaw-state.worker.js",
+  },
+  sqliteStore: {
+    currentModuleUrl,
+    sourceWorkerName: "sqlite-store.worker",
+    distWorkerPath: "infra/sqlite-store.worker.js",
+  },
+  agentSchemaInspection: {
+    currentModuleUrl,
+    sourceWorkerName: "../state/openclaw-agent-schema-inspection.worker",
+    distWorkerPath: "state/openclaw-agent-schema-inspection.worker.js",
+  },
   stateMigrationSnapshot: {
     currentModuleUrl,
     sourceWorkerName: "state-migrations.snapshot.worker",
@@ -21,6 +53,11 @@ export const runtimeProcessEntrypoints = {
     currentModuleUrl,
     sourceWorkerName: "sqlite-integrity.worker",
     distWorkerPath: "infra/sqlite-integrity.worker.js",
+  },
+  preparedModelCatalog: {
+    currentModuleUrl,
+    sourceWorkerName: "../agents/prepared-model-catalog.worker",
+    distWorkerPath: "agents/prepared-model-catalog.worker.js",
   },
   updateRepair: {
     currentModuleUrl,
@@ -52,6 +89,11 @@ export const runtimeProcessEntrypoints = {
     sourceWorkerName: "../config/sessions/session-accessor.sqlite-archive.worker",
     distWorkerPath: "config/sessions/session-accessor.sqlite-archive.worker.js",
   },
+  sessionModelContext: {
+    currentModuleUrl,
+    sourceWorkerName: "../config/sessions/session-model-context.worker",
+    distWorkerPath: "config/sessions/session-model-context.worker.js",
+  },
   sessionTranscriptReconcile: {
     currentModuleUrl,
     sourceWorkerName: "../config/sessions/session-transcript-reconcile.worker",
@@ -81,5 +123,12 @@ export const runtimeProcessEntrypoints = {
     currentModuleUrl,
     sourceWorkerName: "../process/supervisor/service-child-windows-job-anchor",
     distWorkerPath: "process/supervisor/service-child-windows-job-anchor.js",
+  },
+  // Not a launcher: the daemon runtime probe requires this module inside candidate Bun
+  // executables so they select the same SQLite library the Gateway will run with.
+  bunSqliteLibrary: {
+    currentModuleUrl,
+    sourceWorkerName: "bun-sqlite-library",
+    distWorkerPath: "infra/bun-sqlite-library.js",
   },
 } as const;

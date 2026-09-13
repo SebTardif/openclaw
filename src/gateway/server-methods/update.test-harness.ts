@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeAll, beforeEach, expect, vi } from "vitest";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../../config/types.openclaw.js";
 import type { RestartSentinelPayload } from "../../infra/restart-sentinel.js";
 import type { RespawnSupervisor } from "../../infra/supervisor-markers.js";
 import type { UpdateChannel } from "../../infra/update-channels.js";
+import { getUpdateRun } from "../../infra/update-run-ledger.js";
 import { createTempHomeEnv, type TempHomeEnv } from "../../test-utils/temp-home.js";
 
 let ledgerHome: TempHomeEnv | undefined;
@@ -86,6 +88,9 @@ export async function withTransferredUpdateHandoff(
   const activatePath = path.join(root, "activate");
   const updatedPath = path.join(root, "updated");
   const updaterPath = path.join(root, "updater.cjs");
+  const managerStatePath = path.join(root, "manager-state.json");
+  const managerPath = path.join(root, "manager.cjs");
+  const managerPreloadPath = path.join(root, "manager-preload.cjs");
   await fs.writeFile(
     updaterPath,
     `
@@ -113,30 +118,70 @@ export async function withTransferredUpdateHandoff(
     stdio: ["pipe", "ignore", "ignore"],
   });
   let helper: Awaited<ReturnType<typeof handoff.startManagedServiceUpdateHandoff>> | undefined;
-  startManagedServiceUpdateHandoffMock.mockImplementationOnce(async (params) => {
-    helper = await handoff.startManagedServiceUpdateHandoff({
-      ...params,
-      root,
-      supervisor: null,
-      parentPid: parent.pid,
-      execPath: process.execPath,
-      argv1: updaterPath,
-      runId: undefined,
-      meta: {},
-      beforePark: async () => {
-        await params.beforePark?.();
-        await onNotice(params.runId!);
-        expect(parent.exitCode).toBeNull();
-        parent.stdin?.end();
-      },
-    });
-    return helper;
-  });
-  transferManagedServiceUpdateHandoffMock.mockImplementationOnce(
-    handoff.transferManagedServiceUpdateHandoff,
-  );
   try {
+    const parentPid = parent.pid;
+    if (parentPid === undefined) {
+      throw new Error("expected the disposable Gateway parent to have a process ID");
+    }
+    const { createManagedServiceManagerFixtureScript } =
+      await import("../../infra/update-managed-service-handoff-lifecycle.test-support.js");
+    await fs.writeFile(
+      managerPath,
+      createManagedServiceManagerFixtureScript({
+        kind: "launchd",
+        parentPid,
+        statePath: managerStatePath,
+        commandsPath: path.join(root, "manager-commands.log"),
+        configPath: path.join(root, "openclaw.json"),
+      }),
+    );
+    // Invoke the shared manager through Node so the fixture also works without Unix executables.
+    await fs.writeFile(
+      managerPreloadPath,
+      `
+    const children = require("node:child_process");
+    const spawn = children.spawn;
+    children.spawn = (command, args, options) => command === "launchctl"
+      ? spawn(process.execPath, [${JSON.stringify(managerPath)}, ...args], options)
+      : spawn(command, args, options);
+  `,
+    );
+    startManagedServiceUpdateHandoffMock.mockImplementationOnce(async (params) => {
+      helper = await handoff.startManagedServiceUpdateHandoff({
+        ...params,
+        root,
+        supervisor: "launchd",
+        env: {
+          ...process.env,
+          NODE_OPTIONS:
+            `${process.env.NODE_OPTIONS ?? ""} --require ${JSON.stringify(managerPreloadPath)}`.trim(),
+        },
+        parentPid,
+        execPath: process.execPath,
+        argv1: updaterPath,
+        runId: undefined,
+        meta: {},
+        beforePark: async () => {
+          await params.beforePark?.();
+          await onNotice(params.runId!);
+          expect(parent.exitCode).toBeNull();
+        },
+      });
+      return helper;
+    });
+    transferManagedServiceUpdateHandoffMock.mockImplementationOnce(
+      handoff.transferManagedServiceUpdateHandoff,
+    );
     await run(() => fs.writeFile(activatePath, "activate"));
+    await vi.waitFor(
+      async () => {
+        expect(JSON.parse(await fs.readFile(managerStatePath, "utf8"))).toMatchObject({
+          parked: true,
+        });
+      },
+      { timeout: 5_000 },
+    );
+    parent.stdin?.end();
     await vi.waitFor(() => fs.access(updatedPath), { timeout: 5_000 });
   } finally {
     parent.stdin?.end();
@@ -164,7 +209,12 @@ export const resolveGatewayLifecycleNoticeRouteMock = vi.fn(
     threadId?: string;
   }) =>
     deliveryContext?.channel === "slack" && deliveryContext.to
-      ? { ...deliveryContext, channel: "slack", to: deliveryContext.to, threadId }
+      ? {
+          ...deliveryContext,
+          channel: "slack",
+          to: deliveryContext.to.replace(/^slack:/, ""),
+          threadId,
+        }
       : undefined,
 );
 vi.mock("../server-restart-sentinel-notice.js", () => ({
@@ -412,3 +462,71 @@ beforeEach(() => {
     reason: "not-git-update",
   });
 });
+
+export async function invokeUpdateRun(
+  params: Record<string, unknown>,
+  respond?: (ok: boolean, response?: unknown) => void,
+  runtimeConfig: OpenClawConfig = {
+    update: {},
+    commands: { ownerAllowFrom: ["slack:C0123ABC", "slack:C0456DEF"] },
+  },
+) {
+  const { updateHandlers } = await import("./update.js");
+  const onRespond = respond ?? (() => {});
+  await expectDefined(
+    updateHandlers["update.run"],
+    'updateHandlers["update.run"] test invariant',
+  )({
+    params,
+    respond: onRespond as never,
+    context: { getRuntimeConfig: () => runtimeConfig },
+  } as never);
+}
+
+export async function captureUpdateRunPayload(
+  params: Record<string, unknown> = {},
+  runtimeConfig?: OpenClawConfig,
+): Promise<UpdateRunPayload | undefined> {
+  let payload: UpdateRunPayload | undefined;
+  await invokeUpdateRun(
+    params,
+    (_ok: boolean, response: unknown) => {
+      payload = response as UpdateRunPayload;
+    },
+    runtimeConfig,
+  );
+  if (
+    payload?.result?.status &&
+    payload.result.status !== "ok" &&
+    payload.handoff?.status !== "started"
+  ) {
+    expect(getUpdateRun(payload.runId)).toMatchObject({
+      status: payload.result.status === "skipped" ? "skipped" : "failed",
+      phase: "finished",
+      reason: payload.result.reason,
+    });
+  }
+  return payload;
+}
+
+export function mockGlobalInstallSurface() {
+  initializeGatewayUpdateStatusMock.mockResolvedValueOnce({
+    root: "/tmp/openclaw-global",
+    status: { root: "/tmp/openclaw-global", installKind: "package", packageManager: "npm" },
+    installReceipt: null,
+  });
+  resolveUpdateInstallSurfaceMock.mockResolvedValueOnce({
+    kind: "global",
+    mode: "npm",
+    root: "/tmp/openclaw-global",
+    packageRoot: "/tmp/openclaw-global",
+  });
+}
+
+export function mockGitInstallSurface(root: string) {
+  initializeGatewayUpdateStatusMock.mockResolvedValueOnce({
+    root,
+    status: { root, installKind: "git", packageManager: "pnpm" },
+    installReceipt: null,
+  });
+}

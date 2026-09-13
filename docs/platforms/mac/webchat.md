@@ -10,9 +10,9 @@ The macOS menu bar app embeds the WebChat UI as a native SwiftUI view. It connec
 
 The full chat window is a native split view:
 
-- **Sessions sidebar**: searchable session list with pinned, gateway-backed group, and recent sections. Spawned child sessions nest beneath their parent inside each section; collapsed parents summarize running, failed, and unread descendants. Context menus support session info, rename, pin, fork, read/unread, archive/restore, copy session key, and delete. The primary new-session action (or Shift-Cmd-N) creates immediately via `sessions.create`; its adjacent options popover can select an agent and request a managed worktree with an optional base ref.
-- **Window toolbar**: conversation title, Find in Conversation, and a session actions menu. The menu can rename or fork the current session and update its pin, read, or archive state. **Sessions…** (Shift-Cmd-S) opens the Active/Archived manager for gateway search, group management, session inspection, rename, pin, archive, and restore. Select mode applies pin, unpin, archive, or delete to several active sessions while keeping individual failures visible. Separate menu checkmarks show or hide assistant reasoning and tool activity; both are on by default and remembered across launches.
-- **Transcript and composer**: a centered reading column keeps messages and the composer aligned in wide windows. Assistant messages render as plain text with an avatar, user messages as accent bubbles. The rounded composer grows with multiline drafts and keeps its controls in a compact footer beneath the text, matching web and iOS. The **+** menu contains attachments, branches, and tool-call verbosity. The context ring shows token usage and session cost and offers **Compact Thread**. The model menu groups models by provider, keeps pinned and recent models at the top, and lets you pin or unpin the selected model. **Effort** contains thinking and Fast response settings. Controls adapt to narrow windows while keeping voice and send actions visible. Return sends; Shift-Return inserts a newline. Copy, Reply, Listen, and a message actions menu appear beneath messages; right-click actions remain available. Pending agent questions render as native cards with single- or multi-select options, free-text **Other** answers, expiry countdowns, and shared terminal state. Empty chats offer desktop starter prompts. Typing `/` opens slash-command autocomplete backed by `commands.list`, with arrow/Tab/Return/Escape keyboard navigation. Right-click a message to copy its visible Markdown without hidden reasoning. Truncated assistant messages also offer **Open Full Message**, which loads a selectable Markdown reader. Use **Listen** for gateway TTS with a local speech fallback.
+- **Agents and threads sidebar**: named agents appear above the searchable thread list, with their configured emoji or initial, a quiet selection highlight, and activity and unread summaries from loaded sessions. Selecting an agent opens its primary conversation and names the thread section for that agent; switching back restores that conversation's text draft. Pinned threads, gateway-backed groups, and recent threads keep their existing sections. Thread rows show timestamps and recent visible text from the local transcript cache when available; current activity and attention messages take precedence over previews. Spawned child sessions nest beneath their parent inside each section; collapsed parents summarize running, failed, and unread descendants. Context menus support session info, rename, pin, fork, read/unread, archive/restore, copy session key, and delete. **New Thread** (Cmd-N) creates immediately for the selected agent via `sessions.create`; its adjacent options popover starts with the selected agent and offers **Separate working copy** to create a managed Git worktree with an optional base branch or commit.
+- **Window toolbar**: a plain conversation title and active agent, a labeled working, queued, or attention state when known, Find in Conversation, and a session actions menu. Pending questions and current model authentication failures also surface attention; answered or expired questions do not. The menu can rename or fork the current session and update its pin, read, or archive state. **Threads…** (Shift-Cmd-S) opens the Active/Archived manager for gateway search, group management, session inspection, rename, pin, archive, and restore. Select mode applies pin, unpin, archive, or delete to several active sessions while keeping individual failures visible. Separate menu checkmarks show or hide assistant reasoning and tool activity; both are on by default and remembered across launches.
+- **Transcript and composer**: a centered reading column keeps messages and the composer aligned in wide windows. Assistant messages render as plain text without repeated avatars, user messages as muted accent bubbles. Dark mode uses softer gray text on charcoal while retaining enhanced text contrast; Increase Contrast raises text contrast further. The rounded composer names the selected agent, starts at a compact single-line height, grows with multiline drafts, and keeps attachment, model, voice, and send controls aligned beneath the text. The **+** menu contains attachments, branches, and tool-call verbosity. The context ring shows token usage and session cost and offers **Compact Thread**. The model menu groups models by provider, keeps pinned and recent models at the top, and lets you pin or unpin the selected model. **Model sign-in** lives in this menu and remains available when no models are listed. When the selected model cannot send because its credentials are missing or invalid, an inline notice beside the composer offers **Model sign-in** and **Retry**. Temporary cooldowns do not show this authentication notice. **Effort** contains thinking and Fast response settings. Controls adapt to narrow windows while keeping voice and send actions visible. Return sends; Shift-Return inserts a newline. Copy, Reply, Listen, and a message actions menu appear beneath messages on hover or keyboard focus; right-click actions remain available. Tool activity uses compact cards with explicit working, finished, failed, or no-result labels; expand a card to read its result or diff. Subagent cards distinguish queued, working, finished, failed, and cancelled work and expand to show their activity details. Pending agent questions render as native cards with single- or multi-select options, free-text **Other** answers, expiry countdowns, and shared terminal state. Empty chats offer desktop starter prompts. Typing `/` opens slash-command autocomplete backed by `commands.list`, with arrow/Tab/Return/Escape keyboard navigation. Right-click a message to copy its visible Markdown without hidden reasoning. Truncated assistant messages also offer **Open Full Message**, which loads a selectable Markdown reader. Use **Listen** for gateway TTS with a local speech fallback.
 - **Find in Conversation**: press Cmd-F to search user and assistant text in the loaded conversation. Return or Cmd-G moves to the next matching message; Shift-Cmd-G moves backward. The selected message is outlined and revealed without incoming replies pulling you away. Escape closes Find. Search does not fetch older history or search hidden reasoning and tool payloads.
 - **Voice controls**: the composer can start or stop the existing macOS Talk Mode without replacing its menu-bar overlay. While Talk Mode is active, the composer shows its listening/thinking/speaking state, live audio activity, and an expandable rolling transcript. Right-click the Talk button to choose **System Default** or a connected microphone; this is the same microphone selection used by Voice Wake and push-to-talk. If a selected microphone disconnects, the active Talk session falls back to the system default and tries the selection again the next time Talk Mode starts. A separate microphone action records a voice note when Talk Mode does not own audio capture.
 
@@ -39,7 +39,7 @@ failures offer **Retry diagram** in the options menu.
 
 Right-click a session in the sidebar, or open its menu-bar session submenu, and choose **Color**. Select red, blue, green, yellow, purple, orange, pink, or cyan. **Default** clears the color.
 
-A colored session has a narrow leading stripe in sidebar and menu-bar rows and a small dot beside its open chat title. Unset colors show neither marker. The Gateway stores color names, not hex values; the app adjusts their hues for light and dark appearances.
+A colored session has a narrow leading stripe in sidebar and menu-bar rows. The open chat title uses a labeled activity state instead of a color dot. Unset colors show no stripe. The Gateway stores color names, not hex values; the app adjusts their hues for light and dark appearances.
 
 ## Multiple Gateway windows
 
@@ -58,8 +58,8 @@ Gateway origin, including its port. Each browser-authenticated profile has its
 own dashboard browser data, isolated across named app profiles. Manual
 token/password profiles retain their existing browser store and preferences.
 Signing in with your browser starts a personal store without copying credentials
-from the shared browser store. Links opened beside a browser-authenticated
-dashboard use a separate temporary browser session.
+from the shared browser store. Mac tabs in a browser-authenticated dashboard
+use a separate temporary browser session, shared by that window's Mac tabs.
 Removing a profile closes its native chat and dashboard windows and shuts down
 its secondary connection.
 Updating a saved profile's credentials refreshes its open dashboard windows.
@@ -112,9 +112,12 @@ Inline widgets also load from that window's Gateway.
 
 ### Gateway picker
 
-The dashboard header shows a Gateway picker when the Mac app has at least two
-configured Gateways. Choose a Gateway to replace the current dashboard in the
-same window, or Option-click it to open a separate dashboard window. **Set as
+The sidebar identity menu lists the Mac app's configured Gateways, with health,
+primary, and current-selection indicators. The selected Gateway shows a checkmark
+in place of its shortcut hint. Other rows among the first nine show **⌘1–9**
+shortcuts in native Gateway menu order; later rows have no shortcut hint.
+Choose a Gateway to replace the current dashboard in the same window, or
+Command-click or Control-click it to open a separate dashboard window. **Set as
 primary…** makes the viewed token-authenticated profile the Mac app's primary
 Gateway after confirmation. The app replaces the primary Gateway's credentials
 and closes its native chat window; independent saved-profile windows stay open.
@@ -162,6 +165,9 @@ Disable the feature entirely under **Dashboard → Settings → This Mac → App
 - **Remote mode**: uses the configured direct `ws://`/`wss://` route or the app-managed SSH tunnel as the data plane.
 
 ## Launch and debugging
+
+Run the commands below from the repository root in a POSIX shell such as `zsh`
+or `bash`, after `./scripts/package-mac-app.sh` has produced `dist/OpenClaw.app`.
 
 - Manual: Lobster menu -> "Open Chat".
 - Auto-open for testing:

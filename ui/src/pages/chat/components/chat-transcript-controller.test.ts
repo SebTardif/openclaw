@@ -12,7 +12,6 @@ import {
   scheduleCommittedChatScroll,
 } from "../scroll.ts";
 import { SIDEBAR_GEOMETRY_COMMIT_EVENT } from "../sidebar-layout.ts";
-import { renderReadOnlyTranscript } from "./chat-read-only-transcript.ts";
 import { renderChatThread } from "./chat-thread.ts";
 import { ChatTranscriptController } from "./chat-transcript-controller.ts";
 import {
@@ -167,6 +166,76 @@ describe("chat transcript controller", () => {
     expect(transcriptSize(container)).toBe(540);
   });
 
+  it.each([false, true])(
+    "keeps the committed rows and message lookup together while a touch holds a prepend, idle=%s",
+    async (idleBeforeRelease) => {
+      const initial: TestContentRow[] = [
+        {
+          kind: "content",
+          key: "retained-row",
+          content: html`<div class="chat-bubble" data-message-id="retained">retained</div>`,
+        },
+      ];
+      const next: TestContentRow[] = [
+        {
+          kind: "content",
+          key: "expanded-row",
+          content: html`<div class="chat-bubble" data-message-id="older">older</div>
+            <div class="chat-bubble" data-message-id="retained">retained</div>`,
+        },
+      ];
+      const { container, session, transcript, renderRows } = await mountTestTranscript(
+        "touch-map",
+        initial,
+      );
+      try {
+        session.syncMessageRows(
+          new Map([["retained", "retained-row"]]),
+          new Map([["retained", "retained-row"]]),
+        );
+        renderRows(initial);
+        container.dispatchEvent(new Event("touchstart"));
+        if (idleBeforeRelease) {
+          // The finger can remain down after native offset notifications settle.
+          vi.useFakeTimers();
+          container.scrollTop = 10;
+          container.dispatchEvent(new Event("scroll"));
+          await vi.advanceTimersByTimeAsync(200);
+        }
+        session.syncMessageRows(
+          new Map([
+            ["older", "expanded-row"],
+            ["retained", "expanded-row"],
+          ]),
+          new Map([
+            ["older", "expanded-row"],
+            ["retained", "expanded-row"],
+          ]),
+        );
+        renderRows(next);
+        expect(transcriptRows(container).map((row) => row.dataset.virtualRowKey)).toEqual([
+          "retained-row",
+        ]);
+        expect(container.textContent).not.toContain("older");
+        expect(session.activeMessageId(["retained"])).toBe("retained");
+        expect(session.activeMessageId(["older"])).toBeNull();
+        container.dispatchEvent(new Event("touchend"));
+        renderRows(next);
+        expect(transcriptRows(container).map((row) => row.dataset.virtualRowKey)).toEqual([
+          "expanded-row",
+        ]);
+        expect(container.textContent).toContain("older");
+        expect(session.activeMessageId(["retained"])).toBe("retained");
+        expect(session.activeMessageId(["older"])).toBe("older");
+      } finally {
+        transcript.hostDisconnected();
+        if (idleBeforeRelease) {
+          vi.useRealTimers();
+        }
+      }
+    },
+  );
+
   it("does not teardown an MCP row retained by an append", async () => {
     const initialRows = [
       { kind: "content" as const, key: "app", content: html`<mcp-app-view></mcp-app-view>` },
@@ -217,7 +286,44 @@ describe("chat transcript controller", () => {
     expect(app.parentElement?.parentElement).toBe(rowParent);
   });
 
+  it.each([false, true])(
+    "coalesces end geometry across commits and retires disconnected work=%s",
+    async (disconnect) => {
+      const flushFrames = stubAnimationFrames();
+      const { container, transcript } = await mountTestTranscript("coalesced-end", [
+        { kind: "content", key: "reply", content: html`<div>Reply</div>` },
+      ]);
+      try {
+        Object.defineProperties(container, {
+          clientHeight: { configurable: true, value: 600 },
+          scrollHeight: { configurable: true, value: 1200 },
+        });
+        container.scrollTop = 600;
+        flushFrames();
+        transcript.hostUpdated();
+        flushFrames();
+        const readHeight = vi.fn(() => 1200);
+        Object.defineProperty(container, "scrollHeight", {
+          configurable: true,
+          get: readHeight,
+        });
+        for (let index = 0; index < 4; index++) {
+          transcript.hostUpdated();
+        }
+        expect(readHeight).not.toHaveBeenCalled();
+        if (disconnect) {
+          transcript.hostDisconnected();
+        }
+        flushFrames();
+        expect(readHeight).toHaveBeenCalledTimes(disconnect ? 0 : 1);
+      } finally {
+        transcript.hostDisconnected();
+      }
+    },
+  );
+
   it("reconciles an implicit end anchor when committed content has no scroll range", () => {
+    const flushFrames = stubAnimationFrames();
     const transcript = createTestTranscript();
     const container = document.body.appendChild(document.createElement("div"));
     const messages = Array.from({ length: 18 }, (_, index) => ({
@@ -237,6 +343,7 @@ describe("chat transcript controller", () => {
     transcript.hostConnected();
     transcript.scrollToEnd({ source: "auto" });
     transcript.hostUpdated();
+    flushFrames();
     render(renderChatThread(props, transcript), container);
     expect(transcriptRows(container)[0]?.dataset.index).toBe("0");
     expect(container.textContent).toContain("message 0");
@@ -480,7 +587,7 @@ describe("chat transcript controller", () => {
     const viewportChanged = vi.fn();
     const main = new ChatTranscriptController(host, { onViewportResize: viewportChanged });
     const detail = new ChatTranscriptController(host);
-    // Task tabs may precede main chat in DOM order; neither observer nor
+    // Another pane may precede main chat in DOM order; neither observer nor
     // scroll commands may rediscover the first thread under the shared host.
     const detailPanel = host.appendChild(document.createElement("div"));
     const mainPanel = host.appendChild(document.createElement("div"));
@@ -488,16 +595,7 @@ describe("chat transcript controller", () => {
     const detailProps = threadProps("pane-geometry-detail", "agent:main:geometry-detail");
     const renderTranscripts = () => {
       render(renderChatThread(mainProps, main), mainPanel);
-      render(
-        renderReadOnlyTranscript({
-          chat: detailProps,
-          messages: detailProps.messages,
-          paneId: detailProps.paneId,
-          sessionKey: detailProps.sessionKey,
-          transcript: detail,
-        }),
-        detailPanel,
-      );
+      render(renderChatThread(detailProps, detail), detailPanel);
       main.hostUpdated();
       detail.hostUpdated();
     };
@@ -860,7 +958,7 @@ describe("chat transcript controller", () => {
         key: id,
         content: html`<div class="chat-bubble" data-entry-id=${id}>${id}</div>`,
       }));
-      const { container, session } = await mountTestTranscript(
+      const { container, session, renderRows } = await mountTestTranscript(
         `reveal-${interruption}`,
         rows,
         transcript,
@@ -879,7 +977,12 @@ describe("chat transcript controller", () => {
             ["first", "first"],
             ["second", "second"],
           ]),
+          new Map([
+            ["first", "first"],
+            ["second", "second"],
+          ]),
         );
+        renderRows(rows);
         if (interruption === "idle at end") {
           vi.useFakeTimers();
         }

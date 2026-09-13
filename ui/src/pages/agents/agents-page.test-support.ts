@@ -6,8 +6,10 @@ import type {
   ToolsEffectiveResult,
 } from "../../api/types.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
+import { createGatewayMetadataObserver } from "../../app/gateway-observers.ts";
 import type { PanelRefreshStatus } from "../../components/panel-refresh-status.ts";
 import type { AgentsPanel } from "../../lib/agents/panels.ts";
+import { invalidateChatMetadataStore } from "../../lib/chat/chat-metadata-cache.ts";
 import type { CronState } from "../../lib/cron/index.ts";
 import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
 import type { AgentsRouteData } from "./route.ts";
@@ -44,6 +46,7 @@ export type TestAgentsPage = HTMLElement & {
   };
   willUpdate: (changed: Map<PropertyKey, unknown>) => void;
   gateway: {
+    readonly snapshot: ApplicationGatewaySnapshot | null;
     applySnapshot: (
       snapshot: ApplicationGatewaySnapshot,
       binding: { initial: boolean; sourceChanged: boolean },
@@ -69,17 +72,16 @@ export function setPageGateway(
   connected = true,
   sourceChanged = false,
 ) {
-  page.gateway.applySnapshot(snapshot(client, connected), { initial: false, sourceChanged });
-}
-
-export function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((next, fail) => {
-    resolve = next;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
+  const next = snapshot(client, connected);
+  const previous = page.gateway.snapshot;
+  if (previous) {
+    // Application connection retirement precedes page-local request invalidation.
+    createGatewayMetadataObserver((current) => current === next).synchronize(previous, next);
+  }
+  if (!page.context?.gateway || sourceChanged) {
+    page.context = { ...page.context, gateway: gateway(next) };
+  }
+  page.gateway.applySnapshot(next, { initial: false, sourceChanged });
 }
 
 export function snapshot(
@@ -99,9 +101,33 @@ export function snapshot(
   };
 }
 
+const eventListeners = new WeakMap<
+  ApplicationContext["gateway"],
+  Set<Parameters<ApplicationContext["gateway"]["subscribeEvents"]>[0]>
+>();
+
+export function emitCatalogChanged(currentGateway: ApplicationContext["gateway"]) {
+  const client = currentGateway.snapshot.client;
+  if (client) {
+    invalidateChatMetadataStore(client);
+  }
+  for (const listener of eventListeners.get(currentGateway) ?? []) {
+    listener({ type: "event", event: "chat.metadata.changed", payload: {} });
+  }
+}
+
 export function gateway(current: ApplicationGatewaySnapshot): ApplicationContext["gateway"] {
-  return {
+  const listeners = new Set<Parameters<ApplicationContext["gateway"]["subscribeEvents"]>[0]>();
+  const result = {
+    subscribeEvents: (
+      listener: Parameters<ApplicationContext["gateway"]["subscribeEvents"]>[0],
+    ) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     snapshot: current,
     subscribe: vi.fn(() => () => undefined),
   } as unknown as ApplicationContext["gateway"];
+  eventListeners.set(result, listeners);
+  return result;
 }

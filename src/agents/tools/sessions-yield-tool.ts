@@ -4,11 +4,14 @@
  * Ends the current turn after subagent spawning so completion events can resume the session later.
  */
 import { Type } from "typebox";
+import { getAgentToolExecutionContext } from "../../../packages/agent-core/src/tool-execution-context.js";
 import type { AnyAgentTool } from "./common.js";
 import { jsonResult, readToolStringParam } from "./common.js";
 
 const NO_PENDING_CHILD_COMPLETION_ERROR =
   "No pending child completion is owned by this turn. Continue working because independent background operations complete separately.";
+
+type SessionsYieldClaimResult = boolean | { error: string };
 
 const SessionsYieldToolSchema = Type.Object({
   message: Type.Optional(
@@ -24,7 +27,7 @@ const SessionsYieldToolSchema = Type.Object({
 /** Creates the sessions_yield tool for runtimes that support yield callbacks. */
 export function createSessionsYieldTool(opts?: {
   sessionId?: string;
-  claimYield?: () => boolean | Promise<boolean>;
+  claimYield?: () => SessionsYieldClaimResult | Promise<SessionsYieldClaimResult>;
   onYield?: (message: string, acknowledgment?: string) => Promise<void> | void;
 }): AnyAgentTool {
   return {
@@ -46,10 +49,18 @@ export function createSessionsYieldTool(opts?: {
       if (!opts?.onYield) {
         return jsonResult({ status: "error", error: "Yield not supported in this context" });
       }
-      if (!(await opts.claimYield?.())) {
+      if (getAgentToolExecutionContext()?.hasUnobservedAsyncToolResults) {
         return jsonResult({
           status: "error",
-          error: NO_PENDING_CHILD_COMPLETION_ERROR,
+          error:
+            "Yield deferred because earlier async tool results have not reached the model yet. Finish this model response to receive those results, then reconsider whether external work still requires yielding.",
+        });
+      }
+      const claim = await opts.claimYield?.();
+      if (claim !== true) {
+        return jsonResult({
+          status: "error",
+          error: typeof claim === "object" ? claim.error : NO_PENDING_CHILD_COMPLETION_ERROR,
         });
       }
       // The runtime owns the actual pause/end-turn behavior; this tool records intent.

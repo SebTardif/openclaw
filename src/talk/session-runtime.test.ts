@@ -18,6 +18,65 @@ function expectBridgeRequest(
 }
 
 describe("realtime voice bridge session runtime", () => {
+  it("binds native delegation to the session and rejects late results after close", async () => {
+    let callbacks: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
+    let complete!: (result: { text: string }) => void;
+    const consult = vi.fn(
+      () =>
+        new Promise<{ text: string }>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const session = createRealtimeVoiceBridgeSession({
+      provider: {
+        id: "test",
+        label: "Test",
+        isConfigured: () => true,
+        createBridge: (request) => {
+          callbacks = request;
+          return makeBridge();
+        },
+      },
+      providerConfig: {},
+      audioSink: { sendAudio: vi.fn() },
+      runAgentConsult: consult,
+    });
+    const runner = expectBridgeRequest(callbacks).runAgentConsult;
+    expect(runner).toBeTypeOf("function");
+    const signal = new AbortController().signal;
+    const pending = runner!({ prompt: "Check the agenda", signal });
+    expect(consult).toHaveBeenCalledExactlyOnceWith({ prompt: "Check the agenda", signal });
+    const rejected = expect(pending).rejects.toThrow("session is closed");
+    await session.close();
+    complete({ text: "Late answer" });
+    await rejected;
+    await expect(runner!({ prompt: "Another task" })).rejects.toThrow("session is closed");
+    expect(consult).toHaveBeenCalledOnce();
+  });
+
+  it("does not start a cancelled native delegation", async () => {
+    let callbacks: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
+    const consult = vi.fn(async () => ({ text: "Answer" }));
+    const session = createRealtimeVoiceBridgeSession({
+      provider: {
+        id: "test",
+        label: "Test",
+        isConfigured: () => true,
+        createBridge: (request) => {
+          callbacks = request;
+          return makeBridge();
+        },
+      },
+      providerConfig: {},
+      audioSink: { sendAudio: vi.fn() },
+      runAgentConsult: consult,
+    });
+    const runner = expectBridgeRequest(callbacks).runAgentConsult;
+    expect(runner).toBeTypeOf("function");
+    await expect(runner!({ prompt: "Old task", signal: AbortSignal.abort() })).rejects.toThrow();
+    expect(consult).not.toHaveBeenCalled();
+    await session.close();
+  });
   it.each(["sink", "provider", "session"] as const)(
     "fences scoped transport acknowledgments after the %s closes",
     (closing) => {
@@ -51,7 +110,7 @@ describe("realtime voice bridge session runtime", () => {
       } else if (closing === "provider") {
         callbacks?.onClose?.("completed");
       } else {
-        session.close();
+        void session.close();
       }
       acknowledgePlayback();
       expect(acknowledge).toHaveBeenCalledOnce();
@@ -131,7 +190,7 @@ describe("realtime voice bridge session runtime", () => {
     expect(callbacks?.getPlaybackState?.()).toEqual([]);
     open = true;
     getPlaybackState.mockImplementationOnce(() => {
-      session.close();
+      void session.close();
       return playback;
     });
     expect(callbacks?.getPlaybackState?.()).toEqual([]);
@@ -440,15 +499,15 @@ describe("realtime voice bridge session runtime", () => {
       name: "lookup",
       args: {},
     });
-    session.close();
+    const closing = session.close();
     rejectToolCall?.(new Error("late tool callback failure"));
-    await Promise.resolve();
+    await closing;
 
     expect(close).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
   });
 
-  it("forwards the close disposition to the provider bridge", () => {
+  it("forwards the close disposition to the provider bridge", async () => {
     const close = vi.fn();
     const provider: RealtimeVoiceProviderPlugin = {
       id: "test",
@@ -462,7 +521,7 @@ describe("realtime voice bridge session runtime", () => {
       audioSink: { sendAudio: vi.fn() },
     });
 
-    session.close({ disposition: "detach" });
+    await session.close({ disposition: "detach" });
 
     expect(close).toHaveBeenCalledWith({ disposition: "detach" });
   });
@@ -492,8 +551,8 @@ describe("realtime voice bridge session runtime", () => {
       onTranscript,
     });
 
-    session.close();
-    session.close();
+    void session.close();
+    void session.close();
     session.sendAudio(Buffer.from("late-input"));
     callbacks?.onAudio(Buffer.from("late-output"));
     await expect(session.connect()).rejects.toThrow("Realtime voice session is closed");
@@ -534,8 +593,8 @@ describe("realtime voice bridge session runtime", () => {
     expect(getPlaybackState).not.toHaveBeenCalled();
     session.sendAudio(Buffer.from("late-input"));
     callbacks?.onAudio(Buffer.from("late-output"));
-    session.close();
-    session.close();
+    void session.close();
+    void session.close();
 
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);

@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import { escapeRegExp } from "./regexp.mjs";
+import {
+  classifyReleaseTrain,
+  compareReleaseVersions,
+  parseReleaseVersion,
+} from "./release-version.mjs";
 
 const STABLE_RELEASE_TAG_RE = /^v(?<version>\d{4}\.\d{1,2}\.\d{1,2})(?:-[1-9]\d*)?$/u;
 const STABLE_PACKAGE_VERSION_RE =
@@ -20,6 +25,13 @@ function parseStableReleaseTagDetails(tag) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+export function verifyReleaseEvidenceChecksum({ assetName, assetBytes, checksum }) {
+  const entry = /^([a-f0-9]{64}) {2}([^\r\n]+)\r?\n?$/u.exec(checksum);
+  if (!entry || entry[2] !== assetName || entry[1] !== sha256(assetBytes)) {
+    throw new Error(`Release evidence checksum must bind exactly ${assetName} and its bytes.`);
+  }
 }
 
 export function parseStableReleaseTag(tag) {
@@ -97,6 +109,19 @@ function isCanonicalAssetDigest(value) {
 function readVerifiedAssetNames(assets) {
   return new Set(
     assets.filter((asset) => isCanonicalAssetDigest(asset.digest)).map((asset) => asset.name),
+  );
+}
+
+export function requiresLinuxUpdaterObservation({ release, existingManifest }) {
+  const selectors = readReleaseAssets(release).filter((asset) => asset.name === "latest.json");
+  const recorded = existingManifest?.githubReleaseAssets?.find(
+    (asset) => asset.name === "latest.json",
+  );
+  return (
+    selectors.length > 0 &&
+    (selectors.length !== 1 ||
+      !isCanonicalAssetDigest(selectors[0].digest) ||
+      selectors[0].digest !== recorded?.digest)
   );
 }
 
@@ -183,15 +208,30 @@ export function verifyStableMainCloseout(params) {
     );
   }
 
-  const mainChangelog = extractStableChangelogSection(params.mainChangelog, version);
-  const tagChangelog = extractStableChangelogSection(params.tagChangelog, version);
+  const mainChangelog =
+    params.mainRelease?.section?.trimEnd() ??
+    extractStableChangelogSection(params.mainChangelog, version);
+  const tagChangelog =
+    params.tagRelease?.section?.trimEnd() ??
+    extractStableChangelogSection(params.tagChangelog, version);
   if (!mainChangelog) {
     errors.push(`main CHANGELOG.md is missing the ## ${version} section.`);
   }
   if (!tagChangelog) {
     errors.push(`release tag CHANGELOG.md is missing the ## ${version} section.`);
   }
-  if (mainChangelog && tagChangelog && mainChangelog !== tagChangelog) {
+  const mirrored = params.mainRelease?.format === "docs-mirror";
+  if (
+    mirrored &&
+    (!params.mainRelease.record ||
+      !params.tagRelease?.record ||
+      params.mainRelease.record.trimEnd() !== params.tagRelease.record.trimEnd())
+  ) {
+    errors.push(
+      `main changelog ${version} frozen contribution record does not match the shipped release accounting.`,
+    );
+  }
+  if (!mirrored && mainChangelog && tagChangelog && mainChangelog !== tagChangelog) {
     errors.push(
       `main CHANGELOG.md ## ${version} does not exactly match the shipped release section.`,
     );
@@ -224,11 +264,42 @@ export function verifyStableMainCloseout(params) {
       "OpenClawCompanion-Setup-x64.exe",
     ],
   };
-  const expectedAppAssets = new Set(Object.values(platformAssets).flat());
+  const allowedLateAssets = new Set([
+    ...Object.values(platformAssets).flat(),
+    `OpenClaw-${tagVersion}-amd64.AppImage`,
+    `OpenClaw-${tagVersion}-amd64.deb`,
+    "SHA256SUMS.linux-app.txt",
+    "latest.json",
+  ]);
   const observedAssets = readReleaseAssets(params.release).filter(
     (asset) => !isCloseoutEvidenceAsset(asset.name, params.tag),
   );
   const existingManifest = params.existingManifest;
+  let verifiedLinuxSelector = false;
+  if (requiresLinuxUpdaterObservation(params)) {
+    const observation = params.linuxUpdaterObservation;
+    const source =
+      typeof observation?.sourceVersion === "string"
+        ? parseReleaseVersion(observation.sourceVersion)
+        : null;
+    const sourceComparison = source ? compareReleaseVersions(source.version, tagVersion) : null;
+    const selectors = observedAssets.filter((asset) => asset.name === "latest.json");
+    verifiedLinuxSelector =
+      selectors.length === 1 &&
+      observation?.carrierTag === params.tag &&
+      isSha256Hex(observation?.manifestSha256) &&
+      selectors[0].digest === `sha256:${observation.manifestSha256}` &&
+      source !== null &&
+      source.version === observation.sourceVersion &&
+      classifyReleaseTrain(source) === "stable" &&
+      sourceComparison !== null &&
+      sourceComparison <= 0;
+    if (!verifiedLinuxSelector) {
+      errors.push(
+        "New or changed Linux updater selector requires a validated observation bound to this carrier and asset digest.",
+      );
+    }
+  }
   const releaseAssets =
     existingManifest?.githubReleaseAssets ??
     observedAssets.map((asset) => ({
@@ -236,10 +307,13 @@ export function verifyStableMainCloseout(params) {
       digest: typeof asset.digest === "string" ? asset.digest : null,
     }));
   if (existingManifest) {
-    // Closeout records a publication-time snapshot. Later app attachments may
-    // extend it, but must never rewrite recorded assets or release evidence.
+    // Keep the publication-time snapshot. Only the independently validated
+    // updater selector may change; recorded bundles and evidence are immutable.
     for (const recorded of releaseAssets) {
       const observed = observedAssets.find((asset) => asset.name === recorded.name);
+      if (recorded.name === "latest.json" && verifiedLinuxSelector) {
+        continue;
+      }
       const observedDigest =
         observed && typeof observed.digest === "string" ? observed.digest : null;
       if (!observed || observedDigest !== recorded.digest) {
@@ -249,7 +323,7 @@ export function verifyStableMainCloseout(params) {
     for (const observed of observedAssets) {
       if (
         !releaseAssets.some((asset) => asset.name === observed.name) &&
-        !expectedAppAssets.has(observed.name)
+        !allowedLateAssets.has(observed.name)
       ) {
         errors.push(`Unexpected release asset added after closeout: ${observed.name}.`);
       }
@@ -314,6 +388,27 @@ export function verifyStableMainCloseout(params) {
     }
   }
 
+  if (
+    params.publishRecovery &&
+    (!params.allowFailedPublishRecovery ||
+      params.publishRecovery.mode !== "split-publication-v1" ||
+      params.publishRecovery.releaseTag !== params.tag ||
+      params.publishRecovery.sourceSha !== params.releaseTagSha ||
+      params.publishRecovery.originalParent?.runId !== params.releasePublishRunId ||
+      params.publishRecovery.fullReleaseValidation?.runId !== params.fullReleaseValidationRunId ||
+      params.publishRecovery.fullReleaseValidation?.runAttempt !== fullReleaseValidationRunAttempt)
+  ) {
+    errors.push("Verified publication recovery does not match the closeout identity.");
+  }
+  if (
+    params.existingManifest?.releasePublishRecovery?.mode === "split-publication-v1" &&
+    JSON.stringify(params.publishRecovery) !==
+      JSON.stringify(params.existingManifest.releasePublishRecovery)
+  ) {
+    errors.push(
+      "Recorded split publication recovery must be independently reverified without changes.",
+    );
+  }
   verifyRollbackDrill(params, errors);
 
   if (errors.length > 0) {
@@ -328,7 +423,9 @@ export function verifyStableMainCloseout(params) {
     mainSha: params.mainSha,
     mainPackageVersion: mainVersion,
     releaseTagPackageVersion: tagPackageVersion,
-    changelogSha256: sha256(mainChangelog),
+    // This receipt binds the shipped release. Later approved docs prose may
+    // evolve, while the independent frozen contribution record must not.
+    changelogSha256: sha256(tagChangelog),
     ...(existingManifest
       ? copyOwnFields(existingManifest, "apps", "appPlatforms", "appcast", "appcastSha256")
       : {
@@ -343,7 +440,7 @@ export function verifyStableMainCloseout(params) {
     ...(existingManifest
       ? copyOwnFields(existingManifest, "releasePublishRecovery")
       : params.allowFailedPublishRecovery
-        ? { releasePublishRecovery: { npmDockerVerified: true } }
+        ? { releasePublishRecovery: params.publishRecovery ?? { npmDockerVerified: true } }
         : {}),
     rollbackDrill: {
       id: params.rollbackDrillId,

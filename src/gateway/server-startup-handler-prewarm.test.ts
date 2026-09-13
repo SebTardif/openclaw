@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 import {
   resetGatewayWorkAdmission,
   tryBeginGatewayRootWorkAdmission,
 } from "../process/gateway-work-admission.js";
 import { SIDEBAR_SESSION_ROSTER_LIMIT } from "../shared/session-list-limits.js";
+import { recordAgentDatabaseAdmissions } from "../state/agent-database-admission.js";
 
 const mocks = vi.hoisted(() => ({
   events: [] as string[],
@@ -62,6 +64,39 @@ afterEach(() => {
 });
 
 describe("scheduleGatewayHandlerPrewarm", () => {
+  it("warms healthy agents without scheduling a refused secondary agent", async () => {
+    vi.useFakeTimers();
+    recordAgentDatabaseAdmissions(
+      [
+        {
+          agentId: "research",
+          embeddedOwnerId: "main",
+          paths: ["/synthetic/research.sqlite"],
+          code: "agent-database-ownership-mismatch",
+          reason: "Refused agent research: database belongs to main.",
+          repairHint: "Preserve the copy and restart after repair.",
+        },
+      ],
+      { source: "startup" },
+    );
+    try {
+      const sidecar = scheduleGatewayHandlerPrewarm({
+        cfgAtStart: { agents: { entries: { main: { default: true }, research: {} } } },
+        log: { warn: vi.fn() },
+      });
+      await vi.runAllTimersAsync();
+      await sidecar.stop();
+      expect(mocks.events).toEqual([
+        "sessions.count",
+        "sessions.load.main",
+        "sessions.rows.main",
+        "plugins",
+      ]);
+    } finally {
+      recordAgentDatabaseAdmissions([], { source: "startup" });
+    }
+  });
+
   it("warms the sidebar roster page and process-stable plugin data in dashboard order", async () => {
     vi.useFakeTimers();
     const cfg = {
@@ -116,10 +151,7 @@ describe("scheduleGatewayHandlerPrewarm", () => {
 
   it("waits for gateway readiness before warming handler data", async () => {
     vi.useFakeTimers();
-    let releaseGatewayReady!: () => void;
-    const gatewayReady = new Promise<void>((resolve) => {
-      releaseGatewayReady = resolve;
-    });
+    const { promise: gatewayReady, resolve: releaseGatewayReady } = createDeferred();
     const load = vi.fn(async () => {});
 
     const sidecar = scheduleGatewayHandlerPrewarm({
@@ -164,10 +196,7 @@ describe("scheduleGatewayHandlerPrewarm", () => {
 
   it("stays stopped when readiness arrives after shutdown", async () => {
     vi.useFakeTimers();
-    let releaseGatewayReady!: () => void;
-    const gatewayReady = new Promise<void>((resolve) => {
-      releaseGatewayReady = resolve;
-    });
+    const { promise: gatewayReady, resolve: releaseGatewayReady } = createDeferred();
     const load = vi.fn(async () => {});
 
     const sidecar = scheduleGatewayHandlerPrewarm({

@@ -14,7 +14,7 @@ import type {
   SessionWorkspaceHost,
   SessionWorkspaceState,
 } from "./chat-session-workspace-types.ts";
-import type { SidebarContent } from "./chat-sidebar.ts";
+import type { SidebarSelection } from "./chat-sidebar.ts";
 
 function resolvePaneAgent(state: SessionScopeHostWithKey): string {
   const normalizedKey = normalizeOptionalString(state.sessionKey)?.toLowerCase();
@@ -45,18 +45,18 @@ export function clearSessionWorkspaceTimers(state: SessionWorkspaceHost) {
 
 const checkoutSidebarContents = new WeakSet<object>();
 
-export function trackSessionCheckoutSidebar(content: SidebarContent) {
+export function trackSessionCheckoutSidebar(content: SidebarSelection) {
   checkoutSidebarContents.add(content);
 }
 
-export function openSessionCheckoutSidebar(state: SessionWorkspaceHost, content: SidebarContent) {
+export function openSessionCheckoutSidebar(state: SessionWorkspaceHost, content: SidebarSelection) {
   trackSessionCheckoutSidebar(content);
   state.handleOpenSidebar(content);
 }
 
 function clearSessionCheckoutSidebar(state: SessionWorkspaceHost) {
   if (state.sidebarContent && checkoutSidebarContents.has(state.sidebarContent)) {
-    state.handleOpenSidebar(null);
+    state.sidebarContent = null;
   }
 }
 
@@ -65,10 +65,13 @@ function createSessionWorkspaceState(
   previous?: SessionWorkspaceState,
 ): SessionWorkspaceState {
   return {
+    previews: [],
+    activePreviewId: null,
     activeId: null,
     agentId: resolvePaneAgent(state),
     browserPath: "",
     browserSearch: "",
+    filter: "all",
     browserSearchTimer: null,
     collapsed: previous?.collapsed ?? true,
     connectionEpoch: state.connectionEpoch,
@@ -136,20 +139,19 @@ export function loadSessionWorkspace(
   const client = state.client;
   void (async () => {
     try {
-      const files = await state.sessions.listFiles(sessionKey, {
-        path: workspace.browserSearch ? "" : workspace.browserPath,
-        search: workspace.browserSearch,
-        agentId,
-      });
-      if (!isCurrentSessionWorkspace(state, workspace)) {
-        return;
-      }
-      const artifacts = await client.request<{
-        artifacts?: SessionWorkspaceListResult["artifacts"];
-      } | null>("artifacts.list", {
-        sessionKey,
-        ...(agentId ? { agentId } : {}),
-      });
+      const [files, artifacts] = await Promise.all([
+        state.sessions.listFiles(sessionKey, {
+          path: workspace.browserSearch ? "" : workspace.browserPath,
+          search: workspace.browserSearch,
+          agentId,
+        }),
+        client.request<{
+          artifacts?: SessionWorkspaceListResult["artifacts"];
+        } | null>("artifacts.list", {
+          sessionKey,
+          ...(agentId ? { agentId } : {}),
+        }),
+      ]);
       if (!isCurrentSessionWorkspace(state, workspace)) {
         return;
       }
@@ -220,4 +222,55 @@ export function retireSessionWorkspaceCheckout(state: SessionWorkspaceHost) {
   const next = createSessionWorkspaceState(state, current);
   state.sessionWorkspaceState = next;
   requestWorkspaceUpdate(state);
+}
+
+/** File tabs are transient workspace presentation, scoped by this controller's lifecycle. */
+export function openSessionWorkspacePreview(
+  state: SessionWorkspaceHost,
+  id: string,
+  label: string,
+  content: SidebarSelection,
+) {
+  const workspace = getSessionWorkspace(state);
+  let preview = workspace.previews.find(
+    (entry) => entry.id === id || entry.requestIds?.includes(id),
+  );
+  if (!preview) {
+    preview = { id, label, content };
+    workspace.previews = [...workspace.previews, preview];
+  }
+  workspace.activePreviewId = preview.id;
+  requestWorkspaceUpdate(state);
+  return preview;
+}
+
+export function selectSessionWorkspacePreview(state: SessionWorkspaceHost, id: string | null) {
+  const workspace = getSessionWorkspace(state);
+  if (id === null || workspace.previews.some((entry) => entry.id === id)) {
+    workspace.activePreviewId = id;
+    requestWorkspaceUpdate(state);
+  }
+}
+
+export function closeSessionWorkspacePreview(state: SessionWorkspaceHost, id: string) {
+  const workspace = getSessionWorkspace(state);
+  const index = workspace.previews.findIndex((entry) => entry.id === id);
+  if (index < 0) {
+    return;
+  }
+  workspace.previews = workspace.previews.filter((entry) => entry.id !== id);
+  if (workspace.activePreviewId === id) {
+    workspace.activePreviewId =
+      workspace.previews[Math.min(index, workspace.previews.length - 1)]?.id ?? null;
+  }
+  requestWorkspaceUpdate(state);
+}
+
+export function clearSessionWorkspacePreviews(state: SessionWorkspaceHost) {
+  const workspace = state.sessionWorkspaceState;
+  if (workspace) {
+    workspace.previews = [];
+    workspace.activePreviewId = null;
+    requestWorkspaceUpdate(state);
+  }
 }

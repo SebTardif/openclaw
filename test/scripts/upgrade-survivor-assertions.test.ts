@@ -17,12 +17,126 @@ import { delimiter, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import type { PluginInstallRecord } from "../../src/config/types.plugins.js";
+import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import {
   writePluginInspectFixture,
   type PluginInspectFixture,
 } from "./plugin-inspect.test-support.js";
 
+const testNodeExecPath = resolveTestNodeExecPath();
+
 const ASSERTIONS_PATH = "scripts/e2e/lib/upgrade-survivor/assertions.mjs";
+
+function selectFrozenUpgradeOracle(
+  root: string,
+  version: string,
+  baseline = "openclaw@2026.6.35",
+  workingVersion?: string,
+  legacyClawHub = false,
+) {
+  const selectedRoot = join(root, "selected");
+  const selectedScenario = join(selectedRoot, "scripts/e2e/lib/upgrade-survivor");
+  const selectedOracle = join(selectedRoot, ASSERTIONS_PATH);
+  mkdirSync(join(selectedOracle, ".."), { recursive: true });
+  writeFileSync(join(selectedRoot, "package.json"), JSON.stringify({ version }));
+  writeFileSync(
+    selectedOracle,
+    'throw new Error("selected oracle has no serving-turn command");\n',
+  );
+  writeFileSync(join(selectedScenario, "run.sh"), "# selected scenario runner\n");
+  if (legacyClawHub) {
+    mkdirSync(join(selectedRoot, "src/plugins"), { recursive: true });
+    writeFileSync(
+      join(selectedRoot, "src/plugins/clawhub.ts"),
+      'import { install } from "../infra/clawhub.js";\n',
+    );
+  }
+  for (const path of [
+    "scripts/lib/npm-publish-plan.mjs",
+    "scripts/windows-cmd-helpers.mjs",
+    "scripts/lib/bounded-response.mjs",
+    "scripts/e2e/lib/plugin-index-sqlite.mjs",
+    "scripts/e2e/lib/env-limits.mjs",
+    "scripts/e2e/lib/text-file-utils.mjs",
+  ]) {
+    mkdirSync(join(selectedRoot, path, ".."), { recursive: true });
+    writeFileSync(join(selectedRoot, path), "// selected release helper\n");
+  }
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", selectedRoot, ...args], { encoding: "utf8" }).trim();
+  git("init", "--quiet");
+  git("add", ".");
+  git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "--quiet",
+    "-m",
+    "selected release contract",
+  );
+  const selectedSha = git("rev-parse", "HEAD");
+  const modePath = join(root, "clawhub-mode");
+  if (workingVersion) {
+    writeFileSync(join(selectedRoot, "package.json"), JSON.stringify({ version: workingVersion }));
+  }
+  const source = readFileSync("scripts/e2e/upgrade-survivor-docker.sh", "utf8");
+  const policy = source.slice(
+    source.indexOf("UPGRADE_SCENARIO_ARGS=()"),
+    source.indexOf("\nIMAGE_NAME="),
+  );
+  const result = spawnSync(
+    "bash",
+    [
+      "-euo",
+      "pipefail",
+      "-c",
+      `
+source "$HARNESS_ROOT_DIR/scripts/lib/frozen-target-compat.sh"
+${policy}
+printf '%s\\n' "\${UPGRADE_SCENARIO_DIR:-$HARNESS_ROOT_DIR/scripts/e2e/lib/upgrade-survivor}/assertions.mjs"
+printf '%s\\n' "$UPGRADE_RUNNER"
+printf '%s\\n' "$UPGRADE_TRUSTED_ASSERTIONS"
+printf '%s\\n' "$UPGRADE_TRUSTED_DIAGNOSTICS"
+printf '%s\\n' \${UPGRADE_SCENARIO_ARGS[@]+"\${UPGRADE_SCENARIO_ARGS[@]}"}
+printf '%s' "$OPENCLAW_FROZEN_UPGRADE_SURVIVOR_CLAWHUB_MODE" > "$MODE_PATH"
+`,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ROOT_DIR: selectedRoot,
+        HARNESS_ROOT_DIR: process.cwd(),
+        OPENCLAW_SELECTED_SHA: selectedSha,
+        OPENCLAW_TOOLING_SHA: "f".repeat(40),
+        OPENCLAW_ALLOW_FROZEN_TARGET_SCENARIO_OMISSIONS: "1",
+        OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPEC: baseline,
+        MODE_PATH: modePath,
+        TMPDIR: root,
+      },
+    },
+  );
+  const [oracle, runner, trustedAssertions, trustedDiagnostics, ...mounts] = result.stdout
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+  const clawhubMode = existsSync(modePath) ? readFileSync(modePath, "utf8") : undefined;
+  const stagedScenario = mounts[0] === "-v" ? mounts[1]?.split(":", 1)[0] : undefined;
+  return {
+    result,
+    oracle,
+    runner,
+    trustedAssertions,
+    trustedDiagnostics,
+    mounts,
+    selectedOracle,
+    selectedScenario,
+    stagedScenario,
+    clawhubMode,
+  };
+}
 
 function writeJson(path: string, value: unknown): void {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -73,7 +187,7 @@ function runJsonTextAssertion(command: string, contents: string, ...args: string
   const file = join(root, "result.json");
   writeFileSync(file, contents);
   const result = spawnSync(
-    process.execPath,
+    testNodeExecPath,
     [
       ASSERTIONS_PATH,
       command,
@@ -148,7 +262,7 @@ describe("upgrade recovery result assertions", () => {
     const captured = (command: string, value: unknown) => {
       writeJson(join(observationRoot, "diagnostics", "post-core.json"), value);
       return spawnSync(
-        process.execPath,
+        testNodeExecPath,
         [ASSERTIONS_PATH, command, resultFile, "2026.8.1", observationRoot, "2026.7.1-2"],
         { encoding: "utf8" },
       );
@@ -538,7 +652,7 @@ function runSessionStateAssertion(
     writeSharedRuntimeCaches(stateDir, options.scenario === "versioned-runtime-deps");
     const fixtureEnv = setup(stateDir);
     for (const command of options.commands ?? ["assert-state"]) {
-      execFileSync(process.execPath, [ASSERTIONS_PATH, command], {
+      execFileSync(testNodeExecPath, [ASSERTIONS_PATH, command], {
         env: {
           ...process.env,
           ...fixtureEnv,
@@ -593,7 +707,7 @@ function assertConfiguredPluginState(params: { installPath?: string } = {}): voi
       skippedIntents: [],
     });
 
-    execFileSync(process.execPath, [ASSERTIONS_PATH, "assert-state"], {
+    execFileSync(testNodeExecPath, [ASSERTIONS_PATH, "assert-state"], {
       env: {
         ...process.env,
         OPENCLAW_STATE_DIR: stateDir,
@@ -625,7 +739,7 @@ function assertConfig(params: {
       skippedIntents: [],
     });
 
-    execFileSync(process.execPath, [ASSERTIONS_PATH, "assert-config"], {
+    execFileSync(testNodeExecPath, [ASSERTIONS_PATH, "assert-config"], {
       env: {
         ...process.env,
         OPENCLAW_CONFIG_PATH: configPath,
@@ -789,7 +903,7 @@ function assertCompanionPluginRecords(
       assertionsPath = join(isolatedLib, "upgrade-survivor", "assertions.mjs");
     }
     execFileSync(
-      process.execPath,
+      testNodeExecPath,
       [
         assertionsPath,
         ...(recoveryPluginIds
@@ -896,7 +1010,7 @@ function assertUpdateRunSelfUpgrade(summary: ReturnType<typeof createUpdateRunSe
     const summaryPath = join(root, "summary.json");
     writeJson(summaryPath, summary);
     execFileSync(
-      process.execPath,
+      testNodeExecPath,
       [ASSERTIONS_PATH, "assert-update-run-self-upgrade", summaryPath],
       { stdio: "pipe" },
     );
@@ -906,6 +1020,114 @@ function assertUpdateRunSelfUpgrade(summary: ReturnType<typeof createUpdateRunSe
 }
 
 describe("upgrade survivor assertions", () => {
+  it.each([
+    ["2026.9.3", false, "openclaw@2026.6.35", ""],
+    ["2026.9.3-beta.1", false, "openclaw@2026.6.35", ""],
+    ["2026.4.25", false, "openclaw@2026.6.35", ""],
+    ["2026.6.35", true, "openclaw@2026.9.2", ""],
+    ["2026.7.33", true, "openclaw@2026.9.2", ""],
+    ["2026.9.3", false, "openclaw@2026.6.35", "2026.6.35"],
+  ])(
+    "selects upgrade assertion ownership from immutable target %s",
+    (version, selected, baseline, workingVersion) => {
+      const root = mkdtempSync(join(tmpdir(), "openclaw-upgrade-oracle-"));
+      try {
+        const proof = selectFrozenUpgradeOracle(root, version, baseline, workingVersion);
+        expect(proof.result.status, proof.result.stderr).toBe(0);
+        expect(proof.oracle).toBe(
+          selected ? proof.selectedOracle : join(process.cwd(), ASSERTIONS_PATH),
+        );
+        expect(proof.runner).toBe(
+          join(
+            selected
+              ? proof.selectedScenario
+              : join(process.cwd(), "scripts/e2e/lib/upgrade-survivor"),
+            "run.sh",
+          ),
+        );
+        if (selected) {
+          expect(proof.trustedAssertions).toBe(
+            "/tmp/openclaw-release-harness/scripts/e2e/lib/upgrade-survivor/assertions.mjs",
+          );
+          expect(proof.trustedDiagnostics).toBe(
+            "/tmp/openclaw-release-harness/scripts/e2e/lib/upgrade-survivor/diagnostics.mjs",
+          );
+          expect(proof.mounts.join("\n")).not.toContain("upgrade-survivor-trusted");
+          expect(readFileSync(join(proof.stagedScenario!, "assertions.mjs"), "utf8")).toBe(
+            readFileSync(proof.selectedOracle, "utf8"),
+          );
+          expect(readFileSync(join(proof.stagedScenario!, "diagnostics.mjs"), "utf8")).toBe(
+            readFileSync("scripts/e2e/lib/upgrade-survivor/diagnostics.mjs", "utf8"),
+          );
+        }
+        expect(proof.mounts).toEqual(
+          selected
+            ? [
+                "-v",
+                expect.stringMatching(
+                  /openclaw-upgrade-scenario\.[^/]+:\/app\/scripts\/e2e\/lib\/upgrade-survivor:ro$/u,
+                ),
+                "-v",
+                expect.stringMatching(
+                  /npm-registry-server\.mjs:\/app\/scripts\/e2e\/lib\/plugins\/npm-registry-server\.mjs:ro$/u,
+                ),
+                "-v",
+                expect.stringMatching(
+                  /npm-publish-plan\.mjs:\/app\/scripts\/lib\/npm-publish-plan\.mjs:ro$/u,
+                ),
+                "-v",
+                expect.stringMatching(
+                  /bounded-response\.mjs:\/app\/scripts\/lib\/bounded-response\.mjs:ro$/u,
+                ),
+                "-v",
+                expect.stringMatching(
+                  /plugin-index-sqlite\.mjs:\/app\/scripts\/e2e\/lib\/plugin-index-sqlite\.mjs:ro$/u,
+                ),
+                "-v",
+                expect.stringMatching(
+                  /env-limits\.mjs:\/app\/scripts\/e2e\/lib\/env-limits\.mjs:ro$/u,
+                ),
+                "-v",
+                expect.stringMatching(
+                  /text-file-utils\.mjs:\/app\/scripts\/e2e\/lib\/text-file-utils\.mjs:ro$/u,
+                ),
+              ]
+            : [],
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(["invalid", "2026.6.35-1"])("rejects invalid frozen target train %s", (version) => {
+    const root = mkdtempSync(join(tmpdir(), "openclaw-upgrade-invalid-oracle-"));
+    try {
+      const proof = selectFrozenUpgradeOracle(root, version);
+      expect(proof.result.status).not.toBe(0);
+      expect(proof.oracle).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("derives the shipped ClawHub request contract from the authorized selected source", () => {
+    const root = mkdtempSync(join(tmpdir(), "openclaw-upgrade-clawhub-mode-"));
+    try {
+      const proof = selectFrozenUpgradeOracle(
+        root,
+        "2026.6.35",
+        "openclaw@2026.6.34",
+        undefined,
+        true,
+      );
+      expect(proof.result.status, proof.result.stderr).toBe(0);
+      expect(proof.clawhubMode).toBe("legacy");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     {
       name: "legacy default-only doctor export",
@@ -973,7 +1195,7 @@ describe("upgrade survivor assertions", () => {
         const baselinePath = join(stateDir, "survivor-baseline.json");
         writeJson(baselinePath, { marker: "existing fixture" });
         const result = spawnSync(
-          process.execPath,
+          testNodeExecPath,
           [
             "scripts/e2e/lib/upgrade-survivor/sqlite-volume-shared-state.mjs",
             "seed-baseline-plugin-state",
@@ -1143,7 +1365,7 @@ process.stdout.write(sessionDir + "\\n");
 
   it("lists the dependency-free scenario contract", () => {
     const scenarios = JSON.parse(
-      execFileSync(process.execPath, [ASSERTIONS_PATH, "list-scenarios"], {
+      execFileSync(testNodeExecPath, [ASSERTIONS_PATH, "list-scenarios"], {
         encoding: "utf8",
       }),
     ) as string[];
@@ -1235,7 +1457,7 @@ process.stdout.write(sessionDir + "\\n");
     });
     const verify = () =>
       execFileSync(
-        process.execPath,
+        testNodeExecPath,
         [ASSERTIONS_PATH, "assert-mobile-pairing-evidence", ...files],
         {
           stdio: "pipe",
@@ -1278,7 +1500,7 @@ process.stdout.write(sessionDir + "\\n");
         mkdirSync(workspace, { recursive: true });
 
         const beforeSeed = Date.now();
-        execFileSync(process.execPath, [ASSERTIONS_PATH, "seed"], {
+        execFileSync(testNodeExecPath, [ASSERTIONS_PATH, "seed"], {
           env: {
             ...process.env,
             OPENCLAW_STATE_DIR: stateDir,
@@ -1369,7 +1591,7 @@ process.stdout.write(sessionDir + "\\n");
           OPENCLAW_UPGRADE_SURVIVOR_SCENARIO: scenario,
         };
 
-        execFileSync(process.execPath, [ASSERTIONS_PATH, "seed"], { env, stdio: "pipe" });
+        execFileSync(testNodeExecPath, [ASSERTIONS_PATH, "seed"], { env, stdio: "pipe" });
 
         expect(existsSync(join(workspace, "IDENTITY.md"))).toBe(true);
         expect(existsSync(join(workspace, ".openclaw", "workspace-state.json"))).toBe(true);
@@ -1386,11 +1608,11 @@ process.stdout.write(sessionDir + "\\n");
             ...env,
             OPENCLAW_UPGRADE_SURVIVOR_ASSERT_STAGE: stage,
           };
-          execFileSync(process.execPath, [ASSERTIONS_PATH, "assert-state"], {
+          execFileSync(testNodeExecPath, [ASSERTIONS_PATH, "assert-state"], {
             env: stageEnv,
             stdio: "pipe",
           });
-          execFileSync(process.execPath, [ASSERTIONS_PATH, "assert-exec-approvals"], {
+          execFileSync(testNodeExecPath, [ASSERTIONS_PATH, "assert-exec-approvals"], {
             env: stageEnv,
             stdio: "pipe",
           });
@@ -1414,7 +1636,7 @@ process.stdout.write(sessionDir + "\\n");
         OPENCLAW_UPGRADE_SURVIVOR_ASSERT_STAGE: "baseline",
       };
       const run = (command: string) =>
-        spawnSync(process.execPath, [ASSERTIONS_PATH, command], { env, encoding: "utf8" });
+        spawnSync(testNodeExecPath, [ASSERTIONS_PATH, command], { env, encoding: "utf8" });
       const seeded = run("seed");
       expect(seeded.status, seeded.stderr).toBe(0);
       const cronStore = join(stateDir, "cron", "jobs.json");
@@ -1439,7 +1661,7 @@ process.stdout.write(sessionDir + "\\n");
       mkdirSync(stateDir, { recursive: true });
       mkdirSync(workspace, { recursive: true });
 
-      execFileSync(process.execPath, [ASSERTIONS_PATH, "seed"], {
+      execFileSync(testNodeExecPath, [ASSERTIONS_PATH, "seed"], {
         env: {
           ...process.env,
           OPENCLAW_STATE_DIR: stateDir,
@@ -1874,6 +2096,86 @@ process.stdout.write(sessionDir + "\\n");
     ).not.toThrow();
   });
 
+  it.each([
+    "ok",
+    "frozen-regular",
+    "queued",
+    "wait-timeout",
+    "cli-failed",
+    "not-started",
+    "turn-failed",
+    "wrong-session",
+    "user-only",
+    "wrong-reply",
+  ])("requires a completed persisted managed serving reply (%s)", (outcome) => {
+    const root = mkdtempSync(join(tmpdir(), "openclaw-survivor-serving-turn-"));
+    try {
+      const bin = join(root, "bin");
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, "openclaw"),
+        `#!${testNodeExecPath}
+const fs = require("node:fs");
+const method = process.argv[4];
+const params = JSON.parse(process.argv[process.argv.indexOf("--params") + 1]);
+const outcome = process.env.PROBE_OUTCOME;
+if (outcome === "cli-failed") {
+  process.stderr.write(JSON.stringify(process.argv));
+  process.exit(47);
+}
+let result;
+if (method === "chat.send") {
+  fs.writeFileSync(process.env.PROBE_MARKER_FILE, params.message.match(/OPENCLAW_E2E_SURVIVOR_[A-F0-9]+/)[0]);
+  result = { status: outcome === "not-started" ? "error" : "started", runId: "serving-run" };
+} else if (method === "agent.wait") {
+  const pending = ["queued", "wait-timeout"].includes(outcome) && !fs.existsSync(process.env.PROBE_MARKER_FILE + ".waited");
+  fs.writeFileSync(process.env.PROBE_MARKER_FILE + ".waited", "waited");
+  result = { runId: params.runId, status: pending ? (outcome === "wait-timeout" ? "timeout" : "pending") : outcome === "turn-failed" ? "error" : "ok", ...(pending ? {} : { endedAt: 1788820180863 }) };
+} else if (method === "chat.history") {
+  result = { sessionId: outcome === "wrong-session" ? "replacement" : "upgrade-main-session", messages: [{
+    role: outcome === "user-only" ? "user" : "assistant",
+    content: [{ type: "text", text: outcome === "wrong-reply" ? "other" : fs.readFileSync(process.env.PROBE_MARKER_FILE, "utf8") }],
+  }] };
+} else { process.exit(47); }
+process.stdout.write(JSON.stringify(result));
+`,
+        { mode: 0o755 },
+      );
+      const receipt = join(root, "receipt.json");
+      let oracle = ASSERTIONS_PATH;
+      if (outcome === "frozen-regular") {
+        const selection = selectFrozenUpgradeOracle(root, "2026.9.3");
+        expect(selection.result.status, selection.result.stderr).toBe(0);
+        oracle = selection.oracle!;
+      }
+      const result = spawnSync(testNodeExecPath, [oracle, "assert-restart-serving-turn", receipt], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}${delimiter}${process.env.PATH}`,
+          GATEWAY_AUTH_TOKEN_REF: "synthetic-serving-token",
+          PROBE_OUTCOME: outcome,
+          PROBE_MARKER_FILE: join(root, "marker"),
+        },
+      });
+      const succeeded = ["ok", "frozen-regular", "queued", "wait-timeout"].includes(outcome);
+      expect(result.status, result.stderr).toBe(succeeded ? 0 : 1);
+      expect(existsSync(receipt)).toBe(succeeded);
+      expect(result.stderr).not.toContain("synthetic-serving-token");
+      if (outcome === "cli-failed") {
+        expect(result.stderr).toContain("chat.send managed serving probe failed (status 47)");
+      }
+      if (succeeded) {
+        const proof = JSON.parse(readFileSync(receipt, "utf8"));
+        expect(proof.sessionId).toBe("upgrade-main-session");
+        expect(proof.reply.content[0].text).toBe(proof.marker);
+        expect(proof.completion.status).toBe("ok");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("accepts a SQLite-only migrated session store", () => {
     expect(() =>
       runSessionStateAssertion((stateDir) => {
@@ -1881,6 +2183,71 @@ process.stdout.write(sessionDir + "\\n");
       }),
     ).not.toThrow();
   });
+
+  it.each([
+    { stage: "survival", mutation: "none", error: /metadata prompt was not preserved/ },
+    { stage: "post-inference", mutation: "none", error: undefined },
+    { stage: "post-inference", mutation: "missing-marker", error: /refreshed skills snapshot/ },
+    { stage: "post-inference", mutation: "invalid-marker", error: /refreshed skills snapshot/ },
+    { stage: "post-inference", mutation: "stale-prompt", error: /refreshed skills snapshot/ },
+    { stage: "post-inference", mutation: "malformed-skills", error: /refreshed skills snapshot/ },
+    { stage: "post-inference", mutation: "heavy-cache", error: /heavy resolvedSkills cache/ },
+    {
+      stage: "post-inference",
+      mutation: "missing-session",
+      error: /main legacy session row missing/,
+    },
+    {
+      stage: "post-inference",
+      mutation: "missing-transcript",
+      error: /transcript was not imported/,
+    },
+  ])(
+    "checks migrated session state after inference ($stage, $mutation)",
+    ({ stage, mutation, error }) => {
+      const check = () =>
+        runSessionStateAssertion((stateDir) => {
+          writeMigratedSessionState(stateDir);
+          const db = new DatabaseSync(
+            join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite"),
+          );
+          try {
+            db.prepare("UPDATE session_nodes SET entry_json = ? WHERE session_key = ?").run(
+              JSON.stringify({
+                skillsSnapshot: {
+                  prompt:
+                    mutation === "stale-prompt"
+                      ? "legacy prompt survives as metadata"
+                      : "Current runtime skill instructions",
+                  skills: mutation === "malformed-skills" ? null : [{ name: "survivor-skill" }],
+                  ...(mutation === "missing-marker"
+                    ? {}
+                    : { promptFormatVersion: mutation === "invalid-marker" ? 0 : 4 }),
+                  ...(mutation === "heavy-cache" ? { resolvedSkills: [] } : {}),
+                },
+              }),
+              "agent:main:main",
+            );
+            if (mutation === "missing-session") {
+              db.prepare("DELETE FROM session_nodes WHERE session_key = ?").run("agent:main:main");
+            }
+            if (mutation === "missing-transcript") {
+              db.prepare("DELETE FROM transcript_events WHERE session_id = ?").run(
+                "upgrade-main-session",
+              );
+            }
+          } finally {
+            db.close();
+          }
+          return { OPENCLAW_UPGRADE_SURVIVOR_ASSERT_STAGE: stage };
+        });
+      if (error) {
+        expect(check).toThrow(error);
+      } else {
+        expect(check).not.toThrow();
+      }
+    },
+  );
 
   it("rejects retired sessionFile metadata in SQLite-backed session rows", () => {
     expect(() =>

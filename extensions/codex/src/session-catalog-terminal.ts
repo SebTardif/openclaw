@@ -117,11 +117,10 @@ export function codexNodeTerminalCapability(node: {
 
 export function createCodexTerminalNodeHostCommand(
   bindRequest: (paramsJSON?: string | null) => {
-    agentId: string;
+    codexHome: string;
     control: CodexSessionCatalogControl;
     paramsJSON: string;
   },
-  configSources: CodexTerminalConfigSources,
 ): OpenClawPluginNodeHostCommand {
   return {
     command: CODEX_TERMINAL_RESUME_COMMAND,
@@ -166,10 +165,7 @@ export function createCodexTerminalNodeHostCommand(
             args: ["resume", resume.threadId],
             ...(record.cwd ? { cwd: record.cwd } : {}),
             env: {
-              CODEX_HOME: resolveCodexCatalogTerminalHome({
-                ...configSources,
-                agentId: request.agentId,
-              }),
+              CODEX_HOME: request.codexHome,
             },
             cols: resume.cols,
             rows: resume.rows,
@@ -242,6 +238,7 @@ export async function openCodexCatalogTerminal(
     kind: "node",
     nodeId,
     command: CODEX_TERMINAL_RESUME_COMMAND,
+    uploadPathStyle: "native",
     paramsJSON: JSON.stringify({ agentId: params.agentId, threadId: params.threadId }),
     ...(record.cwd ? { cwd: record.cwd } : {}),
     title,
@@ -262,6 +259,7 @@ export async function startCodexCatalogTerminal(
       kind: "node",
       nodeId: params.nodeId,
       command: CODEX_TERMINAL_START_COMMAND,
+      uploadPathStyle: "native",
       paramsJSON: JSON.stringify({ cwd: params.cwd, initialMessage: params.initialMessage }),
       cwd: params.cwd,
       title: "codex",

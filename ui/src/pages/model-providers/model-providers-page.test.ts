@@ -1,18 +1,23 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import type { ModelsProbeResult } from "../../api/types.ts";
+import type { SelectPicker } from "../../components/select-picker.ts";
+import { currentConfigObject } from "../../lib/config/config-state-model.ts";
+import { choosePickerValue, updatePickers } from "../../test-helpers/select-picker.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import type { DefaultModelSelection } from "./data.ts";
 import { EMPTY_MODEL_PROVIDERS_DATA, type ModelProvidersData } from "./load.ts";
 import {
   appendPage,
+  createApiKeyProviderData,
   createAuthStatus,
   createEmptyModelProvidersRouteData,
   createHarness,
-  deferred,
-  publishableGateway,
+  waitForProviders,
   requestCount,
+  saveKey,
   type AgentSelectElement,
   type ModelProvidersPageTestElement,
 } from "./model-providers-page.test-support.ts";
@@ -49,7 +54,6 @@ describe("ModelProvidersPage agent scope", () => {
           gatewaySnapshot: snapshot,
           data: {
             ...EMPTY_MODEL_PROVIDERS_DATA,
-            config: {},
             providerUsage: { ok: false as const, error: { kind: "request-failed" as const } },
             updatedAt: Date.now(),
           },
@@ -94,7 +98,6 @@ describe("ModelProvidersPage agent scope", () => {
           gatewaySnapshot: snapshot,
           data: {
             ...EMPTY_MODEL_PROVIDERS_DATA,
-            config: {},
             providerUsage: { ok: true, value: { updatedAt: 1, providers: [] } },
             updatedAt: Date.now(),
           },
@@ -117,9 +120,7 @@ describe("ModelProvidersPage agent scope", () => {
   );
 
   it("recovers a failed provider usage result after a same-client reconnect", async () => {
-    const { context, request, snapshot } = createHarness("main");
-    const source = publishableGateway(snapshot);
-    (context as { gateway: unknown }).gateway = source.gateway;
+    const { context, request, snapshot, gatewaySource: source } = createHarness("main");
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
     const originalRequest = request.getMockImplementation()!;
@@ -142,9 +143,7 @@ describe("ModelProvidersPage agent scope", () => {
   });
 
   it("defers failed provider usage recovery while hidden until page activation", async () => {
-    const { context, request, snapshot } = createHarness("main");
-    const source = publishableGateway(snapshot);
-    (context as { gateway: unknown }).gateway = source.gateway;
+    const { context, request, snapshot, gatewaySource: source } = createHarness("main");
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
     const originalRequest = request.getMockImplementation()!;
@@ -171,15 +170,19 @@ describe("ModelProvidersPage agent scope", () => {
   });
 
   it("supersedes a hung load on disconnect so reconnect can replace it", async () => {
-    const { context, request, snapshot, deferNextAuthStatus } = createHarness("main");
-    const source = publishableGateway(snapshot);
-    (context as { gateway: unknown }).gateway = source.gateway;
+    const {
+      context,
+      request,
+      snapshot,
+      deferNextAuthStatus,
+      gatewaySource: source,
+    } = createHarness("main");
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
     const page = appendPage(context);
     await waitForFast(() => expect(page.data?.providerUsage).toMatchObject({ ok: true }));
     deferNextAuthStatus();
-    void page.refresh({ force: true });
+    void page.refresh("forced");
     await vi.waitFor(() => expect(requestCount(request, "models.authStatus")).toBe(2));
 
     source.publish({ ...snapshot, phase: "reconnecting" });
@@ -190,9 +193,13 @@ describe("ModelProvidersPage agent scope", () => {
   });
 
   it("keeps direct data visible while a same-client reconnect replaces it", async () => {
-    const { context, deferNextAuthStatus, request, snapshot } = createHarness("main");
-    const source = publishableGateway(snapshot);
-    (context as { gateway: unknown }).gateway = source.gateway;
+    const {
+      context,
+      deferNextAuthStatus,
+      request,
+      snapshot,
+      gatewaySource: source,
+    } = createHarness("main");
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
     const page = appendPage(context);
@@ -216,8 +223,9 @@ describe("ModelProvidersPage agent scope", () => {
     expect(page.data).toBe(previousData);
 
     release();
+    await waitForFast(() => expect(page.data).not.toBe(previousData));
     await waitForFast(() =>
-      expect(page.data?.config).toEqual({
+      expect(currentConfigObject(page.context.runtimeConfig.state)).toEqual({
         agents: { defaults: { model: "openai/replacement-model" } },
       }),
     );
@@ -232,6 +240,9 @@ describe("ModelProvidersPage agent scope", () => {
 
     expect(agentSelection.set).toHaveBeenCalledWith("writer");
     expect(agentSelection.setScope).not.toHaveBeenCalled();
+    expect(page.querySelector(".page-subtitle")?.textContent).toContain(
+      "Providers and credentials for the selected agent.",
+    );
   });
 
   it("links the page subtitle to the model providers guide", async () => {
@@ -244,14 +255,14 @@ describe("ModelProvidersPage agent scope", () => {
     expect(link?.href).toBe("https://docs.openclaw.ai/concepts/model-providers");
   });
 
-  it("opens model setup from the Configure Models action", async () => {
+  it("opens model setup from the Model setup action", async () => {
     const { context } = createHarness("main");
     const page = appendPage(context);
     await page.updateComplete;
 
     const action = [
       ...page.querySelectorAll<HTMLButtonElement>(".page-header-actions button"),
-    ].find((button) => button.textContent?.includes("Configure Models"));
+    ].find((button) => button.textContent?.includes("Model setup"));
     expect(action?.querySelector("svg")).not.toBeNull();
     action?.click();
     expect(context.navigate).toHaveBeenCalledWith("model-setup");
@@ -296,7 +307,7 @@ describe("ModelProvidersPage agent scope", () => {
   it("autosaves model behavior changes", async () => {
     const { context, runtimeConfig } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.querySelector("#settings-model-behavior")).not.toBeNull());
+    await waitForProviders(page);
 
     const groups = page.querySelectorAll<HTMLElement & { value: string }>("wa-radio-group");
     expect(groups).toHaveLength(2);
@@ -320,17 +331,12 @@ describe("ModelProvidersPage agent scope", () => {
   });
 
   it("preserves trailing fallbacks when replacing the visible fallback", async () => {
-    const { context, runtimeConfig } = createHarness("main");
+    const { context, request, runtimeConfig } = createHarness("main");
     const model = {
       primary: "openai/gpt-5",
       fallbacks: ["anthropic/claude-sonnet", "google/gemini-pro"],
     };
-    Object.assign(runtimeConfig.state.configForm.agents.defaults, { model });
-    const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
-    page.data = {
-      ...EMPTY_MODEL_PROVIDERS_DATA,
-      config: runtimeConfig.state.configForm,
+    const catalog = {
       models: [
         { id: "gpt-5", name: "GPT-5", provider: "openai", available: true },
         {
@@ -343,19 +349,29 @@ describe("ModelProvidersPage agent scope", () => {
         { id: "grok", name: "Grok", provider: "xai", available: true },
       ],
     };
-    page.requestUpdate();
-    await page.updateComplete;
+    const originalRequest = request.getMockImplementation()!;
+    request.mockImplementation(async (method: string) => {
+      if (method === "config.get") {
+        return {
+          config: {
+            agents: { defaults: { model, thinkingDefault: "low", fastModeDefault: "auto" } },
+          },
+          hash: "model-defaults",
+        };
+      }
+      return method === "models.list" ? catalog : originalRequest(method);
+    });
+    const page = appendPage(context);
+    await waitForProviders(page);
     runtimeConfig.patch.mockClear();
 
-    const fallback = [
-      ...page.querySelectorAll<HTMLElement & { value: string; updateComplete: Promise<unknown> }>(
-        "wa-select",
-      ),
-    ].find((select) => select.querySelector('[slot="label"]')?.textContent === "Fallback Model");
+    await updatePickers(page);
+    const fallback = [...page.querySelectorAll<SelectPicker>("openclaw-select-picker")].find(
+      (select) =>
+        select.querySelector('[role="listbox"]')?.getAttribute("aria-label") === "Fallback Model",
+    );
     expect(fallback).toBeDefined();
-    fallback!.value = "xai/grok";
-    await fallback!.updateComplete;
-    fallback!.dispatchEvent(new Event("change", { bubbles: true }));
+    await choosePickerValue(fallback!, "xai/grok");
 
     await waitForFast(() => expect(runtimeConfig.patch).toHaveBeenCalledOnce());
     expect(runtimeConfig.patch).toHaveBeenCalledWith({
@@ -380,7 +396,7 @@ describe("ModelProvidersPage agent scope", () => {
   it("autosaves removal of inherited behavior overrides", async () => {
     const { context, runtimeConfig } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.querySelector("#settings-model-behavior")).not.toBeNull());
+    await waitForProviders(page);
 
     const groups = page.querySelectorAll<HTMLElement & { value: string }>(
       "#settings-model-behavior wa-radio-group",
@@ -405,12 +421,18 @@ describe("ModelProvidersPage agent scope", () => {
   });
 
   it("keeps invalid explicit thinking and fast values resettable", async () => {
-    const { context, runtimeConfig } = createHarness("main");
-    runtimeConfig.state.configForm = {
-      agents: { defaults: { thinkingDefault: 42, fastModeDefault: "bogus" } },
-    } as unknown as typeof runtimeConfig.state.configForm;
+    const { context, runtimeConfig, request } = createHarness("main");
+    const originalRequest = request.getMockImplementation()!;
+    request.mockImplementation(async (method) =>
+      method === "config.get"
+        ? {
+            config: { agents: { defaults: { thinkingDefault: 42, fastModeDefault: "bogus" } } },
+            hash: "invalid-defaults",
+          }
+        : originalRequest(method),
+    );
     const page = appendPage(context);
-    await waitForFast(() => expect(page.querySelector("#settings-model-behavior")).not.toBeNull());
+    await waitForProviders(page);
 
     const behavior = page.querySelector("#settings-model-behavior")!;
     const groups = behavior.querySelectorAll<HTMLElement & { value: string }>("wa-radio-group");
@@ -421,48 +443,77 @@ describe("ModelProvidersPage agent scope", () => {
     await waitForFast(() => expect(runtimeConfig.patch).toHaveBeenCalledOnce());
   });
 
-  it("disables defaults without showing an admin warning when config patches are unavailable", async () => {
-    const { context, runtimeConfig } = createHarness("main");
-    runtimeConfig.canPatch = false;
+  it.each(["config", "providers"])("keeps saved-key warnings after %s failure", async (source) => {
+    const { context, runtimeConfig, request } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
-    const defaults = page.querySelector(".model-providers__defaults");
-
-    expect(
-      [...(defaults?.querySelectorAll("wa-select, wa-radio-group") ?? [])].every((control) =>
-        control.hasAttribute("disabled"),
-      ),
-    ).toBe(true);
-    expect(page.textContent).not.toContain("operator.admin access");
-  });
-  it("keeps a committed provider-key save successful when config refresh fails", async () => {
-    const { context, runtimeConfig } = createHarness("main");
-    runtimeConfig.refresh.mockImplementationOnce(async () => {
-      runtimeConfig.state.lastError = "config.get failed after provider-key commit";
+    await waitForProviders(page);
+    const originalRequest = request.getMockImplementation()!;
+    request.mockImplementation(async (method) => {
+      if (source === "config" && method === "config.get") {
+        throw new Error("Config refresh failed.");
+      }
+      if (method === "models.authSetApiKey") {
+        return { profileId: "openai:key", warning: "Authentication refresh failed." };
+      }
+      if (source === "providers" && method === "models.authStatus") {
+        throw new Error("Provider refresh failed.");
+      }
+      return originalRequest(method);
     });
-    const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
-    page.keyEditorProvider = "openai";
-    page.keyDraft = "replacement";
+    await saveKey(page, "replacement");
+    await waitForFast(() => expect(page.messages.openai?.kind).toBe("success"));
 
-    await page.saveKey("openai", "openai");
-
-    expect(runtimeConfig.patch).toHaveBeenCalledOnce();
+    expect(runtimeConfig.patch).not.toHaveBeenCalled();
     expect(page.keyEditorProvider).toBeNull();
     expect(page.messages.openai).toEqual({
       kind: "success",
       text: "Secret saved.",
-      warning: "config.get failed after provider-key commit",
+      warning:
+        source === "config"
+          ? "Authentication refresh failed. Config refresh failed."
+          : "Authentication refresh failed. Provider refresh failed.",
+    });
+    await page.updateComplete;
+    expect(page.textContent).toContain(page.messages.openai?.warning);
+  });
+
+  it("removes stored API keys through the rendered action and retains its warning", async () => {
+    const { context, request, runtimeConfig } = createHarness("main");
+    const page = appendPage(context);
+    await waitForProviders(page);
+    page.data = createApiKeyProviderData();
+    const originalRequest = request.getMockImplementation()!;
+    request.mockImplementation(async (method) =>
+      method === "models.authLogout"
+        ? { removedProfiles: ["openai:key"], warning: "Authentication refresh failed." }
+        : originalRequest(method),
+    );
+    await page.updateComplete;
+    page.querySelector<HTMLButtonElement>(".model-providers__card-actions .danger")!.click();
+    await waitForFast(() => expect(page.messages.openai?.kind).toBe("success"));
+    expect(request).toHaveBeenCalledWith("models.authLogout", {
+      provider: "openai",
+      agentId: "main",
+      credentialType: "api_key",
+    });
+    expect(runtimeConfig.patch).not.toHaveBeenCalled();
+    expect(page.messages.openai).toMatchObject({
+      text: "Saved API keys removed.",
+      warning: "Authentication refresh failed.",
     });
   });
 
   it("keeps committed provider-add feedback visible when its refresh fails", async () => {
-    const { context, runtimeConfig } = createHarness("main");
-    runtimeConfig.refresh.mockImplementationOnce(async () => {
-      runtimeConfig.state.lastError = "config.get failed after provider add";
-    });
+    const { context, runtimeConfig, request } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
+    const originalRequest = request.getMockImplementation()!;
+    request.mockImplementation(async (method) => {
+      if (method === "config.get") {
+        throw new Error("config.get failed after provider add");
+      }
+      return originalRequest(method);
+    });
     page.addProviderOpen = true;
     page.addProviderId = "anthropic";
     page.addProviderKey = "new-provider-key";
@@ -470,7 +521,7 @@ describe("ModelProvidersPage agent scope", () => {
     await page.addProvider();
     await page.updateComplete;
 
-    expect(runtimeConfig.patch).toHaveBeenCalledOnce();
+    expect(runtimeConfig.patch).not.toHaveBeenCalled();
     expect(page.addProviderOpen).toBe(true);
     expect(page.addProviderKey).toBe("");
     const form = page.querySelector(".model-providers__add-form")?.parentElement;
@@ -485,7 +536,7 @@ describe("ModelProvidersPage agent scope", () => {
       runtimeConfig.state.lastError = "config.get failed after saving default models";
     });
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     const selection: DefaultModelSelection = {
       primary: "openai/gpt-5",
       fallbacks: [],
@@ -506,10 +557,11 @@ describe("ModelProvidersPage agent scope", () => {
 
   it("keeps a replacement agent's default-model draft after a global model write", async () => {
     const { agentSelection, context, notifySelection, runtimeConfig } = createHarness("main");
-    const gate = deferred<void>();
-    runtimeConfig.ensureLoaded.mockImplementationOnce(async () => gate.promise);
+    const gate = deferred();
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
+    runtimeConfig.ensureLoaded.mockClear();
+    runtimeConfig.ensureLoaded.mockImplementationOnce(async () => gate.promise);
     const selection: DefaultModelSelection = {
       primary: "openai/gpt-5",
       fallbacks: [],
@@ -531,17 +583,15 @@ describe("ModelProvidersPage agent scope", () => {
     expect(page.messages.defaults).toBeUndefined();
   });
 
-  it("keeps global provider writes without clearing a replacement agent's credential draft", async () => {
-    const { agentSelection, context, notifySelection, runtimeConfig } = createHarness("main");
-    const gate = deferred<void>();
-    runtimeConfig.ensureLoaded.mockImplementationOnce(async () => gate.promise);
+  it("cancels a queued key save when the selected agent changes", async () => {
+    const { agentSelection, context, notifySelection, runtimeConfig, request } =
+      createHarness("main");
+    const gate = deferred();
+    runtimeConfig.beforeExternalDispatch.mockImplementationOnce(() => gate.promise);
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
-    page.keyEditorProvider = "openai";
-    page.keyDraft = "main-agent-key";
-
-    const saving = page.saveKey("openai", "openai");
-    await vi.waitFor(() => expect(runtimeConfig.ensureLoaded).toHaveBeenCalledOnce());
+    await waitForProviders(page);
+    await saveKey(page, "main-agent-key");
+    await waitForFast(() => expect(runtimeConfig.beforeExternalDispatch).toHaveBeenCalledOnce());
     agentSelection.state.selectedId = "writer";
     agentSelection.state.scopeId = "writer";
     notifySelection();
@@ -549,31 +599,36 @@ describe("ModelProvidersPage agent scope", () => {
     page.keyEditorProvider = "anthropic";
     page.keyDraft = "writer-agent-unsaved-key";
     gate.resolve();
-    await saving;
+    await runtimeConfig.runExternalMutation.mock.results[0]?.value;
 
-    expect(runtimeConfig.patch).toHaveBeenCalledOnce();
-    expect(runtimeConfig.patch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        raw: { models: { providers: { openai: { apiKey: "main-agent-key" } } } },
-      }),
-    );
+    expect(request.mock.calls.map(([method]) => method)).not.toContain("models.authSetApiKey");
     expect(page.keyEditorProvider).toBe("anthropic");
     expect(page.keyDraft).toBe("writer-agent-unsaved-key");
     expect(page.messages.openai).toBeUndefined();
   });
 
-  it("keeps a replacement agent's matching add-provider draft after a global write", async () => {
-    const { agentSelection, context, notifySelection, runtimeConfig } = createHarness("main");
-    const gate = deferred<void>();
-    runtimeConfig.ensureLoaded.mockImplementationOnce(async () => gate.promise);
+  it("keeps a replacement agent's matching add-provider draft after a saved key response", async () => {
+    const { agentSelection, context, notifySelection, runtimeConfig, request } =
+      createHarness("main");
+    const gate = deferred<unknown>();
+    const originalRequest = request.getMockImplementation()!;
+    request.mockImplementation((method) =>
+      method === "models.authSetApiKey" ? gate.promise : originalRequest(method),
+    );
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     page.addProviderOpen = true;
     page.addProviderId = "anthropic";
     page.addProviderKey = "shared-provider-key";
 
     const adding = page.addProvider();
-    await vi.waitFor(() => expect(runtimeConfig.ensureLoaded).toHaveBeenCalledOnce());
+    await waitForFast(() =>
+      expect(request).toHaveBeenCalledWith("models.authSetApiKey", {
+        provider: "anthropic",
+        agentId: "main",
+        apiKey: "shared-provider-key",
+      }),
+    );
     agentSelection.state.selectedId = "writer";
     agentSelection.state.scopeId = "writer";
     notifySelection();
@@ -581,10 +636,10 @@ describe("ModelProvidersPage agent scope", () => {
     page.addProviderOpen = true;
     page.addProviderId = "anthropic";
     page.addProviderKey = "shared-provider-key";
-    gate.resolve();
+    gate.resolve({ profileId: "anthropic:manual-api-key" });
     await adding;
 
-    expect(runtimeConfig.patch).toHaveBeenCalledOnce();
+    expect(runtimeConfig.patch).not.toHaveBeenCalled();
     expect(page.addProviderOpen).toBe(true);
     expect(page.addProviderId).toBe("anthropic");
     expect(page.addProviderKey).toBe("shared-provider-key");
@@ -595,7 +650,7 @@ describe("ModelProvidersPage agent scope", () => {
     const { agentSelection, context, notifySelection, request } = createHarness("main");
     const toast = document.body.appendChild(document.createElement("openclaw-toast-host"));
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     request.mockClear();
     const firstLogout = deferred<unknown>();
     request.mockImplementationOnce(async () => firstLogout.promise);
@@ -632,12 +687,13 @@ describe("ModelProvidersPage agent scope", () => {
     async ({ order }) => {
       const { context, request, snapshot } = createHarness("main");
       snapshot.hello = {
+        ...snapshot.hello,
         type: "hello-ok",
         protocol: 3,
         auth: { role: "operator", scopes: ["operator.admin"] },
       };
       const page = appendPage(context);
-      await waitForFast(() => expect(page.data?.config).toEqual({}));
+      await waitForProviders(page);
       const originalRequest = request.getMockImplementation()!;
       request.mockImplementation(async (method: string, params?: unknown) => {
         if (method === "models.authStatus") {
@@ -648,7 +704,6 @@ describe("ModelProvidersPage agent scope", () => {
       });
       page.data = {
         ...EMPTY_MODEL_PROVIDERS_DATA,
-        config: {},
         authStatus: await request("models.authStatus"),
         updatedAt: 1,
       } as ModelProvidersData;
@@ -678,7 +733,7 @@ describe("ModelProvidersPage agent scope", () => {
   it("drains a queued profile order after switching agents during an active save", async () => {
     const { agentSelection, context, notifySelection, request } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     const originalRequest = request.getMockImplementation()!;
     const firstSave = deferred<unknown>();
     request.mockImplementation(async (method: string, params?: unknown) => {
@@ -695,7 +750,7 @@ describe("ModelProvidersPage agent scope", () => {
     agentSelection.state.scopeId = "writer";
     notifySelection();
     await vi.waitFor(() => expect(page.selectedAgentId).toBe("writer"));
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     page.profileActions.setOrder("openai", "openai", ["openai:one", "openai:two"]);
 
     firstSave.resolve({});
@@ -714,14 +769,14 @@ describe("ModelProvidersPage agent scope", () => {
   it("restores committed priority and keeps controls available after a rejected save", async () => {
     const { context, request, snapshot } = createHarness("main");
     snapshot.hello = {
+      ...snapshot.hello,
       auth: { role: "operator", scopes: ["operator.admin"] },
     } as typeof snapshot.hello;
     const toast = document.body.appendChild(document.createElement("openclaw-toast-host"));
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     page.data = {
       ...EMPTY_MODEL_PROVIDERS_DATA,
-      config: {},
       authStatus: createAuthStatus(),
       updatedAt: 1,
     };
@@ -759,7 +814,7 @@ describe("ModelProvidersPage agent scope", () => {
     const { agentSelection, context, request, snapshot } = createHarness("main");
     const toast = document.body.appendChild(document.createElement("openclaw-toast-host"));
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     request.mockClear();
     const firstLogout = deferred<unknown>();
     request.mockImplementationOnce(async () => firstLogout.promise);
@@ -789,7 +844,7 @@ describe("ModelProvidersPage agent scope", () => {
     page.routeData = {
       gateway: context.gateway,
       gatewaySnapshot: snapshot,
-      data: { ...EMPTY_MODEL_PROVIDERS_DATA, config: {}, updatedAt: 1 },
+      data: { ...EMPTY_MODEL_PROVIDERS_DATA, updatedAt: 1 },
       client: snapshot.client,
       agentId: "writer",
     };
@@ -974,7 +1029,7 @@ describe("ModelProvidersPage agent scope", () => {
   it("probes credentials in the selected agent scope", async () => {
     const { context, request } = createHarness("writer");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     request.mockClear();
 
     await page.probe("openai", ["openai"]);
@@ -988,7 +1043,7 @@ describe("ModelProvidersPage agent scope", () => {
   it("stops queued provider probes after switching away from and back to the selected agent", async () => {
     const { agentSelection, context, notifySelection, request } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     request.mockClear();
     const firstProbe = deferred<ModelsProbeResult>();
     request.mockImplementationOnce(() => firstProbe.promise);
@@ -1019,7 +1074,7 @@ describe("ModelProvidersPage agent scope", () => {
   it("discards an in-flight probe result after the selected agent changes", async () => {
     const { agentSelection, context, notifySelection, request } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     const pending = deferred<ModelsProbeResult>();
     request.mockImplementationOnce(() => pending.promise);
 

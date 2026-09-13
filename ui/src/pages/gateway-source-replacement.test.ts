@@ -4,9 +4,11 @@ import { TaskStatus } from "@lit/task";
 import type { SkillsLibraryListResult } from "@openclaw/gateway-protocol";
 import { nothing } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred as deferred } from "../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../app/context.ts";
 import { clawhubVerdictKey } from "../lib/skills/index.ts";
+import { settleLitElement } from "../test-helpers/lit-settle.ts";
 import { waitForFast } from "../test-helpers/wait-for.ts";
 import type { ModelProvidersData } from "./model-providers/load.ts";
 import { createEmptyModelProvidersRouteData } from "./model-providers/model-providers-page.test-support.ts";
@@ -59,16 +61,6 @@ function applyPageGatewaySnapshot(
   snapshot: ApplicationGatewaySnapshot,
 ) {
   page.gateway.applySnapshot(snapshot, { initial: false, sourceChanged: false });
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, reject, resolve };
 }
 
 function gatewayWithClient(
@@ -547,6 +539,7 @@ describe("gateway source replacement across reconnect with a reused client", () 
       agents: context.agents,
       agentsList,
       selectedAgentId: "main",
+      selection: context.agentSelection.state,
       report,
       error: null,
     } as unknown as SkillsRouteData;
@@ -611,6 +604,7 @@ describe("gateway source replacement across reconnect with a reused client", () 
       agents: context.agents,
       agentsList,
       selectedAgentId: "main",
+      selection: context.agentSelection.state,
       report,
       error: null,
     } as SkillsRouteData;
@@ -676,6 +670,7 @@ describe("gateway source replacement across reconnect with a reused client", () 
       agents: harness.context.agents,
       agentsList,
       selectedAgentId: "main",
+      selection: harness.context.agentSelection.state,
       report,
       error: null,
     } as SkillsRouteData;
@@ -739,6 +734,7 @@ describe("gateway source replacement across reconnect with a reused client", () 
       agents: context.agents,
       agentsList,
       selectedAgentId: "main",
+      selection: context.agentSelection.state,
       report: null,
       error: null,
     };
@@ -773,6 +769,7 @@ describe("gateway source replacement across reconnect with a reused client", () 
       agents: context.agents,
       agentsList,
       selectedAgentId: "main",
+      selection: context.agentSelection.state,
       report: staleReport,
       error: null,
     } as unknown as SkillsRouteData;
@@ -926,21 +923,28 @@ describe("gateway source replacement across reconnect with a reused client", () 
     const context = contextWithClient(client, { connected: true });
     const page = createPage("openclaw-debug-page", context) as TestPage & {
       debugStatus: unknown;
-      diagnosticsTask: { run: () => Promise<void>; status: TaskStatus };
+      debugHealth: unknown;
+      debugModels: unknown[];
+      debugHeartbeat: unknown;
+      debugLanes: unknown[];
+      diagnosticsTask: { readonly status: TaskStatus };
     };
-    page.debugStatus = { seeded: true };
     document.body.append(page);
     await page.updateComplete;
-    page.debugStatus = null;
 
-    const load = page.diagnosticsTask.run();
     await waitForFast(() => expect(request).toHaveBeenCalledTimes(4));
     await replaceContext(page, client);
     pending.resolve({ models: [{ id: "stale" }], stale: true });
-    await load;
+    await pending.promise;
+    await settleLitElement(page);
 
+    expect(request).toHaveBeenCalledTimes(4);
     expect(page.diagnosticsTask.status).not.toBe(TaskStatus.PENDING);
     expect(page.debugStatus).toBeNull();
+    expect(page.debugHealth).toBeNull();
+    expect(page.debugModels).toEqual([]);
+    expect(page.debugHeartbeat).toBeNull();
+    expect(page.debugLanes).toEqual([]);
   });
 
   it("clears cron data loaded by the previous provider", async () => {

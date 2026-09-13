@@ -1,6 +1,6 @@
 // Memory Core plugin module implements the synchronous sqlite-vec KNN query body.
 import type { DatabaseSync } from "node:sqlite";
-import { truncateUtf16Safe } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
+import { truncateUtf16Safe } from "openclaw/plugin-sdk/memory-core-host-engine-knn";
 import type { MemorySource } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { vectorToBlob } from "./vector-blob.js";
 
@@ -77,7 +77,7 @@ function buildModelFilter(column: string, models: string[]): string {
     : `${column} IN (${models.map(() => "?").join(", ")})`;
 }
 
-function validateRequest(request: VectorKnnRequest): void {
+export function validateVectorKnnRequest(request: VectorKnnRequest): void {
   if (!SQL_IDENTIFIER_RE.test(request.vectorTable)) {
     throw new Error("invalid memory vector table identifier");
   }
@@ -113,13 +113,20 @@ export function runVectorKnnQuery(
   db: Pick<DatabaseSync, "prepare">,
   request: VectorKnnRequest,
 ): VectorKnnResponse {
-  validateRequest(request);
+  validateVectorKnnRequest(request);
   const vectorModelFilter = buildModelFilter("c.model", request.providerModels);
   const qBlob = vectorToBlob(request.queryVec);
+  const snippetByteLimit = request.snippetMaxChars * 4;
   const runVectorQuery = (candidateLimit: number) => {
+    // TEXT substr stops at NUL, so retain the byte prefix when it contains one.
+    // Four bytes per UTF-16 unit cover UTF-8/UTF-16 without scanning the full body;
+    // truncateUtf16Safe below removes any excess or partial trailing code point.
     const queryRows = db
       .prepare(
-        `SELECT c.id, c.path, c.start_line, c.end_line, c.text,\n` +
+        `SELECT c.id, c.path, c.start_line, c.end_line,\n` +
+          `       CASE WHEN instr(substr(CAST(c.text AS BLOB), 1, ?), x'00') > 0\n` +
+          `            THEN CAST(substr(CAST(c.text AS BLOB), 1, ?) AS TEXT)\n` +
+          `            ELSE substr(c.text, 1, ?) END AS text,\n` +
           `       c.source,\n` +
           `       vec_distance_cosine(v.embedding, ?) AS dist\n` +
           `  FROM ${request.vectorTable} v\n` +
@@ -129,6 +136,9 @@ export function runVectorKnnQuery(
           ` LIMIT ?`,
       )
       .all(
+        snippetByteLimit,
+        snippetByteLimit,
+        request.snippetMaxChars,
         qBlob,
         qBlob,
         candidateLimit,

@@ -19,15 +19,24 @@ import { resolveEmbeddedRunAttemptTerminalState } from "./terminal-outcome.js";
 type TransportDropScenario = {
   errorMessage?: string;
   errorBody?: string;
+  errorCode?: string;
+  errorType?: string;
+  completedAssistant?: AssistantMessage;
+  compactionEnabled?: boolean;
   content?: AssistantMessage["content"];
   diagnostics?: AssistantMessage["diagnostics"];
   activeCount?: number;
+  asyncStarted?: boolean;
   codeModeSuspended?: boolean;
+  didSendDeterministicApprovalPrompt?: boolean;
   failedToolCallId?: string;
+  missingToolResult?: boolean;
   lastToolError?: Parameters<typeof makeEmbeddedRunnerAttempt>[0]["lastToolError"];
+  pluginHarnessOwnsTransport?: boolean;
   retryAvailable?: boolean;
   replaySafe?: boolean;
   terminal?: Parameters<typeof makeEmbeddedRunnerAttempt>[0]["terminal"];
+  terminate?: boolean;
   yieldDetected?: boolean;
 };
 
@@ -51,9 +60,13 @@ async function recoverAfterTransportDrop(scenario: TransportDropScenario = {}) {
     content: toolCalls.map((id) => ({ type: "toolCall", id, name: "exec", arguments: {} })),
   });
   const erroredAssistant = buildEmbeddedRunnerAssistant({
-    stopReason: "error",
-    errorMessage: scenario.errorMessage ?? "WebSocket error",
+    stopReason: scenario.terminal?.kind === "timeout" ? "aborted" : "error",
+    errorMessage:
+      scenario.errorMessage ??
+      (scenario.terminal?.kind === "timeout" ? "LLM request timed out." : "WebSocket error"),
     errorBody: scenario.errorBody,
+    errorCode: scenario.errorCode,
+    errorType: scenario.errorType,
     diagnostics:
       scenario.diagnostics ??
       ([
@@ -69,12 +82,14 @@ async function recoverAfterTransportDrop(scenario: TransportDropScenario = {}) {
   const messagesSnapshot = [
     { role: "user", content: "why is it unauthorized?" },
     toolAssistant,
-    ...toolCalls.map((id) => ({
-      role: "toolResult",
-      toolCallId: id,
-      toolName: "exec",
-      isError: id === scenario.failedToolCallId,
-    })),
+    ...toolCalls
+      .filter((id) => !scenario.missingToolResult || id !== "call_2")
+      .map((id) => ({
+        role: "toolResult",
+        toolCallId: id,
+        toolName: "exec",
+        isError: id === scenario.failedToolCallId,
+      })),
     erroredAssistant,
   ] as never;
   const attempt = makeEmbeddedRunnerAttempt({
@@ -83,11 +98,17 @@ async function recoverAfterTransportDrop(scenario: TransportDropScenario = {}) {
       toolCallId,
       toolName: "exec",
       replaySafe: false,
+      ...(scenario.asyncStarted ? { asyncStarted: true } : {}),
+      ...(scenario.terminate ? { terminate: true } : {}),
       ...(scenario.codeModeSuspended ? { codeModeSuspended: true } : {}),
     })) as never,
     lastAssistant: erroredAssistant,
     currentAttemptAssistant: erroredAssistant,
+    ...(scenario.completedAssistant
+      ? { currentAttemptCompletedAssistant: scenario.completedAssistant }
+      : {}),
     lastToolError: scenario.lastToolError,
+    didSendDeterministicApprovalPrompt: scenario.didSendDeterministicApprovalPrompt,
     itemLifecycle: {
       startedCount: toolCalls.length,
       completedCount: toolCalls.length,
@@ -118,7 +139,7 @@ async function recoverAfterTransportDrop(scenario: TransportDropScenario = {}) {
     profileFailureStore: { version: 1, profiles: {} },
     getLastProfileId: () => undefined,
     getSessionId: () => "session:transport-drop",
-    harnessOwnsTransport: () => false,
+    harnessOwnsTransport: () => scenario.pluginHarnessOwnsTransport ?? false,
     getRuntimeAuthOwnerId: () => "embedded",
     getApiKeyInfo: () => null,
     advanceAuthProfile: vi.fn(async () => false),
@@ -146,12 +167,13 @@ async function recoverAfterTransportDrop(scenario: TransportDropScenario = {}) {
         provider: "openai",
         modelId: "gpt-5.6-luna",
         model: { id: "gpt-5.6-luna" },
-        genericCompactionRecoveryAllowed: false,
+        genericCompactionRecoveryAllowed: scenario.compactionEnabled ?? false,
         snapshot: () => ({
           thinkLevel: "off",
           agentHarness: { id: "openclaw" },
           outerContextTokenMeta: {},
-          pluginHarnessOwnsTransport: false,
+          contextTokenBudget: scenario.compactionEnabled ? 200_000 : undefined,
+          pluginHarnessOwnsTransport: scenario.pluginHarnessOwnsTransport ?? false,
         }),
       },
       normalizedAttempt: {
@@ -159,7 +181,8 @@ async function recoverAfterTransportDrop(scenario: TransportDropScenario = {}) {
         sessionIdUsed: attempt.sessionIdUsed,
         attemptAssistant: erroredAssistant,
         currentAttemptAssistant: erroredAssistant,
-        currentAttemptCompletedAssistant: undefined,
+        currentAttemptCompletedAssistant: scenario.completedAssistant,
+        assistantErrorText: erroredAssistant.errorMessage,
         terminalState,
         setTerminalLifecycleMeta: vi.fn(),
         attemptCompactionCount: 0,
@@ -174,7 +197,12 @@ async function recoverAfterTransportDrop(scenario: TransportDropScenario = {}) {
         continueFromCurrentTranscript,
       },
       failoverRetryController,
-      compactionRuntime: disabledCompactionRuntime,
+      compactionRuntime: {
+        ...disabledCompactionRuntime,
+        assertRecoveryActive: () => {
+          throw new Error("overflow compaction requested");
+        },
+      },
       contextRecoveryState,
       usageAccumulator: createUsageAccumulator(),
       lastRunPromptUsage: undefined,
@@ -200,6 +228,48 @@ async function recoverAfterTransportDrop(scenario: TransportDropScenario = {}) {
 }
 
 describe("recoverEmbeddedRunAttempt", () => {
+  it.each(["validation", "success"])(
+    "does not recover stale overflow after a completed %s response",
+    async (completed) => {
+      const completedAssistant = buildEmbeddedRunnerAssistant(
+        completed === "validation"
+          ? {
+              stopReason: "error",
+              errorMessage: "500 Unsupported parameter: context_length_exceeded",
+              errorType: "invalid_request_error",
+              errorCode: "unknown_parameter",
+            }
+          : { stopReason: "stop", content: [{ type: "text", text: "Done" }] },
+      );
+      const { recovery, markOwnedTranscriptRetry } = await recoverAfterTransportDrop({
+        errorMessage: "400 context overflow",
+        completedAssistant,
+        compactionEnabled: true,
+        diagnostics: [],
+        replaySafe: true,
+      });
+      expect(recovery).toEqual({ action: "proceed" });
+      expect(markOwnedTranscriptRetry).not.toHaveBeenCalled();
+    },
+  );
+
+  it("recovers the completed overflow instead of using another assistant's validation", async () => {
+    await expect(
+      recoverAfterTransportDrop({
+        errorMessage: "500 Unsupported parameter: timeout",
+        errorType: "invalid_request_error",
+        errorCode: "unknown_parameter",
+        completedAssistant: buildEmbeddedRunnerAssistant({
+          stopReason: "error",
+          errorMessage: "400 Your input exceeds the context window of this model",
+        }),
+        compactionEnabled: true,
+        diagnostics: [],
+        replaySafe: true,
+      }),
+    ).rejects.toThrow("overflow compaction requested");
+  });
+
   it.each([
     { errorMessage: "429 rate_limit_exceeded; Retry-After: 3600", delayMs: 3_600_000 },
     { errorMessage: "429 rate_limit_exceeded; Retry-After: 30 seconds", delayMs: 30_000 },
@@ -360,13 +430,16 @@ describe("recoverEmbeddedRunAttempt", () => {
     expect(failover.advanceAuthProfile).toHaveBeenCalledOnce();
   });
 
-  it("continues from the transcript after a transient transport drop on a settled exec batch", async () => {
+  it.each([
+    { errorMessage: "WebSocket error" },
+    { errorMessage: "Responses stream ended with unresolved tool calls", diagnostics: [] },
+  ])("continues a settled exec batch after $errorMessage", async (scenario) => {
     const {
       recovery,
       markOwnedTranscriptRetry,
       continueFromCurrentTranscript,
       failoverRetryController,
-    } = await recoverAfterTransportDrop();
+    } = await recoverAfterTransportDrop(scenario);
 
     expect(recovery).toMatchObject({ action: "retry" });
     expect(failoverRetryController.transientRetryCount).toBe(1);
@@ -388,6 +461,59 @@ describe("recoverEmbeddedRunAttempt", () => {
     expect(continueFromCurrentTranscript).toHaveBeenCalledWith({
       includeToolFailureInstruction: true,
     });
+  });
+
+  it.each([false, true])(
+    "continues a settled write batch after an idle timeout (tool failed: %s)",
+    async (toolFailed) => {
+      const { recovery, continueFromCurrentTranscript, failoverRetryController } =
+        await recoverAfterTransportDrop({
+          terminal: { kind: "timeout", phase: "prompt", source: "idle", aborted: true },
+          ...(toolFailed
+            ? {
+                failedToolCallId: "call_2",
+                lastToolError: { toolName: "exec", error: "command failed" },
+              }
+            : {}),
+        });
+
+      expect(recovery).toMatchObject({ action: "retry", lastRetryFailoverReason: "timeout" });
+      expect(continueFromCurrentTranscript).toHaveBeenCalledExactlyOnceWith({
+        includeToolFailureInstruction: toolFailed,
+      });
+      expect(failoverRetryController.advanceAuthProfile).not.toHaveBeenCalled();
+      expect(failoverRetryController.maybeMarkAuthProfileFailure).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each<[string, TransportDropScenario]>([
+    ["a tool result is missing", { missingToolResult: true }],
+    ["a lifecycle item remains active", { activeCount: 1 }],
+    ["asynchronous tool work remains", { asyncStarted: true }],
+    ["a tool intentionally ended the turn", { terminate: true }],
+    ["approval is pending", { didSendDeterministicApprovalPrompt: true }],
+    ["the harness owns transport recovery", { pluginHarnessOwnsTransport: true }],
+    ["the attempt yielded", { yieldDetected: true }],
+    ["the retry budget is exhausted", { retryAvailable: false }],
+    [
+      "compaction timed out",
+      { terminal: { kind: "timeout", phase: "compaction", source: "idle" } },
+    ],
+    [
+      "tool execution timed out",
+      { terminal: { kind: "timeout", phase: "tool_execution", source: "idle" } },
+    ],
+    [
+      "the run deadline expired",
+      { terminal: { kind: "timeout", phase: "prompt", source: "run_budget" } },
+    ],
+  ])("does not continue an idle timeout when %s", async (_label, scenario) => {
+    const { recovery, continueFromCurrentTranscript } = await recoverAfterTransportDrop({
+      terminal: { kind: "timeout", phase: "prompt", source: "idle" },
+      ...scenario,
+    });
+    expect(recovery).toEqual({ action: "proceed" });
+    expect(continueFromCurrentTranscript).not.toHaveBeenCalled();
   });
 
   it.each([0, 1])(

@@ -95,7 +95,7 @@ suite.define(() => {
         },
         "sessions.list": sessionResponse(preparedLevels, 8_192),
       },
-      models: [discoveredModel],
+      models: [preparedModel],
       sessionKey,
     });
 
@@ -108,7 +108,7 @@ suite.define(() => {
       await effortSelect.click();
       await expect.poll(() => main.locator('[data-chat-thinking-option="off"]').count()).toBe(1);
       expect(await main.locator('[data-chat-thinking-slider="true"]').count()).toBe(0);
-      expect(await gateway.getRequests("models.list")).toHaveLength(0);
+      expect(await gateway.getRequests("models.list")).toHaveLength(1);
       if (dynamicCatalogProofDir) {
         await page.screenshot({
           animations: "disabled",
@@ -117,20 +117,28 @@ suite.define(() => {
       }
 
       await page.keyboard.press("Escape");
-      await gateway.setMethodResponse("sessions.list", sessionResponse(discoveredLevels, 65_536));
+      await gateway.setSessionsListResponse(sessionResponse(discoveredLevels, 65_536));
+      await gateway.setMethodResponse("models.list", { models: [discoveredModel] });
       const sessionListCount = (await gateway.getRequests("sessions.list", rosterMatch)).length;
-      await modelSelect.click();
-      const modelsRequest = await gateway.waitForRequest("models.list");
+      const sessionDescribeMatch = { key: sessionKey, agentId: "main" };
+      const sessionDescribeCount = (
+        await gateway.getRequests("sessions.describe", sessionDescribeMatch)
+      ).length;
+      expect(await gateway.getRequests("models.list")).toHaveLength(1);
+      await gateway.emitGatewayEvent("chat.metadata.changed", {});
+      const modelsRequest = await gateway.waitForRequest("models.list", { after: 1 });
       expect(modelsRequest.params).toEqual({
         view: "configured",
         agentId: "main",
-        refresh: true,
+        sessionKey,
       });
-      const refreshedSessionsRequest = await gateway.waitForRequest("sessions.list", {
-        after: sessionListCount,
-        match: rosterMatch,
+      const refreshedSessionRequest = await gateway.waitForRequest("sessions.describe", {
+        after: sessionDescribeCount,
+        match: sessionDescribeMatch,
       });
-      expect(refreshedSessionsRequest.params).toMatchObject({ agentId: "main" });
+      expect(refreshedSessionRequest.params).toEqual({ key: sessionKey, agentId: "main" });
+      await modelSelect.click();
+      expect(await gateway.getRequests("models.list")).toHaveLength(2);
       const modelOption = main.locator(
         '[data-chat-model-option="omniroute/deepseekv4flash-equivalent"]',
       );
@@ -148,6 +156,9 @@ suite.define(() => {
       await expect
         .poll(() => thinkingSlider.getAttribute("data-chat-thinking-values"))
         .toBe("off,low,medium,high,xhigh");
+      expect(await gateway.getRequests("sessions.list", rosterMatch)).toHaveLength(
+        sessionListCount,
+      );
       if (dynamicCatalogProofDir) {
         await page.screenshot({
           animations: "disabled",

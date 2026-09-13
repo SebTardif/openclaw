@@ -1,5 +1,6 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { UpdateChannel } from "../infra/update-channels.js";
+import { resolveSourceCheckoutBundledPluginIds } from "./bundled-sources.js";
 import type { PluginCapabilityConsentHandler } from "./capability-consent.js";
 import type { ExternalizedBundledPluginBridge } from "./externalized-bundled-plugins.js";
 import { resolvePluginInstallOwnerMigrations } from "./install-transaction.js";
@@ -14,10 +15,11 @@ import {
   reconcilePluginPackageUpdateConfig,
 } from "./plugin-package-update.js";
 import type { PluginChannelSyncResult } from "./update-channel.js";
-import type {
-  PluginUpdateIntegrityDriftParams,
-  PluginUpdateLogger,
-  PluginUpdateOutcome,
+import {
+  isPluginInstallRecordUpdateSource,
+  type PluginUpdateIntegrityDriftParams,
+  type PluginUpdateLogger,
+  type PluginUpdateOutcome,
 } from "./update-source.js";
 import { syncPluginsForUpdateChannel, updateNpmInstalledPlugins } from "./update.js";
 
@@ -60,20 +62,35 @@ export async function convergePluginReleaseCohort(params: {
   let config = sync.config;
   let changed = sync.changed;
   let npmChanged = false;
-  const beforeIndex = withPluginCache(createPluginCache(), () =>
-    loadInstalledPluginIndex({
-      config,
-      installRecords: config.plugins?.installs ?? {},
-      workspaceDir: params.workspaceDir,
-      env: params.env,
-    }),
-  );
-  const packageUpdateSnapshot = capturePluginPackageUpdateSnapshot({
-    index: beforeIndex,
-    installOwners: Object.keys(config.plugins?.installs ?? {}),
+  const sourceBundledIds = resolveSourceCheckoutBundledPluginIds({
+    config,
+    installRecords: config.plugins?.installs ?? {},
     env: params.env,
   });
-  if (!packageUpdateSnapshot.ok) {
+  const installOwners = Object.entries(config.plugins?.installs ?? {})
+    .filter(
+      ([id, record]) => isPluginInstallRecordUpdateSource(record) && !sourceBundledIds.has(id),
+    )
+    .map(([id]) => id);
+  // Without prior package owners there is no retired child policy to reconcile.
+  const beforeIndex = installOwners.length
+    ? withPluginCache(createPluginCache(), () =>
+        loadInstalledPluginIndex({
+          config,
+          installRecords: config.plugins?.installs ?? {},
+          workspaceDir: params.workspaceDir,
+          env: params.env,
+        }),
+      )
+    : undefined;
+  const packageUpdateSnapshot = beforeIndex
+    ? capturePluginPackageUpdateSnapshot({
+        index: beforeIndex,
+        installOwners,
+        env: params.env,
+      })
+    : undefined;
+  if (packageUpdateSnapshot && !packageUpdateSnapshot.ok) {
     throw new Error(packageUpdateSnapshot.error);
   }
   const installOwnerMigrations: Record<string, string> = {};
@@ -97,7 +114,7 @@ export async function convergePluginReleaseCohort(params: {
       versionBoundPluginIds: params.versionBoundPluginIds,
       skipDisabledPlugins: true,
       syncOfficialPluginInstalls: true,
-      disableOnFailure: true,
+      retainOnUnavailable: true,
       logger: params.logger,
       onIntegrityDrift: params.onIntegrityDrift,
       onCapabilityConsent: params.onCapabilityConsent,
@@ -118,11 +135,12 @@ export async function convergePluginReleaseCohort(params: {
       ...sync.summary.switchedToClawHub,
       ...sync.summary.switchedToNpm,
       ...repairedMissingPayloadIds,
+      ...Object.values(installOwnerMigrations),
     ]),
     versionBoundPluginIds: params.versionBoundPluginIds,
     skipDisabledPlugins: true,
     syncOfficialPluginInstalls: true,
-    disableOnFailure: true,
+    retainOnUnavailable: true,
     logger: params.logger,
     onIntegrityDrift: params.onIntegrityDrift,
     onCapabilityConsent: params.onCapabilityConsent,
@@ -132,29 +150,31 @@ export async function convergePluginReleaseCohort(params: {
   npmChanged ||= update.changed;
   Object.assign(installOwnerMigrations, resolvePluginInstallOwnerMigrations(update));
 
-  // Reinstall can restore the same path. Reconciliation needs new filesystem facts,
-  // including formerly missing files, without retiring a retained runtime generation.
-  const afterIndex = withPluginCache(createPluginCache(), () =>
-    loadInstalledPluginIndex({
+  if (beforeIndex && packageUpdateSnapshot) {
+    // Reinstall can restore the same path. Reconciliation needs new filesystem facts,
+    // including formerly missing files, without retiring a retained runtime generation.
+    const afterIndex = withPluginCache(createPluginCache(), () =>
+      loadInstalledPluginIndex({
+        config,
+        installRecords: config.plugins?.installs ?? {},
+        workspaceDir: params.workspaceDir,
+        env: params.env,
+      }),
+    );
+    const reconciled = reconcilePluginPackageUpdateConfig({
       config,
-      installRecords: config.plugins?.installs ?? {},
-      workspaceDir: params.workspaceDir,
+      beforeIndex,
+      afterIndex,
+      snapshot: packageUpdateSnapshot.value,
+      installOwnerMigrations,
       env: params.env,
-    }),
-  );
-  const reconciled = reconcilePluginPackageUpdateConfig({
-    config,
-    beforeIndex,
-    afterIndex,
-    snapshot: packageUpdateSnapshot.value,
-    installOwnerMigrations,
-    env: params.env,
-  });
-  if (!reconciled.ok) {
-    throw new Error(reconciled.error);
+    });
+    if (!reconciled.ok) {
+      throw new Error(reconciled.error);
+    }
+    changed ||= reconciled.config !== config;
+    config = reconciled.config;
   }
-  changed ||= reconciled.config !== config;
-  config = reconciled.config;
 
   return {
     config,
@@ -164,7 +184,9 @@ export async function convergePluginReleaseCohort(params: {
     missingPayloads,
     repairedMissingPayloadIds,
     repairOutcomes,
-    updateOutcomes: update.outcomes,
+    updateOutcomes: update.outcomes.filter(
+      (outcome) => outcome.status !== "skipped" || !repairedMissingPayloadIds.has(outcome.pluginId),
+    ),
     remainingMissingPayloads: await collectMissingPluginInstallPayloads({
       records: config.plugins?.installs ?? {},
       config,

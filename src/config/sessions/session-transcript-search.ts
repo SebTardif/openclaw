@@ -2,11 +2,15 @@
 // inside the accessor's write transactions (session-transcript-index.ts);
 // this module owns the query path and schedules the shared reconcile owner
 // when doctor imports or out-of-band writes leave derived rows behind.
+import { sql } from "kysely";
+import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
+import { runSqliteDeferredTransactionSync } from "../../infra/sqlite-transaction.js";
 import { toAgentStoreSessionKey } from "../../routing/session-key.js";
 import { withOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly.js";
+import type { DB } from "../../state/openclaw-agent-db.generated.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import { resolveSqliteReadScope, toDatabaseOptions } from "./session-accessor.sqlite-scope.js";
-import { listSessionsNeedingTranscriptIndexReconcile } from "./session-transcript-index.js";
+import { hasSessionsNeedingTranscriptIndexReconcile } from "./session-transcript-index.js";
 import {
   isSessionTranscriptIndexReconcileRunning,
   startSessionTranscriptIndexReconcile,
@@ -30,6 +34,7 @@ type SessionTranscriptSearchResult = {
   hits: SessionTranscriptSearchHit[];
   indexing: boolean;
   truncated: boolean;
+  archivedTranscriptsExcluded?: number;
 };
 
 function toFtsQuery(query: string): string {
@@ -46,7 +51,10 @@ export function searchSessionTranscripts(params: {
   env?: NodeJS.ProcessEnv;
   limit?: number;
   query: string;
+  role?: "assistant" | "user";
+  sessionId?: string;
   sessionKeys?: string[];
+  order?: "relevance" | "recent";
   storePath?: string;
 }): SessionTranscriptSearchResult {
   const query = params.query.trim();
@@ -59,84 +67,135 @@ export function searchSessionTranscripts(params: {
   const scope = resolveSqliteReadScope(params);
   const databaseOptions = toDatabaseOptions(scope);
   const result = withOpenClawAgentDatabaseReadOnly(
-    (database) => {
-      const dirtySessions = listSessionsNeedingTranscriptIndexReconcile(database.db);
-      if (dirtySessions.length > 0) {
-        startSessionTranscriptIndexReconcile(databaseOptions);
-      }
-      const indexing =
-        dirtySessions.length > 0 || isSessionTranscriptIndexReconcileRunning(databaseOptions);
-      const limit = Math.min(Math.max(1, params.limit ?? 10), SEARCH_LIMIT_MAX);
-      // Shared databases hold multiple logical agents. Filter before LIMIT;
-      // reserved global/unknown sentinels retain their store-wide scope.
-      const sessionFilterValues = params.sessionKeys ?? [
-        toAgentStoreSessionKey({ agentId: scope.agentId, requestKey: "*" }),
-      ];
-      const whereSession =
-        params.sessionKeys === undefined
-          ? " AND (session_windows.session_key GLOB ? OR session_windows.session_key IN ('global', 'unknown'))"
-          : sessionFilterValues.length > 0
-            ? ` AND session_windows.session_key IN (${sessionFilterValues.map(() => "?").join(", ")})`
+    (database) =>
+      runSqliteDeferredTransactionSync(
+        database.db,
+        () => {
+          const hasDirtySessions = hasSessionsNeedingTranscriptIndexReconcile(database.db);
+          if (hasDirtySessions) {
+            startSessionTranscriptIndexReconcile(databaseOptions);
+          }
+          const indexing =
+            hasDirtySessions || isSessionTranscriptIndexReconcileRunning(databaseOptions);
+          const limit = Math.min(Math.max(1, params.limit ?? 10), SEARCH_LIMIT_MAX);
+          // Shared databases hold multiple logical agents. Filter before LIMIT;
+          // reserved global/unknown sentinels retain their store-wide scope.
+          const sessionFilterValues = params.sessionKeys ?? [
+            toAgentStoreSessionKey({ agentId: scope.agentId, requestKey: "*" }),
+          ];
+          const whereSession =
+            params.sessionKeys === undefined
+              ? " AND (session_windows.session_key GLOB ? OR session_windows.session_key IN ('global', 'unknown'))"
+              : sessionFilterValues.length > 0
+                ? ` AND session_windows.session_key IN (${sessionFilterValues.map(() => "?").join(", ")})`
+                : "";
+          const whereGeneration = params.sessionId
+            ? " AND session_transcript_fts.session_id = ?"
             : "";
-      // MATCH, snippet(), and bm25() are FTS5 primitives without a Kysely
-      // representation. session_key lives on the window row so key renames
-      // never leave stale keys inside the index. Sessions flagged needs_rebuild
-      // are excluded: their rows may still hold rewound-away branch text that
-      // sessions_history no longer exposes, so they stay hidden until reconcile
-      // rebuilds them (indexing=true tells the caller to retry).
-      const statement = database.db.prepare(/* sqlite-allow-raw: FTS5 MATCH/snippet/bm25 */ `
+          const whereRole = params.role ? " AND session_transcript_fts.role = ?" : "";
+          const order =
+            params.order === "recent"
+              ? "timestamp DESC, session_transcript_fts.rowid DESC"
+              : "rank ASC, timestamp DESC, message_id ASC";
+          const archivedTranscriptsExcluded =
+            executeSqliteQueryTakeFirstSync(
+              database.db,
+              getNodeSqliteKysely<Pick<DB, "session_transcript_cold_archives" | "session_windows">>(
+                database.db,
+              )
+                .selectFrom("session_transcript_cold_archives as cold")
+                .innerJoin("session_windows as window", "window.session_id", "cold.session_id")
+                .select((eb) => eb.fn.countAll<number>().as("count"))
+                .$if(params.sessionKeys === undefined, (builder) =>
+                  builder.where((eb) =>
+                    eb.or([
+                      /* kysely-allow-raw: GLOB preserves literal underscores in SQLite agent namespaces. */
+                      sql<boolean>`${eb.ref("window.session_key")} GLOB ${sessionFilterValues[0]}`,
+                      eb("window.session_key", "in", ["global", "unknown"]),
+                    ]),
+                  ),
+                )
+                .$if(
+                  params.sessionKeys !== undefined && sessionFilterValues.length > 0,
+                  (builder) => builder.where("window.session_key", "in", sessionFilterValues),
+                )
+                .$if(params.sessionId !== undefined, (builder) =>
+                  builder.where("window.session_id", "=", params.sessionId!),
+                ),
+            )?.count ?? 0;
+          // MATCH, snippet(), and bm25() are FTS5 primitives without a Kysely
+          // representation. session_key lives on the window row so key renames
+          // never leave stale keys inside the index. Sessions flagged needs_rebuild
+          // are excluded: their rows may still hold rewound-away branch text that
+          // sessions_history no longer exposes, so they stay hidden until reconcile
+          // rebuilds them (indexing=true tells the caller to retry).
+          const statement = database.db.prepare(/* sqlite-allow-raw: FTS5 MATCH/snippet/bm25 */ `
     SELECT session_windows.session_key AS session_key, session_transcript_fts.session_id AS session_id,
       message_id, role, timestamp,
       snippet(session_transcript_fts, 0, '', '', ' … ', 48) AS snippet,
       bm25(session_transcript_fts) AS rank
     FROM session_transcript_fts
     JOIN session_windows ON session_windows.session_id = session_transcript_fts.session_id
-    WHERE session_transcript_fts MATCH ?${whereSession}
+    WHERE session_transcript_fts MATCH ?${whereSession}${whereGeneration}${whereRole}
       AND session_transcript_fts.session_id NOT IN (
         SELECT session_id FROM session_transcript_index_state WHERE needs_rebuild != 0
       )
-    ORDER BY rank ASC, timestamp DESC, message_id ASC
+    ORDER BY ${order}
     LIMIT ?
     `);
-      const values = [toFtsQuery(query), ...sessionFilterValues, limit + 1];
-      const rows = statement.all(...values) as Array<{
-        message_id: unknown;
-        rank: unknown;
-        role: unknown;
-        session_id: unknown;
-        session_key: unknown;
-        snippet: unknown;
-        timestamp: unknown;
-      }>;
-      const hits = rows.flatMap((row): SessionTranscriptSearchHit[] => {
-        if (
-          typeof row.session_key !== "string" ||
-          typeof row.session_id !== "string" ||
-          typeof row.message_id !== "string" ||
-          (row.role !== "user" && row.role !== "assistant") ||
-          typeof row.snippet !== "string"
-        ) {
-          return [];
-        }
-        const timestamp = typeof row.timestamp === "number" ? row.timestamp : Number(row.timestamp);
-        const rank = typeof row.rank === "number" ? row.rank : Number(row.rank);
-        return [
-          {
-            sessionKey: row.session_key,
-            sessionId: row.session_id,
-            messageId: row.message_id,
-            role: row.role,
-            timestamp: Number.isFinite(timestamp) ? timestamp : 0,
-            snippet:
-              row.snippet.length > SEARCH_SNIPPET_MAX_CHARS
-                ? `${truncateUtf16Safe(row.snippet, SEARCH_SNIPPET_MAX_CHARS)}…`
-                : row.snippet,
-            score: Number.isFinite(rank) ? -rank : 0,
-          },
-        ];
-      });
-      return { hits: hits.slice(0, limit), indexing, truncated: hits.length > limit };
-    },
+          const values = [
+            toFtsQuery(query),
+            ...sessionFilterValues,
+            ...(params.sessionId ? [params.sessionId] : []),
+            ...(params.role ? [params.role] : []),
+            limit + 1,
+          ];
+          const rows = statement.all(...values) as Array<{
+            message_id: unknown;
+            rank: unknown;
+            role: unknown;
+            session_id: unknown;
+            session_key: unknown;
+            snippet: unknown;
+            timestamp: unknown;
+          }>;
+          const hits = rows.flatMap((row): SessionTranscriptSearchHit[] => {
+            if (
+              typeof row.session_key !== "string" ||
+              typeof row.session_id !== "string" ||
+              typeof row.message_id !== "string" ||
+              (row.role !== "user" && row.role !== "assistant") ||
+              typeof row.snippet !== "string"
+            ) {
+              return [];
+            }
+            const timestamp =
+              typeof row.timestamp === "number" ? row.timestamp : Number(row.timestamp);
+            const rank = typeof row.rank === "number" ? row.rank : Number(row.rank);
+            return [
+              {
+                sessionKey: row.session_key,
+                sessionId: row.session_id,
+                messageId: row.message_id,
+                role: row.role,
+                timestamp: Number.isFinite(timestamp) ? timestamp : 0,
+                snippet:
+                  row.snippet.length > SEARCH_SNIPPET_MAX_CHARS
+                    ? `${truncateUtf16Safe(row.snippet, SEARCH_SNIPPET_MAX_CHARS)}…`
+                    : row.snippet,
+                score: Number.isFinite(rank) ? -rank : 0,
+              },
+            ];
+          });
+          return {
+            hits: hits.slice(0, limit),
+            indexing,
+            truncated: hits.length > limit,
+            ...(archivedTranscriptsExcluded > 0 ? { archivedTranscriptsExcluded } : {}),
+          };
+        },
+        { databaseLabel: database.path, operationLabel: "session transcript search" },
+      ),
     databaseOptions,
     { throwOnMissingTable: true },
   );

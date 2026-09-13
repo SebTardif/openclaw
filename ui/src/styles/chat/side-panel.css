@@ -186,6 +186,13 @@
   color: var(--muted);
 }
 
+.side-panel__header .tabstrip-tab__favicon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  object-fit: contain;
+}
+
 .side-panel__header .tabstrip-tab[active] .tabstrip-tab__icon {
   color: var(--text);
 }
@@ -345,13 +352,13 @@
   display: none;
 }
 
+openclaw-chat-detail-panel,
 .side-panel__panel
   > :is(
     .chat,
     .chat-workspace-rail,
     .chat-tasks-rail,
     .chat-task-detail,
-    openclaw-chat-detail-panel,
     openclaw-chat-session-rail,
     openclaw-session-discussion,
     openclaw-terminal-panel,

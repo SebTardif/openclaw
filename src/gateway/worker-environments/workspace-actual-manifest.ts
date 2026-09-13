@@ -54,12 +54,14 @@ export async function readWorkspaceFileSnapshotWithLimit(
   maxBytes: number | ((openedSize: number) => number),
   root?: string,
   signal?: AbortSignal,
+  readBuffers?: Buffer[],
 ): Promise<WorkspaceFileSnapshot> {
   signal?.throwIfAborted();
   const handle = await fs.open(
     expectedPath,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
   );
+  let buffer: Buffer | undefined;
   try {
     signal?.throwIfAborted();
     const { memo: hashMemo, metrics, owner = "gateway" } = activeWorkspaceHashContext() ?? {};
@@ -84,11 +86,16 @@ export async function readWorkspaceFileSnapshotWithLimit(
     } else {
       const hashStartedAt = performance.now();
       const hash = createHash("sha256");
-      const buffer = Buffer.allocUnsafe(64 * 1024);
+      buffer = readBuffers?.pop() ?? Buffer.allocUnsafe(readBuffers ? 256 * 1024 : 64 * 1024);
       size = 0;
       for (;;) {
         signal?.throwIfAborted();
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, size);
+        const { bytesRead } = await handle.read(
+          buffer,
+          0,
+          Math.min(buffer.length, byteLimit - size + 1),
+          size,
+        );
         if (bytesRead === 0) {
           break;
         }
@@ -120,6 +127,9 @@ export async function readWorkspaceFileSnapshotWithLimit(
       sha256,
     };
   } finally {
+    if (buffer && readBuffers) {
+      readBuffers.push(buffer);
+    }
     await handle.close();
   }
 }
@@ -129,9 +139,18 @@ export async function readActualWorkspaceManifestImpl(params: {
   baseCommit: string | null;
   preserveDirectories?: ReadonlySet<string>;
   includePaths?: ReadonlySet<string>;
+  signal?: AbortSignal;
 }): Promise<{ manifest: WorkerWorkspaceManifest; manifestRef: string }> {
-  const root = await fs.realpath(params.root);
-  const isStagedInput = createStagedInputPathMatcher(await fsRoot(root));
+  params.signal?.throwIfAborted();
+  let root: string;
+  let isStagedInput: ReturnType<typeof createStagedInputPathMatcher>;
+  try {
+    root = await fs.realpath(params.root);
+    isStagedInput = createStagedInputPathMatcher(await fsRoot(root));
+  } catch (error) {
+    params.signal?.throwIfAborted();
+    throw error;
+  }
   const rawEntries: Array<
     WorkerWorkspaceManifestEntry | { path: string; type: "directory"; mode: number }
   > = [];
@@ -157,8 +176,11 @@ export async function readActualWorkspaceManifestImpl(params: {
     }
   };
   const scanController = new AbortController();
+  const scanSignal = params.signal
+    ? AbortSignal.any([params.signal, scanController.signal])
+    : scanController.signal;
   const checkTraversal = (relative: string): void => {
-    scanController.signal.throwIfAborted();
+    scanSignal.throwIfAborted();
     traversedEntries += 1;
     traversedPathBytes += Buffer.byteLength(relative);
     if (traversedEntries > MAX_WORKSPACE_INVENTORY_ENTRIES) {
@@ -169,27 +191,41 @@ export async function readActualWorkspaceManifestImpl(params: {
     }
   };
   const filePaths: string[] = [];
+  // A buffer is borrowed only on a hash miss and returned after its reads settle.
+  // The scan's bounded admission limits the pool to its active file readers.
+  const readBuffers: Buffer[] = [];
   const runScans = async (
     start: number,
     end: number,
     scan: (index: number) => Promise<void>,
   ): Promise<void> => {
     let next = start;
+    let taskFailureWasFirst = false;
     const result = await runTasksWithConcurrency({
       // Keep the queued graph bounded too: each worker claims an index before
       // awaiting I/O, rather than retaining one task per inventory entry.
       tasks: Array.from({ length: Math.min(4, end - start) }, () => async () => {
-        while (next < end && !scanController.signal.aborted) {
+        while (next < end && !scanSignal.aborted) {
           await scan(next++);
         }
       }),
       limit: 4,
       errorMode: "stop",
-      onTaskError: (error) => scanController.abort(error),
+      onTaskError: (error) => {
+        // Composite signals can resolve reasons lazily; record ordering at the owner.
+        if (!scanController.signal.aborted) {
+          taskFailureWasFirst = !params.signal?.aborted;
+        }
+        scanController.abort(error);
+      },
     });
     if (result.hasError) {
+      if (!taskFailureWasFirst) {
+        params.signal?.throwIfAborted();
+      }
       throw result.firstError;
     }
+    scanSignal.throwIfAborted();
   };
   const addFile = async (relative: string): Promise<void> => {
     const snapshot = await readWorkspaceFileSnapshotWithLimit(
@@ -199,7 +235,8 @@ export async function readActualWorkspaceManifestImpl(params: {
         return size;
       },
       root,
-      scanController.signal,
+      scanSignal,
+      readBuffers,
     );
     if (snapshot.type === "file") {
       addEntry({
@@ -240,6 +277,7 @@ export async function readActualWorkspaceManifestImpl(params: {
       let hasDerivedEntry = false;
       let hasIncludedEntry = false;
       for await (const entry of await fs.opendir(absolute)) {
+        scanSignal.throwIfAborted();
         const child = `${relative}/${entry.name}`;
         if (
           isDerivedWorkspacePath(child, await isStagedInput(child)) ||
@@ -362,11 +400,14 @@ export async function readActualWorkspaceManifestImpl(params: {
       start = end;
     }
   } else {
-    await walk("");
+    await runScans(0, 1, async () => {
+      await walk("");
+    });
   }
   // No file readers overlap metadata selection; failures stop new admission
   // and join all opened handles before any manifest can be returned.
   await runScans(0, filePaths.length, (index) => addFile(filePaths[index]!));
+  scanSignal.throwIfAborted();
   const directories = rawEntries
     .filter((entry) => entry.type === "directory")
     .toSorted((left, right) => left.path.localeCompare(right.path));

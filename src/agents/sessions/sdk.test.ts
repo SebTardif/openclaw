@@ -30,6 +30,7 @@ vi.mock("../../auto-reply/thinking.js", () => ({
 vi.mock("../../llm/stream.js", () => ({
   streamSimple: streamMocks.streamSimple,
 }));
+import { makeUserMessage } from "../../../test/helpers/user-message.js";
 import { takeRuntimeUserTurnTranscriptContext } from "../../sessions/user-turn-transcript-runtime-context.js";
 import {
   createCompactionHandlers,
@@ -300,16 +301,8 @@ describe("AgentSession tree navigation", () => {
     const authStorage = AuthStorage.inMemory();
     authStorage.setRuntimeApiKey(testModel.provider, "test-api-key");
     const sessionManager = SessionManager.inMemory();
-    const rootId = sessionManager.appendMessage({
-      role: "user",
-      content: "shared root",
-      timestamp: 1,
-    });
-    const abandonedLeafId = sessionManager.appendMessage({
-      role: "user",
-      content: "abandoned branch",
-      timestamp: 2,
-    });
+    const rootId = sessionManager.appendMessage(makeUserMessage("shared root", 1));
+    const abandonedLeafId = sessionManager.appendMessage(makeUserMessage("abandoned branch", 2));
     sessionManager.branch(rootId);
     const targetId = sessionManager.appendMessage({
       role: "assistant",
@@ -656,11 +649,7 @@ describe("createAgentSession tool defaults", () => {
       content: "Earlier context. ".repeat(100),
       timestamp: 1,
     });
-    sessionManager.appendMessage({
-      role: "user",
-      content: "Current question",
-      timestamp: 2,
-    });
+    sessionManager.appendMessage(makeUserMessage("Current question", 2));
     const authStorage = AuthStorage.inMemory();
     authStorage.setRuntimeApiKey(testModel.provider, "test-api-key");
     const { session } = await createAgentSession({
@@ -858,6 +847,44 @@ describe("createAgentSession thinking level defaults", () => {
   beforeEach(() => {
     thinkingMocks.resolveThinkingDefaultForModel.mockReset();
     thinkingMocks.resolveThinkingDefaultForModel.mockReturnValue("medium");
+  });
+
+  it.each([
+    "openai-completions",
+    "openai-responses",
+    "azure-openai-responses",
+    "openai-chatgpt-responses",
+  ] as const)("records declared max thinking in a new embedded %s session", async (api) => {
+    const sessionManager = SessionManager.inMemory();
+    const { session } = await createAgentSessionForEmbeddedRunner(
+      {
+        model: {
+          ...testModel,
+          id: "custom-reasoner",
+          api,
+          reasoning: true,
+          thinkingLevelMap: { off: null, minimal: null },
+          compat: { supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+        },
+        thinkingLevel: "max",
+        resourceLoader: createResourceLoader(),
+        sessionManager,
+        settingsManager: SettingsManager.inMemory(),
+        modelRegistry: createTestModelRegistry(),
+      },
+      {},
+    );
+    try {
+      expect({
+        level: session.thinkingLevel,
+        recorded: sessionManager
+          .getEntries()
+          .filter((entry) => entry.type === "thinking_level_change")
+          .map((entry) => entry.thinkingLevel),
+      }).toEqual({ level: "max", recorded: ["max"] });
+    } finally {
+      session.dispose();
+    }
   });
 
   it("uses the provider-specific thinking default for new sessions", async () => {

@@ -15,10 +15,10 @@ import {
   readChatHistoryMessageSeq as resolveMessageSeq,
   readIncrementalChatHistoryTail,
 } from "./session-history-tail.js";
+import { readTranscriptMessageIdempotencyKey } from "./session-transcript-message.js";
 import { resolveTranscriptPathForComparison } from "./session-transcript-path.js";
 import {
   attachOpenClawTranscriptMeta,
-  readSessionMessagesPageWithStatsAsync,
   readSessionMessagesWithSourceAsync,
 } from "./session-transcript-readers.js";
 
@@ -78,14 +78,6 @@ type SessionHistoryStateSnapshot = SessionHistoryRawSnapshot & {
   cursor?: string;
 };
 
-function readMessageIdempotencyKey(message: unknown): string | undefined {
-  if (!message || typeof message !== "object" || Array.isArray(message)) {
-    return undefined;
-  }
-  const value = (message as Record<string, unknown>).idempotencyKey;
-  return typeof value === "string" && value.trim() ? value : undefined;
-}
-
 /** Owns both complete history snapshots and bounded visible-message pages. */
 export async function readSessionHistoryRawSnapshotAsync(
   params: Pick<SessionHistoryStateSnapshot, "target" | "maxChars" | "limit" | "cursor">,
@@ -99,28 +91,13 @@ export async function readSessionHistoryRawSnapshotAsync(
     return { rawMessages: snapshot.messages, transcriptPath: snapshot.transcriptPath };
   }
   const cursorSeq = resolveCursorSeq(params.cursor);
-  const offset =
-    cursorSeq === undefined
-      ? undefined
-      : Math.max(
-          0,
-          (
-            await readSessionMessagesPageWithStatsAsync(params.target, {
-              offset: 0,
-              maxMessages: 0,
-              allowResetArchiveFallback: true,
-            })
-          ).totalMessages -
-            cursorSeq +
-            1,
-        );
   const tail = await readIncrementalChatHistoryTail({
     entry: params.target.sessionEntry,
     readScope: params.target,
     effectiveMaxChars: params.maxChars ?? DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS,
     max: params.limit,
     maxBytes: getMaxChatHistoryMessagesBytes(),
-    ...(offset === undefined ? {} : { offset }),
+    ...(cursorSeq === undefined ? {} : { beforeSeq: cursorSeq }),
     preserveProjectionContext: true,
   });
   return {
@@ -325,7 +302,7 @@ export class SessionHistorySseState {
     } else {
       this.rawTranscriptSeq += 1;
     }
-    const idempotencyKey = readMessageIdempotencyKey(update.message);
+    const idempotencyKey = readTranscriptMessageIdempotencyKey(update.message);
     const nextMessage = attachOpenClawTranscriptMeta(update.message, {
       ...(typeof update.messageId === "string" ? { id: update.messageId } : {}),
       ...(idempotencyKey ? { idempotencyKey } : {}),

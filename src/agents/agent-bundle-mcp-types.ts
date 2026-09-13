@@ -1,6 +1,7 @@
 /** Shared bundle MCP catalog, runtime, and manager types. */
 import type {
   CallToolResult,
+  GetPromptResult,
   ListResourceTemplatesResult,
   ListToolsResult,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -8,7 +9,7 @@ import type { TSchema } from "typebox";
 import type { SessionToolOverrides } from "../config/sessions/types.js";
 import type { McpCodexToolApprovalMode, McpServerToolFilterConfig } from "../config/types.mcp.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
+import type { PluginManifestRegistry } from "../plugins/manifest-registry.types.js";
 import type { McpCodexToolAnnotations } from "./mcp-codex-tool-approval.js";
 import type { AnyAgentTool } from "./tools/common.js";
 
@@ -66,6 +67,8 @@ export type McpCatalogTool = {
   excludedFromOpenClawCatalog?: true;
   deniedBySession?: true;
   codexAnnotations?: McpCodexToolAnnotations;
+  /** Trusted requester OAuth sign-in bootstrap; never dispatches into the server's tools. */
+  oauthConnectBootstrap?: true;
 };
 
 /** Complete tool catalog for a session-scoped MCP runtime. */
@@ -162,7 +165,11 @@ export type SessionMcpRuntime = {
     params?: { cursor?: string },
   ) => Promise<ListResourceTemplatesResult>;
   listPrompts?: (serverName: string) => Promise<unknown>;
-  getPrompt?: (serverName: string, name: string, args?: Record<string, string>) => Promise<unknown>;
+  getPrompt?: (
+    serverName: string,
+    name: string,
+    args?: Record<string, string>,
+  ) => Promise<GetPromptResult>;
   /** Joins cleanup already owned by this runtime, without closing live shared peers.
    * Rejects when an earlier retirement or disposal could not confirm closure. */
   joinCleanup?: () => Promise<void>;

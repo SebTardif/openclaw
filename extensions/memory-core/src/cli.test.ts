@@ -928,6 +928,42 @@ describe("memory cli", () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it("keeps newer-index upgrade advice in registered deep status without reindexing", async () => {
+    const sync = vi.fn();
+    const probeEmbeddingAvailability = vi.fn(async () => ({ ok: true }));
+    mockManager({
+      sync,
+      probeVectorAvailability: vi.fn(async () => false),
+      probeEmbeddingAvailability,
+      status: () =>
+        makeMemoryStatus({
+          workspaceDir: undefined,
+          custom: {
+            indexIdentity: {
+              status: "mismatched",
+              reason:
+                "the index was written by a newer OpenClaw version; upgrade OpenClaw or reindex explicitly",
+              code: "provenance_version",
+              owner: "openclaw",
+              versionOrder: "newer",
+            },
+          },
+        }),
+      close: vi.fn(async () => {}),
+    });
+
+    const log = spyRuntimeLogs(defaultRuntime);
+    await runMemoryCli(["status", "--deep"]);
+
+    expectLogged(log, "upgrade OpenClaw or reindex explicitly");
+    expectLogged(log, "Vector search: paused");
+    expectNotLogged(log, "paused until memory is rebuilt");
+    expectLogged(log, "openclaw memory status --index --agent main");
+    expectLogged(log, "provider cost");
+    expect(probeEmbeddingAvailability).toHaveBeenCalledOnce();
+    expect(sync).not.toHaveBeenCalled();
+  });
+
   it("keeps plain status from probing vector or embeddings", async () => {
     const close = vi.fn(async () => {});
     const probeVectorAvailability = vi.fn(async () => {
@@ -963,7 +999,7 @@ describe("memory cli", () => {
     expect(probeEmbeddingAvailability).not.toHaveBeenCalled();
     expectLogged(log, "Provider: auto");
     expectLogged(log, "Vector store: unknown");
-    expectNotLogged(log, "llama.cpp:");
+    expectNotLogged(log, "llama.cpp server:");
     expect(close).toHaveBeenCalled();
   });
 
@@ -1200,12 +1236,14 @@ describe("memory cli", () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it("prints embeddings status when deep", async () => {
+  it.each(["--deep", "--index"])("prints local runtime details with %s", async (flag) => {
     const close = vi.fn(async () => {});
+    const sync = vi.fn(async () => {});
     const probeVectorStoreAvailability = vi.fn(async () => true);
     const probeVectorAvailability = vi.fn(async () => true);
     const probeEmbeddingAvailability = vi.fn(async () => ({ ok: true }));
     mockManager({
+      sync,
       probeVectorStoreAvailability,
       probeVectorAvailability,
       probeEmbeddingAvailability,
@@ -1237,7 +1275,9 @@ describe("memory cli", () => {
     });
 
     const log = spyRuntimeLogs(defaultRuntime);
-    await runMemoryCli(["status", "--deep"]);
+    await runMemoryCli(["status", flag]);
+
+    expect(sync).toHaveBeenCalledTimes(flag === "--index" ? 1 : 0);
 
     expect(probeVectorStoreAvailability).toHaveBeenCalled();
     expect(probeVectorAvailability).toHaveBeenCalled();
@@ -3427,6 +3467,7 @@ describe("memory cli", () => {
         lastRecalledAt: "<now>",
         recallDays: ["<today>"],
         queryHashes: ["<hash>"],
+        userQueryHashes: ["<hash>"],
         claimHash: entry.claimHash ? "<claim>" : undefined,
         provenance: entry.provenance ? { ...entry.provenance, observedAt: 0 } : undefined,
       }).toEqual({
@@ -3444,6 +3485,7 @@ describe("memory cli", () => {
         firstRecalledAt: "<now>",
         lastRecalledAt: "<now>",
         queryHashes: ["<hash>"],
+        userQueryHashes: ["<hash>"],
         recallDays: ["<today>"],
         claimHash: "<claim>",
         conceptTags: ["backup", "backups", "glacier", "s3"],

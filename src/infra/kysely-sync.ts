@@ -68,12 +68,20 @@ function reportNodeSqliteKyselyQueryError(db: DatabaseSync, error: unknown): voi
 function executeCompiledSqliteQuerySync<Row>(
   db: DatabaseSync,
   compiledQuery: CompiledQuery<Row>,
+  firstRowOnly = false,
 ): QueryResult<Row> {
   const parameters = compiledQuery.parameters as SQLInputValue[];
   try {
     const sql = compiledQuery.sql;
     installStatementInvalidation(db);
     return executeWithCachedStatement(db, sql, parameters, (statement) => {
+      if (firstRowOnly && SelectQueryNode.is(compiledQuery.query)) {
+        // get() reads columns after step/reprepare and resets the reader before returning.
+        // Raw SQL and writes still run to completion through the general executor.
+        // SAFETY: the compiled Kysely selection defines the native result row shape.
+        const row = statement.get(...parameters) as Row | undefined;
+        return { rows: row === undefined ? [] : [row] };
+      }
       // SELECT already guarantees a reader; avoid allocating native column metadata
       // just to classify it. Raw SQL and other roots still need native classification.
       if (SelectQueryNode.is(compiledQuery.query) || statement.columns().length > 0) {
@@ -158,6 +166,20 @@ export function prepareSqliteQuerySync<Params, Row = unknown>(
     });
 }
 
+/** Compile once and capture fresh bindings before lazily opening each private iterator. */
+export function prepareSqliteQueryIterator<Params, Row = unknown>(
+  db: DatabaseSync,
+  build: SqliteQueryBindingBuilder<Params, Row>,
+): (params: Params) => IterableIterator<Row> {
+  const { compiled, bind } = compileSqliteQueryBindings(build);
+  return (params) => {
+    const parameters = bind(params);
+    return iterateSqliteQuerySync(db, {
+      compile: () => ({ ...compiled, parameters }),
+    });
+  };
+}
+
 /** Compile and lazily iterate a Kysely query synchronously against node:sqlite. */
 export function* iterateSqliteQuerySync<Row>(
   db: DatabaseSync,
@@ -194,5 +216,5 @@ export function executeSqliteQueryTakeFirstSync<Row>(
   db: DatabaseSync,
   query: Compilable<Row>,
 ): Row | undefined {
-  return executeSqliteQuerySync<Row>(db, query).rows[0];
+  return executeCompiledSqliteQuerySync(db, query.compile(), true).rows[0];
 }

@@ -8,7 +8,6 @@ import { deleteSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { appendSessionTranscriptMessageByIdentity } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { openOpenClawAgentDatabase } from "openclaw/plugin-sdk/sqlite-runtime";
 import { openOpenClawStateDatabase } from "openclaw/plugin-sdk/sqlite-runtime-testing";
-import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DREAMING_MEMORY_BACKUP_NAMESPACE,
@@ -24,28 +23,47 @@ import {
 import { forgetMemoryEntries } from "./memory-forget.js";
 import {
   createMemoryForgetFixture,
-  closeMemoryForgetFixture,
   seedMemoryForgetSession,
 } from "./memory-forget.test-helpers.js";
 import { runSessionBackfill } from "./session-backfill.js";
 import { readSessionIngestionState, writeSessionIngestionState } from "./session-ingestion.js";
+import { readPhaseSignalStore, writePhaseSignalStore } from "./short-term-promotion-store.js";
 import { readShortTermRecallEntries } from "./short-term-promotion.js";
 
 describe("memory forget", () => {
+  let fixture: Awaited<ReturnType<typeof createMemoryForgetFixture>>;
   let stateDir: string;
   let workspaceDir: string;
   let cfg: OpenClawConfig;
 
   beforeEach(async () => {
-    stateDir = tempDirs.make("openclaw-memory-forget-");
-    ({ workspaceDir, cfg } = await createMemoryForgetFixture(stateDir));
+    fixture = await createMemoryForgetFixture();
+    ({ stateDir, workspaceDir, cfg } = fixture);
   });
 
-  const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
-    afterEach(() => {
-      closeMemoryForgetFixture();
-      cleanup();
-    }),
+  afterEach(async () => {
+    await fixture.cleanup();
+  });
+
+  it.each([true, false])(
+    "reports no cache deletion for an empty selection (dryRun=%s)",
+    async (dryRun) => {
+      const db = openOpenClawAgentDatabase({ agentId: "main" }).db;
+      db.prepare(`INSERT INTO memory_embedding_cache
+      (provider, model, provider_key, hash, embedding, dims, updated_at)
+      VALUES ('test', 'test', 'test', 'unrelated', '[1,0]', 2, 1)`).run();
+      const report = await forgetMemoryEntries({
+        cfg,
+        agentId: "main",
+        hookSources: ["no-matching-source"],
+        dryRun,
+      });
+      expect(report.sessionIds).toEqual([]);
+      expect(report.artifacts.embeddingCacheRows).toBe(0);
+      expect(db.prepare("SELECT hash FROM memory_embedding_cache").all()).toEqual([
+        { hash: "unrelated" },
+      ]);
+    },
   );
 
   it.each([
@@ -236,6 +254,11 @@ describe("memory forget", () => {
        VALUES ('unrelated', 'MEMORY.md', 'memory', 1, 2,
          'unrelated-hash', 'test', 'Keep this.', '[1,0]', 1)`,
       ).run();
+      db.prepare(
+        `INSERT INTO memory_embedding_cache
+        (provider, model, provider_key, hash, embedding, dims, updated_at)
+       VALUES ('test', 'test', 'test', 'unrelated-hash', '[1,0]', 2, 1)`,
+      ).run();
 
       const preview = await forgetMemoryEntries({
         cfg,
@@ -246,8 +269,13 @@ describe("memory forget", () => {
       expect(preview).toMatchObject({
         sessionIds: ["unknown-session"],
         sessionResolutions: [{ sessionId: "unknown-session", source: "unresolved" }],
+        artifacts: { embeddingCacheRows: 1 },
       });
-      expect(Object.values(preview.artifacts).every((count) => count === 0)).toBe(true);
+      expect(
+        Object.entries(preview.artifacts)
+          .filter(([name]) => name !== "embeddingCacheRows")
+          .every(([, count]) => count === 0),
+      ).toBe(true);
       expect(listMemorySessionTombstones({ agentId: "main" })).toEqual([]);
 
       const report = await forgetMemoryEntries({
@@ -260,10 +288,14 @@ describe("memory forget", () => {
       expect(tombstones).toMatchObject([{ sessionId: "unknown-session", reason: "forgotten" }]);
       expect(
         await forgetMemoryEntries({ cfg, agentId: "main", sessionIds: ["unknown-session"] }),
-      ).toEqual(report);
+      ).toEqual({
+        ...report,
+        artifacts: { ...report.artifacts, embeddingCacheRows: 0 },
+      });
       expect(listMemorySessionTombstones({ agentId: "main" })).toEqual(tombstones);
       expect(await fs.readFile(memoryPath, "utf8")).toBe(content);
       expect(db.prepare("SELECT id FROM memory_index_chunks").all()).toEqual([{ id: "unrelated" }]);
+      expect(db.prepare("SELECT hash FROM memory_embedding_cache").all()).toEqual([]);
       expect(
         await readMemoryCoreWorkspaceEntries({
           namespace: DREAMING_MEMORY_BACKUP_NAMESPACE,
@@ -506,6 +538,14 @@ describe("memory forget", () => {
           },
         ],
       });
+      await writePhaseSignalStore(workspaceDir, {
+        version: 1,
+        updatedAt: "2026-08-26T00:00:00.000Z",
+        entries: {
+          "mixed-entry": { key: "mixed-entry", lightHits: 1, remHits: 0 },
+          "clean-entry": { key: "clean-entry", lightHits: 0, remHits: 1 },
+        },
+      });
       await writeSessionIngestionState(workspaceDir, {
         version: 3,
         files: {
@@ -665,7 +705,7 @@ describe("memory forget", () => {
           indexSources: 3,
           ftsRows: 4,
           vectorRows: 4,
-          embeddingCacheRows: 4,
+          embeddingCacheRows: 5,
           shortTermEntries: 1,
           seenHashScopes: 1,
           backups: 1,
@@ -764,12 +804,18 @@ describe("memory forget", () => {
         "memory_index_chunks_fts",
         "memory_index_chunks_vec",
         "memory_index_chunk_provenance",
-        "memory_embedding_cache",
       ]) {
         expect(
           (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count,
         ).toBe(1);
       }
+      expect(
+        (
+          db.prepare("SELECT COUNT(*) AS count FROM memory_embedding_cache").get() as {
+            count: number;
+          }
+        ).count,
+      ).toBe(0);
       expect(
         (db.prepare("SELECT path FROM memory_index_sources").all() as Array<{ path: string }>).map(
           (row) => row.path,
@@ -797,6 +843,9 @@ describe("memory forget", () => {
             workspaceDir,
           })
         ).map((entry) => entry.key),
+      ).toEqual(["clean-entry"]);
+      expect(
+        Object.keys((await readPhaseSignalStore(workspaceDir, new Date().toISOString())).entries),
       ).toEqual(["clean-entry"]);
       expect((await readSessionIngestionState(workspaceDir)).seenMessages).toEqual({
         "main:sessions/main/survivor": ["survivor-hash"],

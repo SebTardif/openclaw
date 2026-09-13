@@ -3,21 +3,22 @@ import { createHash } from "node:crypto";
 import { embeddedAgentLog, formatErrorMessage } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { pruneMapToMaxSize } from "openclaw/plugin-sdk/collection-runtime";
 import { readCodexSessionMeta } from "../session-catalog-provenance.js";
-import { refreshCodexAppServerAuthTokens } from "./auth-bridge.js";
+import { refreshCodexAppServerAuthTokens, type CodexAppServerAuthHandoff } from "./auth-bridge.js";
+import { fingerprintTokenAuthProfileCacheKey } from "./auth-cache-key.js";
 import type { CodexAppServerAuthProfileLookup } from "./auth-profile.js";
 import type { CodexAppServerClient } from "./client.js";
 import { isJsonObject, type CodexServiceTier, type JsonObject } from "./protocol.js";
 import { mergeCodexRateLimitsUpdate } from "./rate-limit-cache.js";
 import { withTimeout } from "./timeout.js";
 
-type ClientRuntimeContext = Omit<CodexAppServerAuthProfileLookup, "agentDir"> & {
-  agentDir: string;
+type ClientRuntimeContext = CodexAppServerAuthProfileLookup & {
   authMode?: "prepared-api-key" | "profile";
   onAuthRefreshFailure?: () => void;
 };
 
 type ClientRuntime = {
   context: ClientRuntimeContext;
+  authHandoff?: CodexAppServerAuthHandoff;
   closed: boolean;
   retainedThreads: Map<string, RetainedLiveThread>;
   claimedThreads: Map<string, symbol>;
@@ -72,6 +73,16 @@ const claimedThreadReleaseTokens = new WeakMap<
 export function isCodexAppServerClientRuntimeLive(client: CodexAppServerClient): boolean {
   const runtime = configuredClients.get(client);
   return runtime !== undefined && !runtime.closed;
+}
+
+export function recordCodexAppServerAuthHandoff(
+  client: CodexAppServerClient,
+  handoff: CodexAppServerAuthHandoff | undefined,
+): void {
+  const runtime = configuredClients.get(client);
+  if (runtime && !runtime.closed && handoff) {
+    runtime.authHandoff = handoff;
+  }
 }
 
 /** Reference history is only trusted while this native subscription stays warm. */
@@ -193,15 +204,20 @@ export function ensureCodexAppServerClientRuntime(
     if (runtime.context.authMode === "prepared-api-key") {
       throw new Error("ChatGPT token refresh is unavailable for prepared Codex API-key auth.");
     }
+    if (!runtime.context.agentDir) {
+      throw new Error("ChatGPT token refresh requires an OpenClaw-owned auth profile.");
+    }
     const previousAccountId =
       isJsonObject(request.params) && typeof request.params.previousAccountId === "string"
         ? request.params.previousAccountId.trim() || undefined
         : undefined;
+    const authHandoff = runtime.authHandoff;
     try {
       const tokens = await withTimeout(
         refreshCodexAppServerAuthTokens({
           agentDir: runtime.context.agentDir,
           authProfileId: runtime.context.authProfileId,
+          ...(authHandoff ? { authHandoff } : {}),
           ...(previousAccountId ? { previousAccountId } : {}),
           ...(runtime.context.authProfileStore
             ? { authProfileStore: runtime.context.authProfileStore }
@@ -216,6 +232,13 @@ export function ensureCodexAppServerClientRuntime(
           "ChatGPT workspace changed during Codex token refresh. Retry to start a client for the selected workspace.",
         );
       }
+      if (runtime.closed) {
+        throw new Error("Codex app-server client closed during ChatGPT token refresh.");
+      }
+      runtime.authHandoff = {
+        accessFingerprint: fingerprintTokenAuthProfileCacheKey(tokens.accessToken),
+        chatgptAccountId: tokens.chatgptAccountId,
+      };
       return { ...tokens };
     } catch (error) {
       // Failed refresh leaves Codex holding its old account. Detach the cached

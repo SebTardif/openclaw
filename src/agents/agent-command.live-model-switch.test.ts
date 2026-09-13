@@ -48,6 +48,7 @@ import {
   resolveTestModelAliasFromPair,
   resolveTestModelRefFromString,
 } from "./agent-command.live-model-switch.test-helpers.js";
+import { createApiKeyCredential } from "./auth-profiles/credential-fixtures.test-support.js";
 import type { FailoverReason } from "./failover/signal.js";
 import { formatAgentInternalEventsForPrompt, type AgentInternalEvent } from "./internal-events.js";
 import {
@@ -1409,6 +1410,7 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
               writer = runExclusiveSqliteSessionWrite(
                 resolveSqliteScope({ sessionKey, storePath }),
                 async () => await releaseWriter.promise,
+                "session.transcript.batch",
               );
               // Real CLI, Pi, and Codex event producers do not await this callback.
               registration = Promise.resolve(
@@ -3137,6 +3139,7 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
     expect(stored?.restartRecoveryTerminalDeliveryEvidence).toEqual([
       {
         runId: "image:task-1:agent-loop",
+        transcriptRunId: "image:task-1:agent-loop",
         captured: true,
         payloads: [{ visible: false }, { mediaUrls: ["/tmp/payload.png"], visible: true }],
         deliveryStatus: {
@@ -4971,11 +4974,7 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
     };
     state.authProfileStoreMock = {
       profiles: {
-        "openai:work": {
-          type: "api_key",
-          provider: "openai",
-          key: "sk-test",
-        },
+        "openai:work": createApiKeyCredential("openai", "sk-test"),
       },
     };
     state.runWithModelFallbackMock.mockImplementation(async (params: FallbackRunnerParams) => {

@@ -105,6 +105,7 @@ function createCall(onTranscript?: (entry: RealtimeTalkTranscript) => void) {
     onStatus,
     onTalkEvent,
     entries: () => conversation.entries.map(({ role, text }) => ({ role, text })),
+    entryStates: () => conversation.entries,
     writes: () => requests.filter(({ method }) => method === "talk.client.transcript"),
   };
 }
@@ -131,6 +132,126 @@ describe("browser Talk provider item ordering", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each([
+    {
+      name: "split words",
+      user: ["hel", "lo"],
+      assistant: ["ye", "s"],
+      expected: ["hello", "yes"],
+    },
+    {
+      name: "repeated fragments",
+      user: ["ha", "ha"],
+      assistant: ["no", "no"],
+      expected: ["haha", "nono"],
+    },
+    {
+      name: "leading whitespace",
+      user: [" ", "hel", "lo "],
+      assistant: ["\n", "a", "a "],
+      expected: [" hello ", "\naa "],
+    },
+  ])(
+    "preserves public Live $name through the browser transcript pipeline",
+    async ({ user, assistant, expected }) => {
+      const transcripts: RealtimeTalkTranscript[] = [];
+      const call = createCall((entry) => transcripts.push(entry));
+      await call.session.start();
+      const peer = Peer.instances.at(-1)!;
+      for (let index = 0; index < user.length; index += 1) {
+        emit(peer, {
+          type: "session.input_transcript.delta",
+          delta: user[index],
+          start_ms: index * 100,
+          end_ms: index * 100 + 100,
+        });
+        emit(peer, {
+          type: "session.output_transcript.delta",
+          delta: assistant[index],
+          start_ms: index * 100,
+          end_ms: index * 100 + 100,
+        });
+      }
+      expect(call.entries()).toEqual([
+        { role: "user", text: expected[0] },
+        { role: "assistant", text: expected[1] },
+      ]);
+      expect(call.entryStates().every((entry) => entry.isStreaming)).toBe(true);
+      expect(transcripts.every((entry) => !entry.final && entry.itemId === undefined)).toBe(true);
+      expect(call.onTalkEvent.mock.calls.map(([event]) => event.type)).not.toContain("turn.ended");
+      expect(call.onTalkEvent.mock.calls.map(([event]) => event.type)).not.toContain(
+        "transcript.done",
+      );
+      expect(call.writes()).toEqual([]);
+      call.session.stop();
+      await waitForFast(() => expect(call.requests.at(-1)?.method).toBe("talk.client.close"));
+      expect(call.writes()).toEqual([]);
+    },
+  );
+
+  it.each(["user", "assistant"] as const)(
+    "replaces Codex %s caption fragments with their complete final snapshots",
+    async (role) => {
+      const call = await start();
+      const deltaType = role === "user" ? "input_transcript.added" : "output_transcript.added";
+      const utterances = [
+        { fragments: [" Hello"], snapshot: " Hello" },
+        {
+          fragments: [" Please check", " the full sentence."],
+          snapshot: " Please check the full sentence.",
+        },
+        { fragments: [" go", " go"], snapshot: " go go" },
+        { fragments: ["Tomorrow morning."], snapshot: "Next week instead." },
+      ];
+      for (const [index, utterance] of utterances.entries()) {
+        for (const text of utterance.fragments) {
+          emit(call.peer, { type: deltaType, item: { text } });
+        }
+        emit(call.peer, {
+          type: "turn.done",
+          turn: { id: `turn-${index}`, role, transcript: utterance.snapshot },
+        });
+      }
+
+      expect(call.entries()).toEqual(utterances.map(({ snapshot }) => ({ role, text: snapshot })));
+      expect(call.entryStates().every((entry) => !entry.isStreaming)).toBe(true);
+      await waitForFast(() => expect(call.writes()).toHaveLength(utterances.length));
+      expect(call.writes().map(({ params }) => [params.role, params.text])).toEqual(
+        utterances.map(({ snapshot }) => [role, snapshot.trim()]),
+      );
+    },
+  );
+
+  it("keeps interleaved Codex speaker captions open until their own final snapshot", async () => {
+    const call = await start();
+    for (const event of [
+      { type: "input_transcript.added", item: { text: " Friday" } },
+      { type: "output_transcript.added", item: { text: " I can check" } },
+      { type: "turn.done", turn: { id: "user-1", role: "user", transcript: " Monday instead" } },
+      { type: "input_transcript.added", item: { text: "And the weather?" } },
+      { type: "output_transcript.added", item: { text: " that." } },
+      {
+        type: "turn.done",
+        turn: { id: "assistant-1", role: "assistant", transcript: " I can check that." },
+      },
+      { type: "turn.done", turn: { id: "user-2", role: "user", transcript: "And the weather?" } },
+    ]) {
+      emit(call.peer, event);
+    }
+
+    expect(call.entries()).toEqual([
+      { role: "user", text: " Monday instead" },
+      { role: "assistant", text: " I can check that." },
+      { role: "user", text: "And the weather?" },
+    ]);
+    await waitForFast(() => expect(call.writes()).toHaveLength(3));
+    expect(call.writes().map(({ params }) => [params.role, params.text])).toEqual([
+      ["user", "Monday instead"],
+      ["assistant", "I can check that."],
+      ["user", "And the weather?"],
+    ]);
   });
 
   it.each(["ready", "stop", "replacement", "failure"])(

@@ -34,6 +34,7 @@ import {
   waitForSessionTranscriptIndexReconcilesInStateDir,
   waitForSessionTranscriptProjection,
 } from "./session-transcript-reconcile.js";
+import { transcriptMessage } from "./transcript-message.test-support.js";
 
 const agentId = "secondary";
 const sessionId = "memory-reconcile";
@@ -86,17 +87,12 @@ describe("incognito transcript reconciliation", () => {
       const { scope, options } = target(environment === "ambient" ? undefined : explicit.env);
       const turn = await persistSessionTranscriptTurn(scope, {
         messages: [
-          { eventId: "root", parentId: null, message: { role: "user", content: "root" } },
-          {
-            eventId: "abandoned",
-            parentId: "root",
-            message: { role: "assistant", content: "🦞".repeat(262_144) },
-          },
-          {
-            eventId: "active",
-            parentId: "root",
-            message: { role: "assistant", content: "active" },
-          },
+          transcriptMessage("root", null, { role: "user", content: "root" }),
+          transcriptMessage("abandoned", "root", {
+            role: "assistant",
+            content: "🦞".repeat(262_144),
+          }),
+          transcriptMessage("active", "root", { role: "assistant", content: "active" }),
         ],
         touchSessionEntry: false,
       });
@@ -238,10 +234,14 @@ describe("incognito transcript reconciliation", () => {
       const database = openOpenClawAgentDatabase(options);
       const blocked = createDeferred();
       const release = createDeferred();
-      const blocker = runExclusiveSqliteSessionWrite(options, async () => {
-        blocked.resolve();
-        await release.promise;
-      });
+      const blocker = runExclusiveSqliteSessionWrite(
+        options,
+        async () => {
+          blocked.resolve();
+          await release.promise;
+        },
+        "sessions.transcript-index.preflight",
+      );
       await blocked.promise;
       let pending: Promise<unknown>;
       if (mode === "direct") {
@@ -295,11 +295,15 @@ describe("incognito transcript reconciliation", () => {
               }
               // Enter the real FIFO ahead of the owner handler, then dispose
               // immediately before its queued write could acquire a database.
-              blocker = runExclusiveSqliteSessionWrite(options, async () => {
-                blocked.resolve();
-                await release.promise;
-                closeOpenClawAgentDatabaseByPath(database.path);
-              });
+              blocker = runExclusiveSqliteSessionWrite(
+                options,
+                async () => {
+                  blocked.resolve();
+                  await release.promise;
+                  closeOpenClawAgentDatabaseByPath(database.path);
+                },
+                "sessions.transcript-index.preflight",
+              );
             }
           });
           return worker;
@@ -353,10 +357,14 @@ describe("incognito transcript reconciliation", () => {
         worker.on("message", (workerMessage: { type: string }) => {
           if (workerMessage.type === "done") {
             // Memory's port can close while its final parent write waits in the FIFO.
-            blocker = runExclusiveSqliteSessionWrite(options, async () => {
-              blocked.resolve();
-              await release.promise;
-            });
+            blocker = runExclusiveSqliteSessionWrite(
+              options,
+              async () => {
+                blocked.resolve();
+                await release.promise;
+              },
+              "sessions.transcript-index.preflight",
+            );
           }
         });
         return worker;
@@ -428,17 +436,9 @@ describe("incognito transcript reconciliation", () => {
       closeOpenClawAgentDatabaseByPath(database.path);
       await persistSessionTranscriptTurn(scope, {
         messages: [
-          { eventId: "root", parentId: null, message: { role: "user", content: "root" } },
-          {
-            eventId: "abandoned",
-            parentId: "root",
-            message: { role: "assistant", content: "abandoned" },
-          },
-          {
-            eventId: "active",
-            parentId: "root",
-            message: { role: "assistant", content: "active" },
-          },
+          transcriptMessage("root", null, { role: "user", content: "root" }),
+          transcriptMessage("abandoned", "root", { role: "assistant", content: "abandoned" }),
+          transcriptMessage("active", "root", { role: "assistant", content: "active" }),
         ],
         touchSessionEntry: false,
       });

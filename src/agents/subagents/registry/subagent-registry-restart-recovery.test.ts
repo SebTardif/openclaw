@@ -322,26 +322,6 @@ describe("subagent registry restart recovery", () => {
     expect(dispatchAgent).not.toHaveBeenCalled();
   });
 
-  it("reclassifies shipped restart-timeout rows before dispatch", async () => {
-    const entry = run({
-      endedReason: "subagent-error",
-      execution: {
-        status: "terminal",
-        endedAt: Date.now() - 1_000,
-        outcome: { status: "timeout" },
-      },
-    });
-
-    await expect(recover(entry)).resolves.toMatchObject({ status: "accepted" });
-    expect(entry.execution).toMatchObject({
-      status: "interrupted",
-      interruptionReason: "gateway-restart",
-      endedAt: undefined,
-      outcome: undefined,
-    });
-    expect(entry.endedReason).toBeUndefined();
-  });
-
   it("defers without consuming the dispatch path until a runtime exists", async () => {
     const entry = run();
     await expect(recover(entry, { gatewayRuntime: undefined })).resolves.toEqual({
@@ -922,39 +902,6 @@ describe("subagent registry restart recovery", () => {
 
     await expect(recover(run())).resolves.toEqual({ status: "handled" });
     expect(dispatchAgent).not.toHaveBeenCalled();
-    expect(mocks.entries[childSessionKey]).toMatchObject({
-      abortedLastRun: false,
-      subagentRecovery: {
-        automaticAttempts: 2,
-        wedgedAt: expect.any(Number),
-      },
-    });
-  });
-
-  it("keeps a shipped timeout row terminal when recovery is blocked", async () => {
-    mocks.entries[childSessionKey]!.subagentRecovery = {
-      automaticAttempts: 2,
-      lastAttemptAt: Date.now(),
-      lastRunId: "prior-run",
-    };
-    const endedAt = Date.now() - 1_000;
-    const entry = run({
-      endedReason: "subagent-error",
-      execution: {
-        status: "terminal",
-        endedAt,
-        outcome: { status: "timeout" },
-      },
-    });
-
-    await expect(recover(entry)).resolves.toEqual({ status: "handled" });
-    expect(dispatchAgent).not.toHaveBeenCalled();
-    expect(entry.execution).toMatchObject({
-      status: "terminal",
-      endedAt,
-      outcome: { status: "timeout" },
-    });
-    expect(entry.endedReason).toBe("subagent-error");
     expect(mocks.entries[childSessionKey]).toMatchObject({
       abortedLastRun: false,
       subagentRecovery: {

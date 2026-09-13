@@ -1,6 +1,5 @@
 // Memory Core plugin module coordinates synchronization and shadow reindexing.
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   createSubsystemLogger,
@@ -8,6 +7,7 @@ import {
   resolveUserPath,
 } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import {
+  formatMemoryIndexRebuildGuidance,
   MEMORY_CHUNKING_VERSION,
   MEMORY_INDEX_VECTOR_TABLE,
   type MemorySyncParams,
@@ -25,7 +25,7 @@ import {
   cleanupAgedMemoryReindexTempFiles,
   memoryDatabaseTableExists,
   openMemoryDatabaseAtPath,
-  publishMemoryDatabaseTables,
+  prepareMemoryDatabasePublication,
   readMemoryDatabaseRevision,
   removeMemoryDatabaseFiles,
 } from "./manager-db.js";
@@ -36,6 +36,7 @@ import {
   resolveFallbackCurrentProviderId,
   resolveMemoryFallbackProviderRequest,
 } from "./manager-provider-state.js";
+import type { MemoryManagerProviderFactory } from "./manager-registry.js";
 import {
   MEMORY_INDEX_PROVENANCE_VERSION,
   resolveConfiguredScopeHash,
@@ -55,7 +56,9 @@ import { markMemoryVectorIndexClean } from "./manager-vector-rebuild-state.js";
 export type { MemoryIndexWorkItem } from "./manager-sync-base.js";
 
 type MemorySyncProviderGenerationBase = {
-  database: DatabaseSync;
+  database: MemoryIndexDatabase;
+  databaseRevision: number;
+  cacheWritesInvalidated: boolean;
   providerKey: string;
   identities: MemoryIndexProviderIdentity[];
 };
@@ -64,6 +67,7 @@ export type MemorySyncProviderGeneration =
   | (MemorySyncProviderGenerationBase & { kind: "fts-only"; provider: null })
   | (MemorySyncProviderGenerationBase & {
       kind: "semantic";
+      embeddingDimensions?: number;
       provider: EmbeddingProvider;
       runtime?: EmbeddingProviderRuntime;
     });
@@ -76,6 +80,29 @@ export type MemorySemanticProviderGeneration = Extract<
 const log = createSubsystemLogger("memory");
 
 export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
+  protected readonly automaticRebuildNotice: { sequence: number; warning: string };
+
+  protected constructor(notice?: { sequence: number; warning: string }) {
+    super();
+    this.automaticRebuildNotice = notice ?? { sequence: 0, warning: "" };
+  }
+
+  protected recordAutomaticRebuild(): void {
+    this.automaticRebuildNotice.sequence += 1;
+    this.automaticRebuildNotice.warning = `Automatic memory index repair was requested. To rebuild manually, run: ${formatMemoryIndexRebuildGuidance({ requestedProvider: this.settings.provider }, this.agentId)}`;
+  }
+
+  protected takeSearchMaintenanceRequest() {
+    const generation = this.takeReindexRetryStateForMaintenance();
+    // The request must be visible before detached acquisition or embedding finishes.
+    if (generation.memoryFullRetryDirty || generation.sessionsFullRetryDirty) {
+      this.recordAutomaticRebuild();
+    }
+    return generation;
+  }
+
+  protected abstract readonly createProvider: MemoryManagerProviderFactory;
+  protected abstract releaseProvider(provider: EmbeddingProvider): void;
   private fallbackProviderInitPromise: Promise<boolean> | null = null;
   protected syncProviderGeneration: MemorySyncProviderGeneration | null = null;
 
@@ -147,10 +174,12 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
     ) {
       return;
     }
+    const providerFailure = this.providerUnavailableReason;
     this.resetProviderInitializationForRetry();
     throw new Error(
       `Memory sync aborted: embedding provider "${this.settings.provider}" is configured but unavailable. ` +
-        `Refusing to run sync in fts-only fallback mode to protect existing vector index (current model: ${existingMeta.model}).`,
+        `Refusing to run sync in fts-only fallback mode to protect existing vector index (current model: ${existingMeta.model}).` +
+        (providerFailure ? ` Provider failure: ${providerFailure}` : ""),
     );
   }
 
@@ -222,6 +251,16 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
         hasIndexedChunks,
         ftsTokenizer: this.settings.store.fts.tokenizer,
       });
+      if (
+        indexIdentity.status === "mismatched" &&
+        indexIdentity.owner === "openclaw" &&
+        indexIdentity.versionOrder === "newer" &&
+        params?.reason !== "cli"
+      ) {
+        // Keep automatic force/retry/bootstrap paths from overwriting a newer publication.
+        needsFullReindex = true;
+        return;
+      }
       const needsInitialIndex = indexIdentity.status !== "valid" && !hasIndexedChunks;
       // Missing metadata cannot prove whether existing chunks were semantic.
       // Wait for the configured provider before replacing them with a rebuilt index,
@@ -246,10 +285,11 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
         indexIdentity.status === "missing" && !hasTargetArchiveFiles && canRebuildMissingIdentity;
       const needsExplicitIdentityReindex =
         params?.reason === "cli" && indexIdentity.status !== "valid" && !hasTargetArchiveFiles;
-      // Source hashes do not reflect chunk boundaries, so an implementation
-      // upgrade must rebuild the shadow index instead of attempting dirty sync.
-      const needsChunkingVersionReindex =
-        meta !== null && meta.chunkingVersion !== MEMORY_CHUNKING_VERSION && !hasTargetArchiveFiles;
+      // Runtime format changes need a shadow rebuild even when source hashes match.
+      const needsRuntimeVersionReindex =
+        indexIdentity.status === "mismatched" &&
+        indexIdentity.owner === "openclaw" &&
+        !hasTargetArchiveFiles;
       const canRunRetryFullReindex =
         indexIdentity.status !== "missing" || needsInitialIndex || canRebuildMissingIdentity;
       needsFullReindex =
@@ -257,7 +297,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
         needsInitialIndex ||
         needsMissingIdentityReindex ||
         needsExplicitIdentityReindex ||
-        needsChunkingVersionReindex ||
+        needsRuntimeVersionReindex ||
         (this.memoryFullRetryDirty && canRunRetryFullReindex) ||
         (this.sessionsFullRetryDirty && indexIdentity.status !== "valid" && canRunRetryFullReindex);
       const needsFullSessionReindex = needsFullReindex || this.sessionsFullRetryDirty;
@@ -303,6 +343,9 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       }
       try {
         if (needsFullReindex) {
+          if (params?.reason !== "cli") {
+            this.recordAutomaticRebuild();
+          }
           await this.runInPlaceReindex({
             reason: params?.reason,
             force: params?.force,
@@ -470,6 +513,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
     let fallbackResult;
     try {
       fallbackResult = await createEmbeddingProvider({
+        createProvider: this.createProvider,
         config: this.cfg,
         agentDir: resolveAgentDir(this.cfg, this.agentId),
         ...(this.acquireLocalService ? { acquireLocalService: this.acquireLocalService } : {}),
@@ -536,7 +580,6 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       const rebuilt = await this.withReindexDatabase(shadow, async () => {
         try {
           this.ensureSchema();
-          await this.seedEmbeddingCache(originalDb);
 
           const shouldSyncMemory = shouldRetryMemoryOnFailure;
           const shouldSyncSessions = shouldRetrySessionsOnFailure;
@@ -598,10 +641,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
             nextMeta.vectorDims = this.vector.dims;
           }
 
-          this.writeMeta(nextMeta);
-          // Bound the cache before copying it into the shared agent database;
-          // deleting overflow afterward does not undo primary-file growth.
-          await this.pruneEmbeddingCacheIfNeeded();
+          await this.withDatabaseWrite(() => this.writeMeta(nextMeta));
           return {
             nextMeta,
             vectorIndexComplete,
@@ -615,7 +655,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
 
       await withMemoryWorkspaceLock(this.workspaceDir, async () => {
         await withMemoryIndexPublishGeneration(dbPath, async () => {
-          await publishMemoryDatabaseTables({
+          const publish = await prepareMemoryDatabasePublication({
             targetDb: originalDb,
             sourcePath: tempDbPath,
             metaKey: MEMORY_INDEX_META_KEY,
@@ -623,19 +663,24 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
             sourceHasVectors: rebuilt.hasVectors,
             vectorExtensionPath: shadow.vector.extensionPath,
           });
+          await this.withDatabaseWrite(() => {
+            publish();
+            if (rebuilt.vectorIndexComplete) {
+              // Publish completeness only after the shadow tables committed.
+              markMemoryVectorIndexClean(originalDb);
+            }
+          });
         });
       });
 
-      if (rebuilt.vectorIndexComplete) {
-        // Publish completeness only after the shadow tables committed. A crash
-        // before this point leaves the rebuild marker conservative and retryable.
-        markMemoryVectorIndexClean(originalDb);
-      }
       this.database.lastMetaSerialized = null;
       this.resetVectorState();
       this.fts.available = shadow.fts.available;
       this.fts.loadError = shadow.fts.loadError;
       this.vector.dims = rebuilt.nextMeta.vectorDims;
+      // Cache-only rebuilds bypass insertion-time eviction; prune the canonical
+      // cache only after successful publication so failed rebuilds retain their work.
+      await this.pruneEmbeddingCacheIfNeeded();
     } catch (err) {
       this.restoreReindexRetryState(originalRetryState);
       this.markFailedFullReindexRetry({

@@ -57,10 +57,13 @@ type CommandPaletteProps = {
   activeId: string | null;
   sessionItems: readonly PaletteItem[];
   catalogItems: readonly PaletteItem[];
-  modelSearchFailed: boolean;
+  modelSearchError: string | null;
+  sessionSearchPending: boolean;
+  catalogSearchPending: boolean;
   sessionSearchFailed: boolean;
   sessionSearchPartial: boolean;
   sessionSearchIncomplete: boolean;
+  archivedTranscriptsExcluded: number;
   onToggle: () => void;
   onQueryChange: (query: string) => void;
   onActiveIdChange: (id: string) => void;
@@ -218,12 +221,22 @@ function renderCommandPalette(props: CommandPaletteProps) {
           .value=${props.query}
           @input=${(e: Event) => props.onQueryChange((e.target as HTMLInputElement).value)}
         />
-        <div id=${paletteListboxId} class="cmd-palette__results" role="listbox">
+        ${
+          props.sessionSearchPending || props.catalogSearchPending
+            ? html`<div class="cmd-palette__empty" role="status">
+                ${t(props.sessionSearchPending ? "palette.searchingSessions" : "palette.searchingCommands")}
+              </div>`
+            : nothing
+        }
+        <div
+          id=${paletteListboxId}
+          class="cmd-palette__results"
+          role="listbox"
+          aria-busy=${props.sessionSearchPending || props.catalogSearchPending ? "true" : "false"}
+        >
           ${
-            props.modelSearchFailed
-              ? html`<div class="cmd-palette__empty" role="status">
-                  ${t("palette.modelSearchFailed")}
-                </div>`
+            props.modelSearchError
+              ? html`<div class="cmd-palette__empty" role="status">${props.modelSearchError}</div>`
               : nothing
           }
           ${
@@ -240,7 +253,19 @@ function renderCommandPalette(props: CommandPaletteProps) {
               : nothing
           }
           ${
-            grouped.length === 0 && !props.sessionSearchFailed
+            props.archivedTranscriptsExcluded > 0
+              ? html`<div class="cmd-palette__empty" role="status">
+                  ${t("sessionsView.transcriptSearchArchivedExcluded", {
+                    count: String(props.archivedTranscriptsExcluded),
+                  })}
+                </div>`
+              : nothing
+          }
+          ${
+            grouped.length === 0 &&
+            !props.sessionSearchFailed &&
+            !props.sessionSearchPending &&
+            !props.catalogSearchPending
               ? html`<div class="cmd-palette__empty">
                   <span class="nav-item__icon" style="opacity:0.3;width:20px;height:20px"
                     >${icons.search}</span
@@ -306,15 +331,17 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
   @state() private activeId: string | null = null;
   @state() private sessionItems: readonly PaletteItem[] = [];
   @state() private catalogItems: readonly PaletteItem[] = [];
-  @state() private modelSearchFailed = false;
+  @state() private modelSearchError: string | null = null;
+  @state() private sessionSearchPending = false;
   @state() private sessionSearchFailed = false;
   @state() private sessionSearchPartial = false;
+  @state() private archivedTranscriptsExcluded = 0;
   @state() private sessionSearchIncomplete = false;
 
   private readonly subscriptions = new SubscriptionsController(this);
-  private sessionSearchTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  @state() private sessionSearchTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
   private sessionSearchId = 0;
-  private catalogLoad?: {
+  @state() private catalogLoad?: {
     client: NonNullable<ApplicationContext<RouteId>["gateway"]["snapshot"]["client"]>;
     agentId: string;
     promise: Promise<void>;
@@ -405,15 +432,17 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
     }
     this.sessionSearchId += 1;
     this.sessionItems = [];
+    this.sessionSearchPending = false;
     this.sessionSearchFailed = false;
     this.sessionSearchPartial = false;
+    this.archivedTranscriptsExcluded = 0;
     this.sessionSearchIncomplete = false;
   }
 
   private clearCatalogSearch() {
     this.catalogLoad = undefined;
     this.catalogItems = [];
-    this.modelSearchFailed = false;
+    this.modelSearchError = null;
   }
 
   private ensureCatalogItems(force = false): Promise<void> {
@@ -444,7 +473,7 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
       agentId,
       agents: () => context.agents?.ensureList?.() ?? Promise.resolve(null),
       methodAvailable: (method) => Boolean(isGatewayMethodAdvertised(snapshot, method)),
-    }).then(({ items, modelSearchFailed }) => {
+    }).then(({ items, modelRequestFailed, modelSearchError }) => {
       if (
         this.catalogLoad?.promise === promise &&
         this.context?.gateway === gateway &&
@@ -453,10 +482,10 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
       ) {
         this.catalogItems = [
           ...toCommandPaletteItems(items),
-          ...(modelSearchFailed ? previousModels : []),
+          ...(modelRequestFailed ? previousModels : []),
         ];
-        this.modelSearchFailed = modelSearchFailed;
-        this.catalogLoad.loadedAt = modelSearchFailed ? 0 : Date.now();
+        this.modelSearchError = modelSearchError;
+        this.catalogLoad = { ...this.catalogLoad, loadedAt: modelRequestFailed ? 0 : Date.now() };
       }
     });
     this.catalogLoad = { client, agentId, promise };
@@ -471,11 +500,16 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
     if (!this.open || !search || search.length < SESSION_SEARCH_MIN_CHARS) {
       return;
     }
+    this.sessionSearchPending = Boolean(
+      this.onSelectSession && this.context?.sessions && this.gateway.connected,
+    );
     this.sessionSearchTimer = globalThis.setTimeout(() => {
       this.sessionSearchTimer = null;
       void this.ensureCatalogItems();
       if (this.onSelectSession) {
         void this.searchSessions(search);
+      } else {
+        this.sessionSearchPending = false;
       }
     }, SESSION_SEARCH_DEBOUNCE_MS);
   }
@@ -486,6 +520,7 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
     const gateway = context?.gateway;
     const client = gateway?.snapshot.client;
     if (!sessions || gateway?.snapshot.phase !== "connected" || !client) {
+      this.sessionSearchPending = false;
       return;
     }
     const requestId = ++this.sessionSearchId;
@@ -581,6 +616,7 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
       }
       const transcriptResult = transcriptOutcome?.result ?? null;
       this.sessionSearchPartial = transcriptOutcome?.error === true;
+      this.archivedTranscriptsExcluded = transcriptResult?.archivedTranscriptsExcluded ?? 0;
       this.sessionSearchIncomplete =
         transcriptOutcome?.error !== true &&
         (transcriptResult?.indexing === true || transcriptResult?.truncated === true);
@@ -595,8 +631,12 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
       // failed search must not render as "No results" — that reads as a
       // successful search with zero matches and hides gateway-side failures
       // (e.g. a store needing doctor migration) from the operator.
-      if (requestId === this.sessionSearchId && this.open) {
+      if (isCurrent()) {
         this.sessionSearchFailed = true;
+      }
+    } finally {
+      if (isCurrent()) {
+        this.sessionSearchPending = false;
       }
     }
   }
@@ -620,7 +660,7 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
       query: this.query,
       activeId: this.activeId,
       sessionItems: this.sessionItems,
-      modelSearchFailed: this.modelSearchFailed,
+      modelSearchError: this.modelSearchError,
       catalogItems: [
         ...toCommandPaletteItems(
           getStaticCommandPaletteCatalogItems(
@@ -630,9 +670,16 @@ export class CommandPalette extends OpenClawLightDomContentsElement {
         ),
         ...this.catalogItems,
       ],
+      sessionSearchPending: this.sessionSearchPending,
+      catalogSearchPending: Boolean(
+        normalizeOptionalString(this.query) &&
+        ((this.sessionSearchTimer !== null && this.gateway.connected) ||
+          (this.catalogLoad && this.catalogLoad.loadedAt === undefined)),
+      ),
       sessionSearchFailed: this.sessionSearchFailed,
       sessionSearchPartial: this.sessionSearchPartial,
       sessionSearchIncomplete: this.sessionSearchIncomplete,
+      archivedTranscriptsExcluded: this.archivedTranscriptsExcluded,
       desktopAvailable: this.desktopAvailable,
       custodianAvailable: this.custodianAvailable,
       onToggle: this.togglePalette,

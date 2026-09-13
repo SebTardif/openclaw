@@ -59,7 +59,10 @@ function shouldRenderCodeBlockInteraction(env: unknown): boolean {
 }
 
 function encodeCodeBlockCopyPayload(value: string): string {
-  return `${blockArtCopyPayloadPrefix}${JSON.stringify(value)}`;
+  // DOMPurify removes attributes containing XML comment ends or closing tags.
+  // JSON escapes survive sanitization and decode only as clipboard text.
+  const payload = JSON.stringify(value).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
+  return `${blockArtCopyPayloadPrefix}${payload}`;
 }
 
 function decodeCodeBlockCopyPayload(value: string, encoding?: string): string {
@@ -77,6 +80,10 @@ function decodeCodeBlockCopyPayload(value: string, encoding?: string): string {
   }
 }
 
+export function readMarkdownCodeBlockCopyText(button: HTMLElement): string {
+  return decodeCodeBlockCopyPayload(button.dataset.code ?? "", button.dataset.codeEncoding);
+}
+
 /**
  * Single click owner for every fenced-code control. Copy, reveal, and wrap ship
  * in the same markup, so one entry point keeps a host from wiring part of it and
@@ -92,7 +99,7 @@ export function handleMarkdownCodeBlockClick(event: Event): void {
   if (!button) {
     return;
   }
-  const code = decodeCodeBlockCopyPayload(button.dataset.code ?? "", button.dataset.codeEncoding);
+  const code = readMarkdownCodeBlockCopyText(button);
   const attempt = (codeBlockCopyAttempts.get(button) ?? 0) + 1;
   codeBlockCopyAttempts.set(button, attempt);
   const isCurrent = () => button.isConnected && codeBlockCopyAttempts.get(button) === attempt;
@@ -182,20 +189,6 @@ function codeClassAttribute(lang: string, highlighted: string): string {
   return classes.length > 0 ? ` class="${escapeMarkdownHtml(classes.join(" "))}"` : "";
 }
 
-function renderCodeElement(
-  text: string,
-  lang: string,
-  options: { blockArt?: boolean; highlight?: boolean } = {},
-): string {
-  if (options.blockArt || isMarkdownBlockArtText(text)) {
-    return `<pre><code class="markdown-block-art">${escapeMarkdownHtml(text)}</code></pre>`;
-  }
-  const highlighted =
-    options.highlight === false ? escapeMarkdownHtml(text) : highlightCodeHtml(text, lang);
-  const classAttr = codeClassAttribute(lang, highlighted);
-  return `<pre><code${classAttr}>${highlighted}</code></pre>`;
-}
-
 function renderCodeBlockHeader(lang: string, actions: string): string {
   const language = escapeMarkdownHtml(lang || t("chat.codeBlock.languageFallback"));
   return `<div class="code-block-header"><span class="code-block-lang">${language}</span><div class="code-block-actions">${actions}</div></div>`;
@@ -214,7 +207,13 @@ export function renderMarkdownCodeBlock(
   options: { blockArt?: boolean; copyText?: string; highlight?: boolean } = {},
 ): string {
   const blockArt = options.blockArt || isMarkdownBlockArtText(text);
-  const codeBlock = renderCodeElement(text, lang, { blockArt, highlight: options.highlight });
+  const highlight = options.highlight;
+  const highlighted =
+    blockArt || highlight === false ? escapeMarkdownHtml(text) : highlightCodeHtml(text, lang);
+  const classAttr = blockArt
+    ? ' class="markdown-block-art"'
+    : codeClassAttribute(lang, highlighted);
+  const codeBlock = `<pre><code${classAttr}>${highlighted}</code></pre>`;
   if (!shouldRenderCodeBlockCopy(env) && !shouldRenderCodeBlockInteraction(env)) {
     return codeBlock;
   }
@@ -228,7 +227,7 @@ export function renderMarkdownCodeBlock(
   }
   const hiddenLineCount = ["text", "md", "markdown"].includes(lang.trim().toLowerCase())
     ? 0
-    : Math.max(0, markdownCodeBlockCopyText(text).split("\n").length - CODE_PREVIEW_LINE_COUNT);
+    : Math.max(0, countCodeBlockLines(text) - CODE_PREVIEW_LINE_COUNT);
   const hiddenCount = { count: String(hiddenLineCount) };
   const expandLabel = t(
     hiddenLineCount === 1 ? "chat.codeBlock.showHiddenLine" : "chat.codeBlock.showHiddenLines",
@@ -245,6 +244,16 @@ export function renderMarkdownCodeBlock(
   const wrapButton = `<button type="button" class="code-block-wrap" aria-label="${wrapLabel}" title="${wrapLabel}" aria-pressed="false"><span class="code-block-wrap__enable" aria-hidden="true"></span><span class="code-block-wrap__disable" aria-hidden="true"></span></button>`;
   const header = renderCodeBlockHeader(lang, `${wrapButton}${copyButton}`);
   return `<div class="code-block-wrapper${hiddenLineCount ? " is-collapsible" : ""}">${header}<div class="code-block-viewport">${codeBlock}</div>${expandButton}</div>`;
+}
+
+function countCodeBlockLines(text: string): number {
+  let lines = 1;
+  let index = -1;
+  // Match copied code: one terminal newline does not add a displayed line.
+  while ((index = text.indexOf("\n", index + 1)) >= 0 && index < text.length - 1) {
+    lines += 1;
+  }
+  return lines;
 }
 
 export function markdownCodeBlockCopyText(content: string): string {

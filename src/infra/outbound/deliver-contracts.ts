@@ -11,7 +11,10 @@ import type { ReplyToMode } from "../../config/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { MessagePresentation, ReplyPayloadDeliveryPin } from "../../interactive/payload.js";
 import type { OutboundMediaAccess } from "../../media/load-options.js";
-import type { DeliveryQueueCompletionRetention } from "../delivery-queue-sqlite.js";
+import type {
+  DeliveryQueueCompletionRetention,
+  DeliveryQueueStateContext,
+} from "../delivery-queue-sqlite.js";
 import type { QueuedDeliveryOwner } from "./deliver-queue-state.js";
 import type {
   OutboundDeliveryQueuePolicy,
@@ -19,7 +22,10 @@ import type {
   OutboundPayloadDeliveryOutcome,
   PlatformSendRoute,
 } from "./deliver-types.js";
-import type { DurableDeliveryCompletion } from "./delivery-completion.js";
+import type {
+  ConversationDeliveryTarget,
+  DurableDeliveryCompletion,
+} from "./delivery-completion.js";
 import type {
   QueuedReplyPayloadSendingHook,
   QueuedRenderedMessageBatchPlan,
@@ -77,6 +83,7 @@ export type ChannelHandler = {
   textChunkLimit?: number;
   preserveMarkdownDetails?: boolean;
   supportsMedia: boolean;
+  supportsMediaPayload?: boolean;
   sanitizeText?: (payload: ReplyPayload) => string;
   normalizePayload?: (payload: ReplyPayload) => ReplyPayload | null;
   normalizePayloadBatch?: (
@@ -263,4 +270,10 @@ export type DeliverOutboundPayloadsParams = DeliverOutboundPayloadsCoreParams & 
   queuePolicy?: OutboundDeliveryQueuePolicy;
   renderedBatchPlan?: QueuedRenderedMessageBatchPlan;
   onDeliveryIntent?: (intent: OutboundDeliveryIntent) => void;
+};
+
+/** Private owner facts excluded from SDK delivery parameters and stored payloads. */
+export type InternalDeliverOutboundPayloadsParams = DeliverOutboundPayloadsParams & {
+  conversationDeliveryTarget?: ConversationDeliveryTarget;
+  deliveryQueueStateContext?: DeliveryQueueStateContext;
 };

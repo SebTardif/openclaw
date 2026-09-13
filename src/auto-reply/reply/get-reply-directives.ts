@@ -55,6 +55,10 @@ import { createModelSelectionState, resolveContextTokens } from "./model-selecti
 import type { PreparedReplyConversation } from "./prompt-session-context.js";
 import { formatElevatedUnavailableMessage, resolveElevatedPermissions } from "./reply-elevated.js";
 import {
+  createReplyModelLevelResolver,
+  type ReplyModelLevelResolver,
+} from "./reply-model-levels.js";
+import {
   recordReplyPreRunRejection,
   resolveReplyOperationRunState,
 } from "./reply-operation-run-state.js";
@@ -83,13 +87,12 @@ type ReplyDirectiveContinuation = {
   elevatedAllowed: boolean;
   elevatedFailures: Array<{ gate: string; key: string }>;
   defaultActivation: ReturnType<typeof defaultGroupActivation>;
-  resolvedThinkLevel: ThinkLevel | undefined;
+  resolveModelLevels: ReplyModelLevelResolver;
   resolvedFastMode: FastMode;
   resolvedFastModeAutoOnSeconds: number;
   resolvedFastModeOverride: boolean;
   resolvedFastModeAutoOnSecondsOverride: boolean;
   resolvedVerboseLevel: VerboseLevel | undefined;
-  resolvedReasoningLevel: ReasoningLevel;
   resolvedElevatedLevel: ElevatedLevel;
   execOverrides?: ReplyExecOverrides;
   blockStreamingEnabled: boolean;
@@ -242,10 +245,11 @@ export async function resolveReplyDirectives(params: {
     sessionKey,
   };
 
-  // Only load workspace skill commands when aliases or explicit skill references need them.
-  // This avoids scanning skills for ordinary text, paths, and built-in slash directives.
+  // Every directive parser requires a whitespace/start slash, including directives
+  // whose removal exposes a model alias. URLs alone do not need skill-name reservation.
   const skillCommands =
-    canInterpretTextDirectives && (rawAliases.length > 0 || hasSkillReferences)
+    canInterpretTextDirectives &&
+    ((rawAliases.length > 0 && /(?:^|\s)\//u.test(commandText)) || hasSkillReferences)
       ? (await skillCommandsLoader.load()).listSkillCommandsForWorkspace({
           ...skillCommandContext,
           skillFilter,
@@ -544,15 +548,6 @@ export async function resolveReplyDirectives(params: {
     sessionKey: resolveRuntimePolicySessionKey({ agentId, cfg, ctx, sessionKey }),
     sessionEntry: targetSessionEntry,
   });
-  const resolvedThinkLevelWithDefault =
-    resolvedThinkLevel ??
-    (await modelState.resolveDefaultThinkingLevel({
-      provider,
-      model,
-      agentRuntime: thinkingRuntime,
-    })) ??
-    configuredThinkingDefault;
-
   const thinkingExplicitlySet =
     thinkingLevelOverride !== undefined ||
     directives.thinkLevel !== undefined ||
@@ -572,15 +567,6 @@ export async function resolveReplyDirectives(params: {
     blockedSessionReasoningLevel ||
     (sessionReasoningLevel !== undefined && sessionReasoningLevel !== null) ||
     hasAgentReasoningDefault;
-  const thinkingActive = resolvedThinkLevelWithDefault !== "off";
-  if (
-    !reasoningExplicitlySet &&
-    resolvedReasoningLevel === "off" &&
-    !thinkingActive &&
-    !thinkingExplicitlySet
-  ) {
-    resolvedReasoningLevel = await modelState.resolveDefaultReasoningLevel({ provider, model });
-  }
   const { directiveAck, perMessageQueueMode, perMessageQueueOptions } = applyResult;
   const resolvedFastModeState = resolveFastModeState({
     cfg,
@@ -617,13 +603,23 @@ export async function resolveReplyDirectives(params: {
       elevatedAllowed,
       elevatedFailures,
       defaultActivation,
-      resolvedThinkLevel: resolvedThinkLevelWithDefault,
+      resolveModelLevels: createReplyModelLevelResolver({
+        modelState,
+        selection: {
+          provider,
+          model,
+          agentRuntime: thinkingRuntime,
+          thinkLevel: resolvedThinkLevel,
+          thinkingExplicit: thinkingExplicitlySet,
+          reasoningLevel: resolvedReasoningLevel,
+          reasoningExplicit: reasoningExplicitlySet,
+        },
+      }),
       resolvedFastMode,
       resolvedFastModeAutoOnSeconds,
       resolvedFastModeOverride,
       resolvedFastModeAutoOnSecondsOverride,
       resolvedVerboseLevel,
-      resolvedReasoningLevel,
       resolvedElevatedLevel,
       execOverrides,
       blockStreamingEnabled,

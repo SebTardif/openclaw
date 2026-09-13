@@ -16,16 +16,13 @@ import type { GatewaySessionRow } from "../../api/types.ts";
 import { chatInputOwnerForContext, type ChatInputRegion } from "../../app/chat-input-owner.ts";
 import { applicationContext } from "../../app/context.ts";
 import { observeNativeGateway } from "../../app/native-editor-locality.runtime.ts";
-import type {
-  NativeGatewaysCapability,
-  NativeGatewaysSnapshot,
-} from "../../app/native-gateways.runtime.ts";
 import {
   createQuestionPromptState,
   listQuestionPrompts,
   type QuestionPrompt,
 } from "../../app/question-prompt.ts";
 import type { PresencePayload } from "../../app/user-profile.ts";
+import type { MarkdownRenderOptions } from "../../components/markdown-render-options.ts";
 import { SessionProgressCardController } from "../../components/session-progress-card-controller.ts";
 import type {
   BoardCommandEvent,
@@ -46,7 +43,10 @@ import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { PollController } from "../../lit/poll-controller.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
 import { ChatComposerCapabilityHost } from "./chat-composer-capability-host.ts";
-import { CHAT_PANE_LIFECYCLE_CHANGED_EVENT } from "./chat-history-events.ts";
+import {
+  CHAT_PANE_LIFECYCLE_CHANGED_EVENT,
+  CHAT_TRANSCRIPT_LOADING_CHANGED_EVENT,
+} from "./chat-history-events.ts";
 import { getAcceptedChatHistorySession, getChatHistoryLoadState } from "./chat-history-state.ts";
 import { sendSessionObserverVisibility } from "./chat-observer.ts";
 import type {
@@ -71,6 +71,7 @@ import { ChatTranscriptController } from "./components/chat-transcript-controlle
 import type { SessionDiscussionPanelConfig } from "./components/session-discussion-panel.ts";
 import { handleChatScrollTakeover } from "./scroll.ts";
 import type { ChatMessageCache } from "./session-message-cache.ts";
+import { resolveChatSnapshotKey } from "./session-snapshot-key.ts";
 import type { SessionSnapshotStore } from "./session-snapshot-store.ts";
 import type { SidebarLayout } from "./sidebar-layout-types.ts";
 import {
@@ -110,6 +111,10 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     this.paneLifecycleRoot = this.closest("openclaw-app-shell") ?? this.parentElement;
     document.addEventListener("visibilitychange", this.handleVisibilityChange);
     super.connectedCallback();
+    this.addEventListener(
+      CHAT_TRANSCRIPT_LOADING_CHANGED_EVENT,
+      this.synchronizeForegroundTranscript,
+    );
     this.paneLifecycleRoot?.dispatchEvent(new Event(CHAT_PANE_LIFECYCLE_CHANGED_EVENT));
   }
   protected override async scheduleUpdate() {
@@ -122,6 +127,11 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   }
 
   override disconnectedCallback() {
+    this.removeEventListener(
+      CHAT_TRANSCRIPT_LOADING_CHANGED_EVENT,
+      this.synchronizeForegroundTranscript,
+    );
+    this.context?.connectionBootstrap.setForegroundPane(this, null);
     this.hiddenUpdateResume?.();
     document.removeEventListener("visibilitychange", this.handleVisibilityChange);
     super.disconnectedCallback();
@@ -146,6 +156,8 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   // Empty means unresolved route data: boot on the page state's default session
   // without canonicalizing until the container supplies a real key.
   @property({ attribute: false }) sessionKey = "";
+  // This session-keyed pane retains its initial skeleton through URL canonicalization.
+  @property({ attribute: false }) routeLoadingSkeleton = false;
   @property({ attribute: false }) agentId?: string;
   @property({ attribute: false }) inputRegion: ChatInputRegion = "page";
   @property({ attribute: false }) compact = false;
@@ -200,6 +212,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     this.requestUpdate("presented", previous);
     this.presentedChanged(value);
     this.notifyConversationPresentation(wasConversationPresented);
+    this.synchronizeForegroundTranscript();
   }
   protected presentedChanged(_presented: boolean): void {}
   /** True while the authoritative transcript for this pane is still being fetched. */
@@ -209,9 +222,29 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   }
   /** The initial authoritative transcript has a visible result, including errors. */
   get transcriptReady(): boolean {
+    if (!this.state?.connected || this.state.client !== this.context?.gateway.snapshot.client) {
+      return false;
+    }
     const phase = this.state ? getChatHistoryLoadState(this.state).phase : "idle";
     return phase === "committed" || phase === "failed";
   }
+  protected readonly synchronizeForegroundTranscript = () => {
+    this.context?.connectionBootstrap.setForegroundPane(
+      this,
+      this.state &&
+        this.isConnected &&
+        this.selected &&
+        this.presented &&
+        this.inputRegion === "page"
+        ? {
+            sessionKey: resolveChatSnapshotKey(this.state, { sessionKey: this.state.sessionKey }),
+            client: this.state.client,
+            // Established history stays authoritative during live-event reconciliation.
+            ready: this.transcriptReady || getAcceptedChatHistorySession(this.state) !== undefined,
+          }
+        : null,
+    );
+  };
   protected get headerOutcomeOwner(): string {
     return `${this.connectionGeneration}:${this.headerPresentationGeneration}`;
   }
@@ -236,6 +269,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     this.activeValue = value;
     this.requestUpdate("active", previous);
     this.activeChanged(this.active);
+    this.synchronizeForegroundTranscript();
   }
   protected activeChanged(_active: boolean): void {}
   // Call wherever connectionGeneration itself advances (reconnect, capability
@@ -270,8 +304,6 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   @property({ attribute: false }) narrow = false;
   @property({ attribute: false }) mergedChrome = false;
   @property({ attribute: false }) navDrawerOpen = false;
-  @property({ attribute: false }) nativeGateways?: NativeGatewaysCapability | null;
-  @property({ attribute: false }) gatewaysSnapshot?: NativeGatewaysSnapshot | null;
   @property({ attribute: false }) onboarding = false;
   @property({ attribute: false }) onOpenSplitView?: () => void;
   @property({ attribute: false }) onSplitDown?: (paneId: string) => void;
@@ -287,7 +319,6 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     onViewportResize: () => this.chatState.handleTranscriptResize(),
     onReaderScroll: () => this.state && handleChatScrollTakeover(this.state),
   });
-  protected readonly taskSidebarTranscript = new ChatTranscriptController(this);
   protected readonly progressCard = new SessionProgressCardController(this, {
     gateway: () => this.context?.gateway,
     target: () => {
@@ -535,6 +566,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   protected readonly typingTimers = new Map<string, number>();
   protected sessionPullRequests: ControlUiSessionPullRequest[] = [];
   protected sessionPullRequestsBranch: ControlUiSessionBranch | undefined;
+  protected githubRepo: MarkdownRenderOptions["githubRepo"] = null;
   protected sessionPullRequestsRateLimited = false;
   protected sessionPullRequestsExpanded = false;
   protected githubPublication: GitHubPublicationBinding | null = null;

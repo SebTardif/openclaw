@@ -7,6 +7,7 @@ import type {
   SessionsCatalogReadParams,
   SessionsCatalogReadResult,
 } from "../../packages/gateway-protocol/src/schema/sessions-catalog.js";
+import type { TerminalUploadPathStyle } from "../../packages/gateway-protocol/src/schema/terminal.js";
 import { listAgentIds, resolveSessionAgentIds } from "../agents/agent-scope.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -90,6 +91,8 @@ export type SessionCatalogTerminalPlan =
       paramsJSON: string;
       cwd?: string;
       title?: string;
+      /** Opt in only for native CLI text input, never for a shell receiver. */
+      uploadPathStyle?: TerminalUploadPathStyle;
     };
 
 export type SessionCatalogCreateTarget = {
@@ -184,8 +187,8 @@ type SessionCatalogCreateParams = {
 export type SessionCatalogProvider = {
   id: string;
   label: string;
-  /** Provider rows are Gateway-hosted artifacts visible to authenticated operators. */
-  audience?: "gateway-operators";
+  /** Gateway artifacts are shared with all operators; remote publications follow session-viewing roles. */
+  audience?: "gateway-operators" | "session-viewers";
   /** Closed plugin-owned route contract; invalid or colliding declarations are not projected. */
   shareRoute?: SessionCatalogShareRoute;
   /** Declares that every HOME-sensitive action honors the host isolation policy. */

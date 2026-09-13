@@ -2,15 +2,41 @@
 
 The Linux companion is a Tauri v2 desktop shell for local and remote OpenClaw Gateways. It discovers nearby Gateways over Bonjour, installs the CLI when local setup needs it, delegates local Gateway service management to `openclaw gateway`, opens the selected Gateway's Control UI, and stays available in the system tray.
 
-Dashboard widgets load inside the app. Sign-in links and external links opened in a new window use your system browser.
+Dashboard widgets and browser panels load inside the app. Browser tabs belong to their conversation and support back, forward, reload, stop, snapshots, element inspection, and saving the current page or asset. Opening the same address in a conversation reuses its tab; other conversations keep their own tabs. Popups opened by a browser tab stay in that conversation.
+
+Reading tabs share a private browser session, isolated from the dashboard's native commands and authentication scripts. Closing every reading tab, switching Gateways, or quitting the app ends that private session. Reloading the dashboard retains its tabs. Sign-in links and **Open in browser** continue to use your system browser.
 
 The tray's **Stop Gateway** and **Restart Gateway** actions request graceful shutdown. Running work can delay completion; **Start Gateway** brings a stopped local Gateway back online.
+
+After a connection drops, the companion keeps reconnecting while the service state is unknown. **Start Gateway** remains available only for a confirmed stopped service.
+
+The companion uses a unified title bar that blends into the dashboard. Drag the
+empty header space, a session title, or the thin strip below the top resize edge
+to move the window. Double-click those areas to maximize or restore it; buttons
+and editable content keep their normal behavior. The window edges still resize.
+Linux and Windows builds place minimize, maximize/restore, and close at the top
+right. macOS test builds retain native traffic lights at the top left. Closing
+the main window keeps the companion in the tray; closing a separate discovered
+Gateway window closes that window.
+While a page loads, redirects outside the dashboard, or opens a modal dialog,
+Linux and Windows keep the system title bar available until the companion's
+controls can receive input again.
+Dashboards opt into the unified title bar only when their UI supports its layout
+and modal handling. Older Gateways keep the system title bar and their existing
+dashboard controls; update the Gateway to enable the unified layout.
 
 Published AMD64 AppImages are built on Ubuntu 22.04 and require glibc 2.35 or
 newer plus a `libstdc++` that provides `GLIBCXX_3.4.30`. Ubuntu 22.04 and
 Debian 12 meet that ABI floor. RHEL 9 and Rocky Linux 9 ship glibc 2.34, so
 they cannot run the published AppImage. Extraction does not bypass this
 requirement.
+
+## Omarchy
+
+The optional Omarchy 4 bar plugin provides agents, sessions, and quick prompts.
+With the matching desktop app running, it uses the app’s selected Gateway and
+keeps a single visible OpenClaw icon. See [Omarchy support](https://docs.openclaw.ai/platforms/omarchy)
+for installation, app handoff, shortcuts, and troubleshooting.
 
 ## Linux prerequisites
 
@@ -66,6 +92,75 @@ The app uses `OPENCLAW_DESKTOP_CLI` when set. Otherwise it checks `~/.openclaw/b
 
 Desktop notifications use each platform's system notification service. macOS 13+ uses Apple's User Notifications framework; Windows uses native system toasts and Linux uses the desktop notification service through `notify-rust`. On macOS, test notifications from a signed `.app` bundle: a direct `cargo run` stays unbundled, so the app disables notifications instead of initializing Apple's framework with no bundle identity.
 
+### Inline browser live regression on Linux
+
+The existing first-run driver also exercises real native WebKit browser views
+against a synthetic Gateway. In addition to the driver's AT-SPI, Xvfb, and D-Bus
+packages, install `xdotool` for pointer input. With an unbundled development binary:
+
+```bash
+xvfb-run -a -s '-screen 0 1280x1024x24' dbus-run-session -- \
+  /usr/bin/python3 apps/linux/tests/first_run.py \
+  apps/linux/src-tauri/target/debug/openclaw-desktop --inline-browser
+```
+
+This scenario checks real pointer input to the dashboard and native child,
+element inspection, PNG snapshots, navigation history, and dashboard reload
+persistence. It then uses the app's dashboard deep link to replace the dashboard
+in the same process and verifies that a new browser tab works, saves the fixture
+bytes through the native chooser, and cancels a second save. The driver owns
+an isolated temporary HOME, loopback fixture, and read-only fixture CLI; no real
+Gateway or account is used. Add `--artifacts-dir DIRECTORY` to retain native
+screenshots and JSON results
+outside the repository. Screenshot capture also requires ImageMagick.
+
+### Inline browser live regression on Windows
+
+Start an isolated candidate app with a loopback WebView2 debugging endpoint and
+load its loopback Gateway dashboard. Once the dashboard is ready, run this from
+the repository root using the repository's supported Node version:
+
+```powershell
+node apps/linux/scripts/test-inline-browser.mjs --endpoint http://127.0.0.1:9223
+```
+
+The script uses the real dashboard bridge and native child WebViews. It serves
+synthetic pages on a separate loopback port and checks navigation, SPA history,
+conversation ownership and deduplication, popups, shared browser cookies,
+presentation scopes, snapshots, element inspection, dashboard reload persistence,
+and cleanup. It does not launch the app, change Gateway settings, or contact
+external sites. It closes only the tabs and scopes created by its run.
+
+Use `--dashboard-url http://127.0.0.1:PORT/` to select the candidate dashboard when
+multiple local dashboards are open. JSON results and PNG snapshots go to a unique
+OS temporary directory; `--output DIRECTORY` selects another proof location.
+Keep these generated proofs outside the repository.
+
+Add `--hold` to retain the synthetic pages for native screenshots and save-dialog
+checks. Create the printed `continue` file or press Ctrl+C to finish cleanup.
+Native visibility and download dialogs still need this UI verification; the
+automated scope checks verify the child viewport dimensions and retained tabs.
+The script exits nonzero on assertion or cleanup failure. `--help` describes all
+options without connecting to the app.
+
+### Native title bar regression on Linux
+
+The first-run driver can exercise window movement and controls through real X11
+pointer input. Install `openbox`, `wmctrl`, `xdotool`, `x11-utils`, and
+ImageMagick alongside the driver's Xvfb, D-Bus, and AT-SPI dependencies, then run:
+
+```bash
+xvfb-run -a -s '-screen 0 1440x1000x24' dbus-run-session -- \
+  /usr/bin/python3 apps/linux/tests/first_run.py \
+  apps/linux/src-tauri/target/debug/openclaw-desktop --window-chrome \
+  --artifacts-dir /tmp/openclaw-window-chrome-proof
+```
+
+The driver creates an isolated HOME and desktop session. It checks drag geometry,
+double-click maximize/restore, caption buttons, corner resizing, and closing to
+the tray. Screenshots and observed window geometry remain in the artifact
+directory. This X11 proof does not replace testing a Wayland compositor.
+
 ## First-run setup
 
 The welcome screen explains what OpenClaw can do and asks where your assistant
@@ -94,13 +189,22 @@ to loopback when possible. See the
 [remote access guide](https://docs.openclaw.ai/gateway/remote) for Gateway
 authentication and network requirements.
 
+Use **Connection Settings** in the native tray menu to edit a remote connection.
+Opening settings reads only the saved address and transport settings; it does not
+resolve credentials, and token and password fields stay empty. **Retry** reconnects
+to the saved remote Gateway with freshly resolved credentials without rewriting
+configuration or installing or starting a local service. Opening the remote
+dashboard does not prove Gateway availability or successful authentication; check
+the dashboard for HTTP errors, authentication prompts, and Gateway readiness.
+
 After connecting, Model Setup discovers AI access available to the selected
 Gateway and shows it as a choice. Discovery never imports or copies an account,
 and the companion never selects, tests, installs, or saves a provider until you
 click its action. The list includes supported installed providers and official
 provider plugins available from OpenClaw's managed plugin catalog. Installing a
-provider plugin shows its capabilities for review and continues directly to
-that provider's authentication form. Successful verification may require a
+official provider plugin continues directly to that provider's authentication
+form without a capability approval prompt. Other plugins require capability
+review before installation. Successful verification may require a
 Gateway restart before the new model becomes available.
 
 The custom endpoint option supports OpenAI- and Anthropic-compatible services.
@@ -133,6 +237,11 @@ the additional sign-in options.
 ## Updates
 
 The companion checks the latest GitHub release shortly after launch and from **Check for Updates** in the tray menu. AppImage installs download and verify the signed update in place, then wait for **Restart to update**. Package-managed installs such as `.deb` stay owned by the system package manager and link to the release download page instead of replacing installed files. The macOS and Windows test builds use a separate opt-in desktop-test update channel; macOS self-updates like the AppImage build, while Windows downloads the update first and runs its installer only after **Restart to update**.
+
+While a newer Gateway release waits for its Linux app, the latest release keeps
+the previous published Linux updater manifest. Its original version, signature,
+and download URL stay intact. Successful Linux publication advances that
+manifest without letting an older build replace a newer available update.
 
 ## Quick Chat widgets
 
@@ -195,8 +304,11 @@ Bundles land in `target/release/bundle/{deb,appimage}/`.
 
 The `Linux App` workflow checks affected pull requests with Rust formatting,
 `cargo test --locked --all-targets` on Linux and macOS, and the packaged runtime
-ABI scanner's unit tests. These checks compile, link, and run the native tests;
-they do not build bundles or run graphical first-run and AppImage runtime checks.
+ABI scanner's unit tests. It also runs the native Linux inline browser smoke
+under Xvfb, including pointer input, snapshots, dashboard replacement, and native
+save/cancel, and uploads the synthetic screenshots and JSON results as the
+`linux-inline-browser` proof artifact. Bundles, the full graphical first-run
+scenarios, and AppImage runtime checks remain manual dispatch checks.
 
 Manually dispatch `Linux App` on the branch to validate packaging before a
 release. It retains all pull-request checks, builds the `.deb` and AppImage,
@@ -206,7 +318,14 @@ validation does not publish a release.
 
 ## Releases
 
-Manually dispatch `Linux App Release Request` from `main`. Provide the existing
+Regular stable publication automatically requests Linux bundles after the
+GitHub release becomes visible. `OpenClaw Release Publish` and `OpenClaw Release
+Button` both use the same Linux release owner; the request can finish before
+the build, signing, and publication do. Their summaries report Linux as pending
+until its own assets verify. Beta and alpha prereleases, and extended-stable
+publication, do not request Linux bundles.
+
+For independent recovery, manually dispatch `Linux App Release Request` from `main`. Provide the existing
 stable release tag in `tag`; prerelease tags are rejected because their semver
 suffix breaks Debian upgrade ordering. Enable the optional
 `desktop-test-bundles` input only when unsigned macOS and Windows test bundles
@@ -217,3 +336,14 @@ the validated release tag SHA and attaches the bundles to that tag's GitHub
 release with a `SHA256SUMS.linux-app.txt` checksum file. The tag commit must be
 reachable from `main` or its matching `release/YYYY.M.PATCH` branch; numeric
 correction tags use the base version's release branch.
+
+Linux release requests run one at a time. Default Linux-only retries verify and
+reuse an existing complete AppImage, Debian package, signed updater manifest,
+and checksum set. Partial or mismatched existing assets require targeted
+publication recovery; the workflow does not rebuild or overwrite them. An
+optional desktop-test run also refuses to replace published Linux bytes, so
+recover missing desktop assets separately when Linux has already published.
+
+The website selects desktop assets at build time. After publication, rebuild
+`openclaw.ai` through its existing deployment owner and verify the deployed Apps
+card's Linux version and both download links.

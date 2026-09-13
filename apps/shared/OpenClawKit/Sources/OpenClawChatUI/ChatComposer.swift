@@ -65,7 +65,19 @@ struct OpenClawChatComposerPresentationOwner: Equatable {
 
 @MainActor
 struct OpenClawChatComposer: View {
+    private enum ModelSignInAction {
+        case open
+        case refresh
+    }
+
+    private struct ModelSignInRequest {
+        let id = UUID()
+        let action: ModelSignInAction
+    }
+
     @Environment(\.openClawChatDesktopLayout) private var isDesktopLayout
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Bindable var viewModel: OpenClawChatViewModel
     let style: OpenClawChatView.Style
     let showsSessionSwitcher: Bool
@@ -87,6 +99,9 @@ struct OpenClawChatComposer: View {
     @State private var slashPanelHeight: CGFloat = 0
     @State private var slashHighlightIndex = 0
     @State var dictationTask: Task<Void, Never>?
+    @State private var signInContext: OpenClawChatModelSignInContext?
+    @State private var modelSignInRequest: ModelSignInRequest?
+    @State private var modelSignInTask: Task<Void, Never>?
     #if !os(macOS)
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showsPhotoPicker = false
@@ -106,7 +121,133 @@ struct OpenClawChatComposer: View {
     @ScaledMetric(relativeTo: .body) private var scaledBodyLineHeight: CGFloat = 22
 
     var body: some View {
-        self.lifecycleComposer
+        VStack(alignment: .leading, spacing: 4) {
+            if self.usesDesktopModelMenu,
+               let message = self.viewModel.composerModelAvailabilityMessage
+            {
+                HStack(alignment: .center, spacing: 10) {
+                    Image(systemName: "key.fill")
+                        .foregroundStyle(OpenClawChatTheme.warning)
+                        .accessibilityHidden(true)
+                    Text(message)
+                        .font(OpenClawChatTypography.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .help(message)
+                    Spacer(minLength: 0)
+                    self.modelSignInButton
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .fixedSize()
+                    Button {
+                        self.performModelSignInAction(.refresh)
+                    } label: {
+                        if self.modelSignInAction == .refresh {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Retry").font(OpenClawChatTypography.caption)
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(self.modelSignInAction != nil)
+                    .accessibilityLabel("Retry")
+                    .accessibilityIdentifier("chat-composer-retry-model-sign-in")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("chat-composer-model-sign-in-notice")
+            }
+            self.lifecycleComposer
+            if self.viewModel.modelCatalogMessage != nil || !self.usesDesktopModelMenu {
+                HStack {
+                    if let message = self.viewModel.modelCatalogMessage {
+                        Text(message).font(OpenClawChatTypography.caption)
+                    }
+                    Spacer()
+                    if !self.usesDesktopModelMenu {
+                        self.modelSignInButton
+                    }
+                }
+                .foregroundStyle(.secondary)
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { self.signInContext != nil },
+            set: { if !$0 { self.signInContext = nil } }))
+        {
+            if let context = self.signInContext {
+                OpenClawChatModelSignInSheet(context: context) { await self.viewModel.refreshModelSignIn() }
+            }
+        }
+        .onChange(of: self.presentationOwner) { _, _ in
+                self.invalidateModelSignIn()
+            }
+            .onDisappear { self.invalidateModelSignIn() }
+    }
+
+    var usesDesktopModelMenu: Bool {
+        #if os(macOS)
+        self.isDesktopLayout && self.composerChrome == .clean
+        #else
+        false
+        #endif
+    }
+
+    var modelSignInButton: some View {
+        Button {
+            self.performModelSignInAction(.open)
+        } label: {
+            HStack(spacing: 6) {
+                if self.modelSignInAction == .open {
+                    ProgressView().controlSize(.small)
+                }
+                Text("Model sign-in").font(OpenClawChatTypography.caption)
+            }
+        }
+        .disabled(self.modelSignInAction != nil)
+        .accessibilityIdentifier("chat-model-sign-in")
+    }
+
+    private func performModelSignInAction(_ action: ModelSignInAction) {
+        guard self.modelSignInAction == nil else { return }
+        let owner = self.presentationOwner
+        let request = ModelSignInRequest(action: action)
+        self.modelSignInRequest = request
+        self.modelSignInTask = Task {
+            defer {
+                if self.modelSignInRequest?.id == request.id {
+                    self.modelSignInRequest = nil
+                    self.modelSignInTask = nil
+                }
+            }
+            guard !Task.isCancelled,
+                  self.modelSignInRequest?.id == request.id,
+                  self.presentationOwner == owner
+            else { return }
+            switch action {
+            case .open:
+                let context = await self.viewModel.modelSignInContext()
+                guard !Task.isCancelled,
+                      self.modelSignInRequest?.id == request.id,
+                      self.presentationOwner == owner
+                else { return }
+                self.signInContext = context
+            case .refresh:
+                await self.viewModel.refreshModelSignIn()
+            }
+        }
+    }
+
+    private var modelSignInAction: ModelSignInAction? {
+        self.modelSignInRequest?.action
+    }
+
+    private func invalidateModelSignIn() {
+        self.modelSignInRequest = nil
+        self.modelSignInTask?.cancel()
+        self.modelSignInTask = nil
+        self.signInContext = nil
     }
 
     private var styledComposer: some View {
@@ -392,13 +533,13 @@ struct OpenClawChatComposer: View {
                         }
                         #if os(macOS)
                         self.verbosityPicker.labelsHidden()
-                        if self.viewModel.selectedModelSupportsFastMode {
+                        if self.viewModel.showsFastModeControls {
                             self.fastModeToggle.labelsHidden()
                         }
                         #endif
                     }
                     if self.viewModel.showsModelPicker {
-                        self.modelPicker.labelsHidden()
+                        self.modelPicker
                         if self.viewModel.modelSelectionID != OpenClawChatViewModel.defaultModelSelectionID {
                             self.modelPinButton
                         }
@@ -612,10 +753,10 @@ struct OpenClawChatComposer: View {
 
     #if os(macOS)
     private var desktopEditor: some View {
-        VStack(alignment: .leading, spacing: CleanChatComposerMetrics.rowGap) {
+        VStack(alignment: .leading, spacing: 0) {
             self.editorOverlay
                 .padding(.horizontal, CleanChatComposerMetrics.editorInlineInset)
-                .padding(.top, 10)
+                .padding(.top, 4)
 
             HStack(alignment: .center, spacing: 0) {
                 self.cleanLeadingControls
@@ -626,7 +767,7 @@ struct OpenClawChatComposer: View {
             .menuStyle(.button)
             .buttonStyle(.plain)
             .padding(.horizontal, CleanChatComposerMetrics.footerInlineInset)
-            .padding(.bottom, CleanChatComposerMetrics.footerBlockInset)
+            .padding(.bottom, 2)
         }
     }
     #endif
@@ -693,6 +834,7 @@ struct OpenClawChatComposer: View {
 
     var editorOverlay: some View {
         ZStack(alignment: editorOverlayAlignment) {
+            #if !os(macOS)
             if self.viewModel.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text(self.placeholderText)
                     .font(OpenClawChatTypography.body)
@@ -700,12 +842,17 @@ struct OpenClawChatComposer: View {
                     .padding(.horizontal, self.cleanFieldTextInset)
                     .padding(.vertical, self.composerChrome == .clean ? 0 : 4)
             }
+            #endif
 
             #if os(macOS)
             ChatComposerTextView(
                 text: self.$viewModel.input,
                 shouldFocus: self.$shouldFocusTextView,
                 isEnabled: self.isComposerEnabled,
+                placeholder: self.placeholderText,
+                textColor: self.isDesktopLayout
+                    ? NSColor(OpenClawChatTheme.desktopText(in: self.colorScheme, contrast: self.colorSchemeContrast))
+                    : .textColor,
                 minHeight: self.textMinHeight,
                 maxHeight: self.textMaxHeight,
                 onSend: {
@@ -719,7 +866,7 @@ struct OpenClawChatComposer: View {
                     self.handleComposerKeyCommand(command, context: context)
                 })
                 .padding(.horizontal, 4)
-                .padding(.vertical, 3)
+                .padding(.vertical, self.usesDesktopModelMenu ? 0 : 3)
                 .onChange(of: self.viewModel.input) { _, _ in
                     self.updateSlashPopoverPresentation()
                 }
@@ -1142,7 +1289,7 @@ extension OpenClawChatComposer {
 
     var textMinHeight: CGFloat {
         #if os(macOS)
-        if self.isDesktopLayout { return 44 }
+        if self.usesDesktopModelMenu { return self.scaledBodyLineHeight }
         #endif
         let base: CGFloat = if self.style == .onboarding {
             24
@@ -1177,7 +1324,7 @@ extension OpenClawChatComposer {
     }
 
     var cleanControlHeight: CGFloat {
-        CleanChatComposerMetrics.controlTouchSize
+        self.usesDesktopModelMenu ? 32 : CleanChatComposerMetrics.controlTouchSize
     }
 
     private var cleanCornerRadius: CGFloat {

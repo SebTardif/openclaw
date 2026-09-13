@@ -7,12 +7,10 @@ import {
   MAX_DATE_TIMESTAMP_MS,
   MAX_TIMER_TIMEOUT_MS,
 } from "@openclaw/normalization-core/number-coercion";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const callGatewayMock = vi.fn();
-vi.mock("../gateway/call.js", () => ({
-  callGateway: (opts: unknown) => callGatewayMock(opts),
-}));
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import * as gatewayCallRuntime from "../gateway/call.js";
+const callGatewayMock = vi.spyOn(gatewayCallRuntime, "callGateway");
+afterAll(() => callGatewayMock.mockRestore());
 
 import {
   readLatestAssistantReply,
@@ -20,6 +18,7 @@ import {
   waitForAgentRunsToDrain,
   waitForAgentRunReply,
 } from "./run-wait.js";
+import { textAssistant } from "./test-helpers/sparse-transcript.test-support.js";
 
 type AgentWaitGatewayRequest = {
   method?: string;
@@ -79,10 +78,7 @@ describe("readLatestAssistantReply", () => {
   it("returns the most recent assistant message when compaction markers trail history", async () => {
     callGatewayMock.mockResolvedValue({
       messages: [
-        {
-          role: "assistant",
-          content: [{ type: "text", text: "All checks passed and changes were pushed." }],
-        },
+        textAssistant("All checks passed and changes were pushed."),
         { role: "toolResult", content: [{ type: "text", text: "tool output" }] },
         { role: "system", content: [{ type: "text", text: "Compaction" }] },
       ],

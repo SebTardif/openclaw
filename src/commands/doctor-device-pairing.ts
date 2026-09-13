@@ -7,7 +7,6 @@ import { quoteCliArg } from "../cli/quote-cli-arg.js";
 import { resolveStateDir } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { HealthFinding } from "../flows/health-checks.js";
-import { callGateway } from "../gateway/call.js";
 import { loadDeviceAuthTokens } from "../infra/device-auth-store.js";
 import { loadDeviceIdentityIfPresent } from "../infra/device-identity.js";
 import {
@@ -126,7 +125,9 @@ async function loadDoctorPairingSnapshot(params: {
 }): Promise<DoctorPairingSnapshot | null> {
   if (params.healthOk) {
     try {
-      const payload = await callGateway<GatewayDevicePairingPayload>({
+      const { bindAgentToolGatewayRequest } = await import("../agents/tools/in-process-gateway.js");
+      const requestGateway = bindAgentToolGatewayRequest({ hostedOnly: true });
+      const payload = await requestGateway<GatewayDevicePairingPayload>({
         method: "device.pair.list",
         timeoutMs: 5_000,
         config: params.cfg,
@@ -361,13 +362,14 @@ function collectPairedRecordIssues(snapshot: DoctorPairingSnapshot): PairedRecor
           allowedScopes: approvedScopes,
         })
       ) {
+        const recoveryCommand = role === "node" ? `${rotateCommand} --no-scopes` : rotateCommand;
         issues.push({
           kind: "token-outside-approved-scope",
           deviceId: device.deviceId,
           deviceLabel,
           role,
-          message: `Paired device ${deviceLabel} has a ${role} token outside the approved scope baseline [${formatScopes(approvedScopes)}]. Rotate it with ${rotateCommand}.`,
-          fixHint: `Rotate it with ${rotateCommand}.`,
+          message: `Paired device ${deviceLabel} has a ${role} token outside the approved scope baseline [${formatScopes(approvedScopes)}]. Rotate it with ${recoveryCommand}.`,
+          fixHint: `Rotate it with ${recoveryCommand}.`,
         });
       }
     }

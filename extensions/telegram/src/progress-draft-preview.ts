@@ -18,11 +18,25 @@ import {
 import { markdownToTelegramRichBlocks } from "./rich-blocks.js";
 import { buildTelegramRichBlocksPlan } from "./rich-message.js";
 
+function isTelegramProgressPriorityLine(line: ChannelProgressDraftCompositorLine): boolean {
+  if (typeof line === "string") {
+    return false;
+  }
+  const status = line.status?.toLowerCase();
+  return (
+    line.kind === "approval" || status === "failed" || status === "error" || status === "blocked"
+  );
+}
+
 // Each row has one content decision; both Telegram transports use that row.
 type ProgressText = { html: string; rich: RichText };
 
-function literalProgressText(text: string, style?: "bold" | "italic"): ProgressText {
+function literalProgressText(text: string, style?: "bold" | "italic" | "code"): ProgressText {
   const escaped = escapeTelegramHtml(text);
+  if (style === "code") {
+    // Telegram also detects bare URLs in HTML text; code entities keep prepared notes inert.
+    return { html: `<code>${escaped}</code>`, rich: { type: "code", text } };
+  }
   return style === "bold"
     ? { html: `<b>${escaped}</b>`, rich: boldRichText(text) }
     : style === "italic"
@@ -71,7 +85,7 @@ function progressLineText(
 
 export function renderTelegramProgressDraftPreview(
   snapshot: ChannelProgressDraftCompositorSnapshot,
-  options: { richMessages: boolean; maxLines: number; maxLineChars: number },
+  options: { richMessages: boolean; maxLines: number; maxLineChars: number; toolProgress: boolean },
 ): TelegramDraftPreview {
   const { maxLines, maxLineChars } = options;
   const activity =
@@ -83,13 +97,16 @@ export function renderTelegramProgressDraftPreview(
             !line.id?.startsWith("commentary:"),
         )
       : snapshot.lines;
-  const attention = activity.filter(isChannelProgressAttentionLine);
+  const isPriorityLine = options.toolProgress
+    ? isTelegramProgressPriorityLine
+    : isChannelProgressAttentionLine;
+  const attention = activity.filter(isPriorityLine);
   const checklist = selectPlanChecklistSteps(snapshot.plan ?? [], {
     maxLines: maxLines - attention.length,
   });
   const checklistLines = checklist.steps.length + (checklist.summary ? 1 : 0);
   const lineBudget = Math.max(0, maxLines - checklistLines);
-  const lines = [...activity.filter((line) => !isChannelProgressAttentionLine(line)), ...attention];
+  const lines = [...activity.filter((line) => !isPriorityLine(line)), ...attention];
   const visibleLines = lineBudget ? lines.slice(-lineBudget) : [];
   const diffStat =
     visibleLines.length + checklistLines < maxLines
@@ -109,11 +126,11 @@ export function renderTelegramProgressDraftPreview(
     addParagraph(literalProgressText(compactChannelProgressDraftLine(label, maxLineChars), "bold"));
   }
   if (snapshot.statusHeadline) {
-    const status = markdownProgressText(
-      compactChannelProgressDraftLine(snapshot.statusHeadline, maxLineChars),
-    );
+    const text = compactChannelProgressDraftLine(snapshot.statusHeadline, maxLineChars);
+    const plain = snapshot.statusHeadlineFormat === "plain";
+    const status = plain ? literalProgressText(text, "code") : markdownProgressText(text);
     addParagraph(
-      label
+      label || plain
         ? status
         : {
             html: `<b>${status.html}</b>`,

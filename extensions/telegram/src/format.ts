@@ -3,7 +3,9 @@ import type { MarkdownTableMode } from "openclaw/plugin-sdk/config-contracts";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   FILE_REF_EXTENSIONS_WITH_TLD,
+  findCodeRegions,
   isAutoLinkedFileRef,
+  isInsideCode,
   markdownToIR,
   type MarkdownLinkSpan,
   type MarkdownIR,
@@ -27,12 +29,8 @@ export function escapeTelegramHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function escapeHtml(text: string): string {
-  return escapeTelegramHtml(text);
-}
-
 function escapeHtmlAttr(text: string): string {
-  return escapeHtml(text).replace(/"/g, "&quot;");
+  return escapeTelegramHtml(text).replace(/"/g, "&quot;");
 }
 
 function isTelegramRichLinkHref(href: string): boolean {
@@ -90,7 +88,7 @@ function buildTelegramCodeBlockOpen(span: { language?: string }): string {
 
 function renderTelegramHtml(ir: MarkdownIR): string {
   return renderTelegramMarkdownIR(ir, {
-    escapeText: escapeHtml,
+    escapeText: escapeTelegramHtml,
     buildLink: buildTelegramLink,
     buildCodeBlockOpen: buildTelegramCodeBlockOpen,
   });
@@ -112,14 +110,8 @@ function isTelegramListBoundaryLine(line: string): boolean {
   return /^[ \t]*(?:\d+\.|#{1,6})[ \t]+\S/.test(line);
 }
 
-function isMarkdownIndentedCodeLine(line: string): boolean {
-  return /^(?: {4}|\t)/.test(line);
-}
-
 function shouldPreserveTelegramListBoundarySpacing(previous: string, next: string): boolean {
   return (
-    !isMarkdownIndentedCodeLine(previous) &&
-    !isMarkdownIndentedCodeLine(next) &&
     isTelegramBulletLine(previous) &&
     isTelegramListBoundaryLine(next) &&
     leadingWhitespaceLength(next) <= leadingWhitespaceLength(previous)
@@ -127,25 +119,25 @@ function shouldPreserveTelegramListBoundarySpacing(previous: string, next: strin
 }
 
 function preserveTelegramListBoundarySpacing(markdown: string): string {
-  const lines = markdown.split("\n");
-  const out: string[] = [];
-  let inFence = false;
+  // Preserve literal fence examples and indented code when separating prose lists.
+  let codeRegions: ReturnType<typeof findCodeRegions> | undefined;
   let previousLine = "";
-
-  for (const line of lines) {
-    const normalizedLine = line.replace(/\r$/, "");
-    const isFenceLine = /^[ \t]*(?:```|~~~)/.test(normalizedLine);
-    if (!inFence && shouldPreserveTelegramListBoundarySpacing(previousLine, normalizedLine)) {
-      out.push("");
-    }
-    out.push(line);
-    if (isFenceLine) {
-      inFence = !inFence;
-    }
-    previousLine = normalizedLine;
-  }
-
-  return out.join("\n");
+  let previousOffset = 0;
+  let offset = 0;
+  return markdown
+    .split("\n")
+    .map((line) => {
+      const normalizedLine = line.replace(/\r$/, "");
+      const insertBoundary =
+        shouldPreserveTelegramListBoundarySpacing(previousLine, normalizedLine) &&
+        !isInsideCode(previousOffset, (codeRegions ??= findCodeRegions(markdown))) &&
+        !isInsideCode(offset, codeRegions);
+      previousLine = normalizedLine;
+      previousOffset = offset;
+      offset += line.length + 1;
+      return insertBoundary ? `\n${line}` : line;
+    })
+    .join("\n");
 }
 
 function parseTelegramLegacyMarkdown(markdown: string, tableMode?: MarkdownTableMode): MarkdownIR {
@@ -324,7 +316,7 @@ function escapeUnsupportedTelegramHtml(
       const end = text.indexOf(">", index + 1);
       if (end !== -1) {
         const rawTag = text.slice(index, end + 1);
-        result += preserveTelegramHtmlTag(rawTag, openTags, escapeHtml, support);
+        result += preserveTelegramHtmlTag(rawTag, openTags, escapeTelegramHtml, support);
         index = end + 1;
       } else {
         result += "&lt;";
@@ -358,21 +350,6 @@ export function resolveTelegramHtmlVisibleText(html: string): string {
   return stripTelegramHtmlForPlainText(html);
 }
 
-function encodePlainTextForTelegramHtmlStrip(text: string): string {
-  return text.replace(/[&<>]/g, (char) => {
-    switch (char) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      default:
-        return char;
-    }
-  });
-}
-
 export function telegramHtmlToPlainTextFallback(html: string): string {
   const withPlainTables = html.replace(TELEGRAM_RICH_HTML_TABLE_PATTERN, (tableHtml) => {
     const rows = parseTelegramRichHtmlTableRows(tableHtml);
@@ -393,11 +370,9 @@ export function telegramHtmlToPlainTextFallback(html: string): string {
       ).trim();
       const label = stripTelegramHtmlForPlainText(labelHtml).trim();
       if (!href) {
-        return encodePlainTextForTelegramHtmlStrip(label);
+        return escapeTelegramHtml(label);
       }
-      return encodePlainTextForTelegramHtmlStrip(
-        !label || label === href ? href : `${label} (${href})`,
-      );
+      return escapeTelegramHtml(!label || label === href ? href : `${label} (${href})`);
     },
   );
   return stripTelegramHtmlForPlainText(withPlainLinks);
@@ -495,7 +470,7 @@ function wrapStandaloneFileRef(match: string, prefix: string, filename: string):
   if (/https?:\/\/$/i.test(prefix)) {
     return match;
   }
-  return `${prefix}<code>${escapeHtml(filename)}</code>`;
+  return `${prefix}<code>${escapeTelegramHtml(filename)}</code>`;
 }
 
 function wrapSegmentFileRefs(
@@ -509,7 +484,7 @@ function wrapSegmentFileRefs(
   }
   const wrappedStandalone = text.replace(getFileReferencePattern(), wrapStandaloneFileRef);
   return wrappedStandalone.replace(getOrphanedTldPattern(), (match, prefix: string, tld: string) =>
-    prefix === ">" ? match : `${prefix}<code>${escapeHtml(tld)}</code>`,
+    prefix === ">" ? match : `${prefix}<code>${escapeTelegramHtml(tld)}</code>`,
   );
 }
 
@@ -639,7 +614,7 @@ function renderTelegramRichHtmlRawTableFallback(
     rows.length > 0
       ? renderTelegramMonospaceGrid(rows)
       : stripTelegramHtmlForPlainText(tableHtml).trim();
-  return `<pre><code>${escapeHtml([caption, tableText].filter(Boolean).join("\n"))}</code></pre>\n\n`;
+  return `<pre><code>${escapeTelegramHtml([caption, tableText].filter(Boolean).join("\n"))}</code></pre>\n\n`;
 }
 
 type TelegramHtmlTag = {

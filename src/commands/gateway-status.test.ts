@@ -8,7 +8,10 @@ import type { inspectGatewayTlsCertificate as InspectGatewayTlsCertificate } fro
 import type { RuntimeEnv } from "../runtime.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { gatewayStatusCommand } from "./gateway-status.js";
-import { createSecretRefGatewayConfig } from "./gateway-status/test-support.js";
+import {
+  createUnreachableGatewayProbe,
+  createSecretRefGatewayConfig,
+} from "./gateway-status/test-support.js";
 
 const mocks = vi.hoisted(() => {
   const sshStop = vi.fn(async () => {});
@@ -81,7 +84,13 @@ const mocks = vi.hoisted(() => {
               linked: false,
               authAgeMs: null,
             },
-            sessions: { count: 0 },
+            sessions: {
+              paths: [],
+              count: 0,
+              defaults: { model: null, contextTokens: null },
+              recent: [],
+              byAgent: [],
+            },
           },
           presence: [
             {
@@ -128,7 +137,13 @@ const mocks = vi.hoisted(() => {
             linked: true,
             authAgeMs: 5_000,
           },
-          sessions: { count: 2 },
+          sessions: {
+            paths: [],
+            count: 2,
+            defaults: { model: null, contextTokens: null },
+            recent: [],
+            byAgent: [],
+          },
         },
         presence: [
           {
@@ -600,22 +615,9 @@ describe("gateway-status command", () => {
     const { runtime, runtimeLogs, runtimeErrors } = createRuntimeCapture();
     const defaultProbeGateway = probeGateway.getMockImplementation();
     try {
-      probeGateway.mockImplementation(async (opts: { url: string }) => ({
-        ok: false,
-        url: opts.url,
-        connectLatencyMs: null,
-        error: "connection refused",
-        close: null,
-        auth: {
-          role: null,
-          scopes: [],
-          capability: "unknown",
-        },
-        health: null,
-        status: null,
-        presence: null,
-        configSnapshot: null,
-      }));
+      probeGateway.mockImplementation(async (opts: { url: string }) =>
+        createUnreachableGatewayProbe(opts.url, "connection refused"),
+      );
 
       await expect(runGatewayStatus(runtime, { timeout: "1000", json: true })).rejects.toThrow(
         "__exit__:1",
@@ -760,22 +762,7 @@ describe("gateway-status command", () => {
           mockLocalTokenEnvRefConfig();
           probeGateway.mockImplementation(async (opts: { url: string }) => {
             const { url } = opts;
-            return {
-              ok: false,
-              url,
-              connectLatencyMs: null,
-              error: "connection refused",
-              close: null,
-              auth: {
-                role: null,
-                scopes: [],
-                capability: "unknown",
-              },
-              health: null,
-              status: null,
-              presence: null,
-              configSnapshot: null,
-            };
+            return createUnreachableGatewayProbe(url, "connection refused");
           });
           await expect(runGatewayStatus(runtime, { timeout: "1000", json: true })).rejects.toThrow(
             "__exit__:1",
@@ -920,7 +907,13 @@ describe("gateway-status command", () => {
           linked: true,
           authAgeMs: 1_000,
         },
-        sessions: { count: 1 },
+        sessions: {
+          paths: [],
+          count: 1,
+          defaults: { model: null, contextTokens: null },
+          recent: [],
+          byAgent: [],
+        },
       },
       presence: [
         {

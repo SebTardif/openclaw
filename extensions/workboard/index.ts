@@ -10,6 +10,7 @@ import {
   syncWorkboardAgentEnded,
   syncWorkboardSubagentEnded,
 } from "./src/lifecycle-sync.js";
+import { resolveWorkboardSqliteWorkerModuleUrl } from "./src/sqlite-store-paths.js";
 import { registerWorkboardStoreLifecycle } from "./src/store-lifecycle.js";
 import { WorkboardStore } from "./src/store.js";
 import { createWorkboardTools } from "./src/tools.js";
@@ -23,23 +24,27 @@ export default definePluginEntry({
   name: "Workboard",
   description: "Dashboard workboard for agent-owned issues and sessions.",
   register(api) {
-    const store = WorkboardStore.openSqlite();
+    const store = WorkboardStore.openSqlite(
+      resolveWorkboardSqliteWorkerModuleUrl(api.runtimeSource),
+    );
+    const resourceServices: Array<{ stop(): void | Promise<void> }> = [];
+    registerWorkboardStoreLifecycle(api, store, async () => {
+      await Promise.all(resourceServices.map(async (service) => await service.stop()));
+    });
     const changeEvents = createWorkboardChangeEventService(store);
+    resourceServices.push(changeEvents);
     const automationNudge = createWorkboardAutomationNudgeService({
       store,
       gateway: api.runtime.gateway,
     });
+    resourceServices.push(automationNudge);
     const lifecycleSync = createWorkboardLifecycleService({
       store,
       worktrees: api.runtime.worktrees,
       readSessions: async (options) =>
         await readWorkboardLifecycleSessions(api.runtime.gateway, options),
     });
-    registerWorkboardStoreLifecycle(api, store, () => {
-      changeEvents.stop();
-      automationNudge.stop();
-      lifecycleSync.stop();
-    });
+    resourceServices.push(lifecycleSync);
     api.session.controls.registerControlUiDescriptor({
       surface: "tab",
       id: "workboard",

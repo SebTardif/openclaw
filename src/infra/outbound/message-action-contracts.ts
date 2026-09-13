@@ -18,17 +18,21 @@ import type { OutboundMediaAccess } from "../../media/load-options.js";
 import type { GatewayClientMode, GatewayClientName } from "../../utils/message-channel.js";
 import type { OutboundDeliveryResult } from "./deliver-types.js";
 import type { OutboundSendDeps } from "./deliver.js";
-import type { DurableDeliveryCompletion } from "./delivery-completion.js";
+import type {
+  ConversationDeliveryTarget,
+  DurableDeliveryCompletion,
+} from "./delivery-completion.js";
 import type { MessageBroadcastAccountPlan } from "./message-account-selection.js";
 import type { MessageActionDeniedError } from "./message-action-denial.js";
+import type { OutboundMessageGatewayOptionsInput } from "./message-gateway-options.js";
 import type { MessagePollResult, MessageSendResult } from "./message.js";
 import type { OutboundMirror } from "./mirror.js";
 import type { ResolvedMessagingTarget } from "./target-resolver.js";
 
-export type MessageActionGateway = {
-  url?: string;
-  token?: string;
-  timeoutMs?: number;
+export type MessageActionGateway = Omit<
+  OutboundMessageGatewayOptionsInput,
+  "resolveAgentRuntimeIdentityToken"
+> & {
   resolveAgentRuntimeIdentityToken?: (context?: {
     sourceReplyFinal?: boolean;
     sourceReplyToolCallId?: string;
@@ -97,6 +101,8 @@ export type MessageActionInput = {
   deliveryIntentId?: string;
   /** @internal Serializable owner state finalized by live send or recovery. */
   deliveryCompletion?: DurableDeliveryCompletion;
+  /** @internal Captured conversation storage facts, excluded from plugins and durable payloads. */
+  conversationDeliveryTarget?: ConversationDeliveryTarget;
   /** @internal Runs after queue persistence and before platform I/O. */
   onDeliveryIntent?: (intent: DurableMessageSendIntent) => void;
   /** @internal Revalidates caller-owned authority before each durable adapter attempt. */
@@ -105,6 +111,8 @@ export type MessageActionInput = {
   onDeliveryResult?: (result: OutboundDeliveryResult) => Promise<void> | void;
   /** @internal Revalidates caller authority immediately before recipient-visible I/O. */
   onPlatformSendDispatch?: () => Promise<void>;
+  /** @internal Synchronously fence the live owner after waits and before platform I/O. */
+  assertDirectAdapterHandoff?: () => void;
   /** @internal Keep ephemeral-authority sends out of replayable recovery. */
   skipQueue?: boolean;
   /** @internal Runs when broadcast converts a typed target denial into result text. */

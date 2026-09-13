@@ -4,6 +4,7 @@
  * auth-backed availability.
  */
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { dedupeByKey } from "../shared/dedupe-by-key.js";
 import type {
   ModelAuthAvailabilityEvaluation,
   ModelAuthAvailabilityRef,
@@ -13,19 +14,19 @@ import {
   type ModelCatalogRoutePolicy,
   type ModelCatalogRouteProjection,
   projectModelCatalogEntryForRoute,
-  resolveConfiguredModelCatalogOverrides,
+  createConfiguredModelCatalogOverridesResolver,
 } from "./model-catalog-route.js";
 import type { ModelCatalogEntry } from "./model-catalog.js";
-import {
-  buildConfiguredModelCatalog,
-  dedupeModelCatalogEntries,
-  modelCatalogLogicalKey,
-} from "./model-selection-shared.js";
+import { dedupeModelCatalogEntries } from "./model-selection-shared.js";
 import {
   RUNTIME_MODEL_VISIBILITY_NORMALIZATION,
   createModelVisibilityPolicy,
   type ModelVisibilityPolicy,
 } from "./model-visibility-policy.js";
+import {
+  createModelCatalogIdentityKeyResolver,
+  resolveModelCatalogIdentityKey,
+} from "./openai-model-routes.js";
 
 type ModelCatalogVisibilityView = "default" | "configured" | "all";
 export type ModelCatalogAuthChecker = (
@@ -65,38 +66,15 @@ function sortModelCatalogEntries(entries: ModelCatalogEntry[]): ModelCatalogEntr
   return entries.toSorted(compareModelCatalogEntries);
 }
 
-function resolveLogicalKey(
-  entry: Pick<ModelCatalogEntry, "provider" | "id">,
-  routePolicy: ModelCatalogRoutePolicy,
-): string {
-  return routePolicy.resolveIdentity(entry)?.key ?? modelCatalogLogicalKey(entry);
-}
-
-function dedupeLogicalModelCatalogEntries(
-  entries: readonly ModelCatalogEntry[],
-  routePolicy: ModelCatalogRoutePolicy,
-) {
-  const seen = new Set<string>();
-  return entries.filter((entry) => {
-    const key = resolveLogicalKey(entry, routePolicy);
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
-}
-
 function isPickerVisibleCatalogEntry(
   entry: ModelCatalogEntry,
   configuredKeys: ReadonlySet<string>,
-  routePolicy: ModelCatalogRoutePolicy,
 ): boolean {
   // Deprecated and disabled rows stay selectable but are picker-hidden.
   // Exact configured refs always remain visible so pinned models never disappear.
   return (
     (entry.status !== "deprecated" && entry.status !== "disabled") ||
-    configuredKeys.has(resolveLogicalKey(entry, routePolicy))
+    configuredKeys.has(resolveModelCatalogIdentityKey(entry))
   );
 }
 
@@ -151,8 +129,7 @@ export async function prepareLogicalVisibleModelCatalog(
       agentId: params.agentId,
       ...RUNTIME_MODEL_VISIBILITY_NORMALIZATION,
     });
-  const keyOf = (entry: Pick<ModelCatalogEntry, "provider" | "id">) =>
-    resolveLogicalKey(entry, params.routePolicy);
+  const keyOf = resolveModelCatalogIdentityKey;
   const projectionCatalog = params.routeVariants?.length ? params.routeVariants : params.catalog;
   const routeVariantsByKey = new Map<string, ModelCatalogEntry[]>();
   for (const entry of projectionCatalog) {
@@ -162,17 +139,10 @@ export async function prepareLogicalVisibleModelCatalog(
     routeVariantsByKey.set(key, variants);
   }
   const variantsOf = (entry: ModelCatalogEntry) => routeVariantsByKey.get(keyOf(entry)) ?? [entry];
-  const normalizePolicyKey = (key: string) => {
-    const slash = key.indexOf("/");
-    return slash > 0 ? keyOf({ provider: key.slice(0, slash), id: key.slice(slash + 1) }) : key;
-  };
-  const configuredKeys = new Set([...policy.configuredKeys].map(normalizePolicyKey));
-  const retainedKeys = new Set([...policy.retainedKeys].map(normalizePolicyKey));
+  const { configuredKeys, retainedKeys } = policy;
   const retained = params.catalog.filter((entry) => retainedKeys.has(keyOf(entry)));
   const wildcard = policy.allowAny || policy.hasProviderWildcards;
-  const configuredCatalog = wildcard
-    ? sortModelCatalogEntries(buildConfiguredModelCatalog({ cfg: params.cfg }))
-    : [];
+  const configuredCatalog = wildcard ? sortModelCatalogEntries([...policy.configuredCatalog]) : [];
   const candidates =
     params.view === "all"
       ? params.catalog
@@ -191,10 +161,14 @@ export async function prepareLogicalVisibleModelCatalog(
     }
   }
   const catalogKeys = new Set(params.catalog.map(keyOf));
+  const resolveOverrides = createConfiguredModelCatalogOverridesResolver({
+    cfg: params.cfg,
+    policy: params.routePolicy,
+  });
   const projections = new Map<
     ModelCatalogEntry,
     {
-      overrides: ReturnType<typeof resolveConfiguredModelCatalogOverrides>;
+      overrides: ReturnType<typeof resolveOverrides>;
       rows: Map<
         | ModelCatalogRouteProjection["kind"]
         | Extract<ModelCatalogRouteProjection, { kind: "selected" }>["route"],
@@ -205,8 +179,9 @@ export async function prepareLogicalVisibleModelCatalog(
   return () => {
     // Membership and row availability consume this one observation after every await.
     const states = new Map([...readers].map(([key, read]) => [key, read()]));
+    const publicationKeyOf = createModelCatalogIdentityKeyResolver();
     const getEntryState = (entry: ModelCatalogEntry) => {
-      const state = states.get(keyOf(entry));
+      const state = states.get(publicationKeyOf(entry));
       if (!state) {
         throw new Error("Model catalog publication omitted prepared entry state");
       }
@@ -218,11 +193,7 @@ export async function prepareLogicalVisibleModelCatalog(
         let cached = projections.get(entry);
         if (!cached) {
           cached = {
-            overrides: resolveConfiguredModelCatalogOverrides({
-              cfg: params.cfg,
-              entry,
-              policy: params.routePolicy,
-            }),
+            overrides: resolveOverrides(entry),
             rows: new Map(),
           };
           projections.set(entry, cached);
@@ -235,14 +206,12 @@ export async function prepareLogicalVisibleModelCatalog(
             projection,
             catalog: variantsOf(entry),
             ...(cached.overrides ? { overrides: cached.overrides } : {}),
-          });
+          }).entry;
           cached.rows.set(route, row);
         }
         return row;
       });
-      return sortModelCatalogEntries(
-        dedupeLogicalModelCatalogEntries(projected, params.routePolicy),
-      );
+      return sortModelCatalogEntries(dedupeByKey(projected, publicationKeyOf));
     };
     if (params.view === "all") {
       return projectEntries(params.catalog);
@@ -263,12 +232,15 @@ export async function prepareLogicalVisibleModelCatalog(
           view: params.view,
         }),
       ),
-    ).filter((entry) => catalogKeys.has(keyOf(entry)) || configuredKeys.has(keyOf(entry)));
-    const preferredKeys = new Set([...visible, ...retained].map(keyOf));
+    ).filter(
+      (entry) =>
+        catalogKeys.has(publicationKeyOf(entry)) || configuredKeys.has(publicationKeyOf(entry)),
+    );
+    const preferredKeys = new Set([...visible, ...retained].map(publicationKeyOf));
     const preferred: ModelCatalogEntry[] = [];
     const routeBacked = new Set<ModelCatalogEntry>();
     for (const entry of params.catalog) {
-      const key = keyOf(entry);
+      const key = publicationKeyOf(entry);
       const preferredKey = preferredKeys.has(key);
       const wildcardRoute =
         policy.allowAny ||
@@ -294,7 +266,7 @@ export async function prepareLogicalVisibleModelCatalog(
     }
     const kept = visible.filter((entry) => {
       const state = getEntryState(entry);
-      const configured = configuredKeys.has(keyOf(entry));
+      const configured = configuredKeys.has(publicationKeyOf(entry));
       return (
         (state.compatible || configured) &&
         (!state.routeManaged || configured || routeBacked.has(entry))
@@ -302,7 +274,7 @@ export async function prepareLogicalVisibleModelCatalog(
     });
     // Selected physical routes must lead dedupe so sibling metadata cannot win.
     return projectEntries([...preferred, ...kept, ...retained, ...routeBacked]).filter((entry) =>
-      isPickerVisibleCatalogEntry(entry, configuredKeys, params.routePolicy),
+      isPickerVisibleCatalogEntry(entry, configuredKeys),
     );
   };
 }

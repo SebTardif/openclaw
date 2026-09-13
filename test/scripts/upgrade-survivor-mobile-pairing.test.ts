@@ -791,7 +791,10 @@ run_plugin_fixture_phase fixture-phase true
       orchestration.indexOf("if companion_survivor_scenario"),
       orchestration.indexOf("\nphase prepare-update-restart-probe"),
     );
-    const recoveryStart = orchestration.indexOf("run_plugin_fixture_phase fixture-plugin-consent");
+    const recoveryStart = orchestration.indexOf(
+      "\n",
+      orchestration.indexOf("phase assert-survival assert_survival"),
+    );
     const fixtureRecovery = orchestration.slice(
       recoveryStart,
       orchestration.indexOf('if [ "$SCENARIO" = "recovery-cleanup" ]; then', recoveryStart),
@@ -848,7 +851,18 @@ COMMAND_TIMEOUT=1
 ARTIFACT_ROOT=/tmp
 update_repair_required=0
 ${helper}
-phase() { printf '%s\\n' "$1"; }
+phase() { printf '%s\\n' "$1"; shift; "$@"; }
+prepare_restart_inference() { :; }
+prepare_restart_fixture() {
+  restart_fixture_package=/tmp/future-package.tgz
+  restart_fixture_version=2100.1.0
+}
+install_update_restart_systemctl_shim() { :; }
+run_update_restart_probe_gateway() { :; }
+check_gateway_status() { :; }
+update_candidate() {
+  [ "$#" -eq 3 ] && [ "$1" = 1 ] && [ "$2" = file:/tmp/future-package.tgz ] && [ "$3" = 2100.1.0 ]
+}
 assert_survival() { :; }
 repair_update_restart_auth
 `,
@@ -859,6 +873,9 @@ repair_update_restart_auth
       );
 
       expect(result.trim().split("\n")).toEqual([
+        "prepare-restart-inference",
+        "prepare-restart-fixture",
+        "prepare-restart-manager",
         "prepare-recovery-service",
         "prepared-gateway-auth",
         "recovery-update-restart",

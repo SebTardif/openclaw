@@ -23,6 +23,7 @@ import {
 } from "../transports/openai-responses-compaction-replay.js";
 import { responsesPromptObserver } from "../transports/openai-responses-contracts.js";
 import { ResponsesStreamFailure } from "../transports/openai-responses-debug.js";
+import { resolveOpenAIResponsesTextFormat } from "../transports/openai-responses-params-internal.js";
 import { createResponsesPromptEgressObserver } from "../transports/openai-responses-prompt-observer-internal.js";
 import {
   commitResponsesEncryptedContentAttempt,
@@ -34,6 +35,7 @@ import { processResponsesStream } from "../transports/openai-responses-stream-in
 import {
   createOpenAIProviderAcceptanceHook,
   createOpenAIResponseHook,
+  createResponseModelTracker,
 } from "../transports/openai-transport-shared.js";
 import {
   assignTransportErrorDetails,
@@ -158,7 +160,7 @@ interface RequestBody {
   temperature?: number;
   reasoning?: { effort?: string; summary?: string };
   service_tier?: ResponseCreateParamsStreaming["service_tier"];
-  text?: { verbosity?: string };
+  text?: ResponseCreateParamsStreaming["text"];
   include?: string[];
   prompt_cache_key?: string;
   [key: string]: unknown;
@@ -537,7 +539,7 @@ export const streamOpenAICodexResponses: StreamFunction<
       }
 
       const hookedResponseStream = withProviderResponseHook({
-        stream: mapCodexEvents(parseOpenAIChatGptResponsesSse(response)),
+        stream: mapCodexEvents(parseOpenAIChatGptResponsesSse(response), response.headers),
         signal: firstEventAbort.signal,
         abort: firstEventAbort.abort,
         hook: createOpenAIProviderAcceptanceHook(options, response, model),
@@ -583,6 +585,14 @@ export const streamOpenAICodexResponses: StreamFunction<
       for (const block of output.content) {
         // partialJson is only a streaming scratch buffer; never persist it.
         delete (block as { partialJson?: string }).partialJson;
+      }
+      const providerRefusal = readCodexProviderRefusal(normalizedError);
+      if (providerRefusal) {
+        appendAssistantMessageDiagnostic(output, {
+          type: "provider_refusal",
+          timestamp: Date.now(),
+          details: { provider: "openai", category: providerRefusal.category },
+        });
       }
       const terminal = assignTransportErrorDetails(output, normalizedError, options?.signal);
       // Log only locally-derived facts: timing and a fixed failure category. No
@@ -660,6 +670,13 @@ function buildRequestBody(
         : clampOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId),
   };
 
+  if (options?.responseFormat !== undefined) {
+    body.text = {
+      ...body.text,
+      format: resolveOpenAIResponsesTextFormat(options.responseFormat),
+    };
+  }
+
   if (options?.temperature !== undefined && supportsOpenAITemperature(model)) {
     body.temperature = options.temperature;
   }
@@ -731,6 +748,54 @@ function resolveCodexWebSocketUrl(baseUrl?: string): string {
 // Response Processing
 // ============================================================================
 
+type CodexProviderRefusalCategory = "bio" | "cyber" | "misalignment";
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Structured refusal code carried by the OpenAI Responses transport. Every
+ * terminal Responses path preserves it: a non-OK HTTP body parsed by
+ * {@link parseErrorResponse}, an SSE/WebSocket `error` event mapped by
+ * {@link extractCodexEventError}, and a `response.failed` event normalized into
+ * {@link ResponsesStreamFailure}. Only the app-server surface carries the
+ * `codexErrorInfo` discriminator, so both shapes must be read here.
+ */
+const RESPONSES_CYBER_POLICY_ERROR_CODE = "cyber_policy";
+
+function readCodexProviderRefusal(
+  error: unknown,
+): { category: CodexProviderRefusalCategory } | undefined {
+  if (error instanceof ResponsesStreamFailure) {
+    return error.code === RESPONSES_CYBER_POLICY_ERROR_CODE ? { category: "cyber" } : undefined;
+  }
+  if (!(error instanceof CodexApiError)) {
+    return undefined;
+  }
+  if (error.code === RESPONSES_CYBER_POLICY_ERROR_CODE) {
+    return { category: "cyber" };
+  }
+  const payload = error.payload;
+  const nested = isJsonRecord(payload?.error) ? payload.error : undefined;
+  const codexErrorInfo = payload?.codexErrorInfo ?? nested?.codexErrorInfo;
+  if (codexErrorInfo === "cyberPolicy") {
+    return { category: "cyber" };
+  }
+  if (codexErrorInfo === "misalignmentPolicyViolation") {
+    return { category: "misalignment" };
+  }
+  const message =
+    typeof payload?.message === "string"
+      ? payload.message
+      : typeof nested?.message === "string"
+        ? nested.message
+        : "";
+  return message.startsWith("This content was flagged for possible biological risk.")
+    ? { category: "bio" }
+    : undefined;
+}
+
 class CodexApiError extends Error {
   readonly code?: string;
   readonly status?: number;
@@ -792,8 +857,12 @@ function extractCodexEventError(event: Record<string, unknown>): {
 
 async function* mapCodexEvents(
   events: AsyncIterable<Record<string, unknown>>,
+  initialResponseHeaders?: Headers,
 ): AsyncGenerator<ResponseStreamEvent> {
+  const responseModelTracker = createResponseModelTracker();
+  responseModelTracker.begin(initialResponseHeaders);
   for await (const event of events) {
+    responseModelTracker.observeEvent(event);
     const type = typeof event.type === "string" ? event.type : undefined;
     if (!type) {
       continue;
@@ -814,7 +883,11 @@ async function* mapCodexEvents(
     ) {
       const response = (event as { response?: { status?: unknown } }).response;
       const normalizedResponse = response
-        ? { ...response, status: normalizeCodexStatus(response.status) }
+        ? {
+            ...response,
+            status: normalizeCodexStatus(response.status),
+            model: responseModelTracker.resolve(),
+          }
         : response;
       yield {
         ...event,
@@ -1632,6 +1705,7 @@ function parseErrorResponse(raw: string, response: Response): CodexApiError {
   let message = raw || statusText || "Request failed";
   let friendlyMessage: string | undefined;
   let code: string | undefined;
+  let payload: Record<string, unknown> | undefined;
 
   try {
     const parsed = JSON.parse(raw) as {
@@ -1643,6 +1717,7 @@ function parseErrorResponse(raw: string, response: Response): CodexApiError {
         resets_at?: number;
       };
     };
+    payload = isJsonRecord(parsed) ? parsed : undefined;
     const err = parsed?.error;
     if (err) {
       code = err.code || err.type || undefined;
@@ -1663,11 +1738,15 @@ function parseErrorResponse(raw: string, response: Response): CodexApiError {
 
   const retryAfterSeconds = parseRetryAfterSeconds(response.headers);
   // The canonical projection retains HTTP status; retry owners read its bounded
-  // terminal text for pacing, matching formatAnthropicMessagesHttpError.
+  // terminal text for pacing, matching Anthropic HTTP error projection.
   const retryAfterSuffix = Number.isFinite(retryAfterSeconds)
     ? `; Retry-After: ${Math.ceil(retryAfterSeconds ?? 0)} seconds`
     : "";
-  return new CodexApiError(`${friendlyMessage || message}${retryAfterSuffix}`, { code, status });
+  return new CodexApiError(`${friendlyMessage || message}${retryAfterSuffix}`, {
+    code,
+    status,
+    payload,
+  });
 }
 
 // ============================================================================

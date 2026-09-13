@@ -20,6 +20,7 @@ import {
   resolveAgentDir,
   tryResolveDefaultAgentId,
 } from "../agents/agent-scope-config.js";
+import { MODELS_JSON_STATE, type ModelKeyNormalizer } from "../agents/models-config-state.js";
 import { normalizeProviderMapKeys } from "../agents/models-config.merge.js";
 import type { NormalizedUsage } from "../agents/usage.js";
 import { mergeModelCost } from "../config/model-cost.js";
@@ -29,6 +30,7 @@ import type { ModelProviderConfig } from "../config/types.models.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { tryReadJsonSync } from "../infra/json-files.js";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
+import type { UsageCacheStatus } from "../infra/session-cost-usage.types.js";
 import {
   modelCatalogPricingFingerprint,
   resolveModelPricing,
@@ -36,12 +38,6 @@ import {
 } from "../model-catalog/pricing.js";
 export { formatTokenCount } from "./token-format.js";
 export type { ModelCostConfig } from "@openclaw/llm-core";
-
-type ModelKeyNormalizer = (provider: string, model: string) => string;
-type ModelsJsonCostCache = {
-  providers: Record<string, ModelProviderConfig> | undefined;
-  entries: WeakMap<ModelKeyNormalizer, Map<string, RawModelCostConfig>>;
-};
 
 type ProviderCostIndexSource = {
   model: NonNullable<ModelProviderConfig["models"]>[number];
@@ -58,7 +54,6 @@ type ProviderCostIndex = {
 const EMPTY_PROVIDER_COST_INDEX = new Map<string, RawModelCostConfig>();
 const MODELS_JSON_COST_CACHE_LIMIT = 128;
 
-let modelsJsonCostCacheByAgentDir = new Map<string, ModelsJsonCostCache>();
 let providerCostIndexByNormalizer = new WeakMap<
   ModelKeyNormalizer,
   WeakMap<Record<string, ModelProviderConfig>, ProviderCostIndex>
@@ -73,6 +68,13 @@ export function formatUsd(value?: number): string | undefined {
     return `$${value.toFixed(2)}`;
   }
   return `$${value.toFixed(4)}`;
+}
+
+/** Prefix aggregate totals with their recorded cache-readiness notice. */
+export function formatCostUsageCachePrefix(cacheStatus?: UsageCacheStatus): string {
+  return cacheStatus && cacheStatus.status !== "fresh"
+    ? `Usage totals may be incomplete (${cacheStatus.status}). Run this command again later.\n`
+    : "";
 }
 
 function normalizeRawModelKey(provider: string, model: string): string {
@@ -176,7 +178,7 @@ function loadModelsJsonCostIndex(options?: {
   }
   const modelsPath = path.join(agentDir, "models.json");
   try {
-    let modelsJsonCostCache = modelsJsonCostCacheByAgentDir.get(agentDir);
+    let modelsJsonCostCache = MODELS_JSON_STATE.costCache.get(agentDir);
     if (!modelsJsonCostCache) {
       const parsed = tryReadJsonSync<{
         providers?: Record<string, ModelProviderConfig>;
@@ -188,8 +190,8 @@ function loadModelsJsonCostIndex(options?: {
         providers: parsed?.providers,
         entries: new WeakMap(),
       };
-      pruneMapToMaxSize(modelsJsonCostCacheByAgentDir, MODELS_JSON_COST_CACHE_LIMIT - 1);
-      modelsJsonCostCacheByAgentDir.set(agentDir, modelsJsonCostCache);
+      pruneMapToMaxSize(MODELS_JSON_STATE.costCache, MODELS_JSON_COST_CACHE_LIMIT - 1);
+      MODELS_JSON_STATE.costCache.set(agentDir, modelsJsonCostCache);
     }
 
     const normalizeKey = options?.normalizeKey ?? normalizeRawModelKey;
@@ -387,6 +389,6 @@ export function estimateAggregateUsageCost(
 }
 
 export function resetUsageFormatCachesForTest(): void {
-  modelsJsonCostCacheByAgentDir = new Map();
+  MODELS_JSON_STATE.costCache.clear();
   providerCostIndexByNormalizer = new WeakMap();
 }

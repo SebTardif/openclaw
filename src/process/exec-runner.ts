@@ -2,6 +2,7 @@ import process from "node:process";
 import { expectDefined } from "@openclaw/normalization-core";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
+import { isPromiseLike } from "@openclaw/normalization-core/promise-like";
 import {
   decodeWindowsOutputBuffer,
   resolveWindowsConsoleEncoding,
@@ -34,7 +35,11 @@ import {
   TIMEOUT_EXIT_CODE,
   type SpawnResult,
 } from "./exec-result.js";
-import { COMMAND_PROCESS_TREE_KILL_GRACE_MS, spawnCommandWithInvocation } from "./exec-spawn.js";
+import {
+  COMMAND_PROCESS_TREE_KILL_GRACE_MS,
+  resolveCommandProcessSignal,
+  spawnCommandWithInvocation,
+} from "./exec-spawn.js";
 import { createCommandTerminationController } from "./exec-termination.js";
 
 const WINDOWS_CLOSE_STATE_SETTLE_TIMEOUT_MS = 250;
@@ -46,6 +51,8 @@ export type CommandOptions = {
   timeoutMs?: number;
   cwd?: string;
   input?: string | Uint8Array;
+  /** Synchronous live-child admission. Input is withheld until this returns. */
+  beforeInput?: (pid: number) => void;
   baseEnv?: NodeJS.ProcessEnv;
   env?: NodeJS.ProcessEnv;
   windowsVerbatimArguments?: boolean;
@@ -64,6 +71,8 @@ export type CommandOptions = {
   maxPreservedOutputLines?: number;
   preserveOutputLine?: PreserveOutputLine;
   killProcessTree?: boolean;
+  /** Join owned descendants even after a successful root exits. */
+  requireProcessTreeExtinction?: boolean;
   /** Initial signal for direct-child and graceful process-group cancellation. */
   killSignal?: NodeJS.Signals | number;
   /** Grace between graceful termination and the force-kill fallback. */
@@ -85,11 +94,37 @@ export async function runUtf8CommandWithTimeout(
   return await runCommandWithOutputEncoding(argv, optionsOrTimeout, true);
 }
 
+export type BufferSpawnResult = Omit<SpawnResult, "stdout" | "stderr"> & {
+  stdout: Buffer;
+  stderr: Buffer;
+  windowsEncoding: string | null;
+};
+
+/** Preserve the ordinary process lifecycle while deferring decoding to its consumer. */
+export async function runCommandBuffersWithTimeout(
+  argv: string[],
+  optionsOrTimeout: number | CommandOptions,
+): Promise<BufferSpawnResult> {
+  return await runCommandWithOutputEncoding(argv, optionsOrTimeout, false, true);
+}
+
 async function runCommandWithOutputEncoding(
   argv: string[],
   optionsOrTimeout: number | CommandOptions,
   forceUtf8: boolean,
-): Promise<SpawnResult> {
+): Promise<SpawnResult>;
+async function runCommandWithOutputEncoding(
+  argv: string[],
+  optionsOrTimeout: number | CommandOptions,
+  forceUtf8: boolean,
+  raw: true,
+): Promise<BufferSpawnResult>;
+async function runCommandWithOutputEncoding(
+  argv: string[],
+  optionsOrTimeout: number | CommandOptions,
+  forceUtf8: boolean,
+  raw = false,
+): Promise<SpawnResult | BufferSpawnResult> {
   const options: CommandOptions =
     typeof optionsOrTimeout === "number" ? { timeoutMs: optionsOrTimeout } : optionsOrTimeout;
   const {
@@ -99,14 +134,20 @@ async function runCommandWithOutputEncoding(
     baseEnv,
     env,
     noOutputTimeoutMs,
-    signal,
     killProcessTree,
     killSignal,
     killGraceMs,
   } = options;
+  const signal = resolveCommandProcessSignal(options.signal);
   const resolvedTimeoutMs =
     typeof timeoutMs === "number" ? resolveTimerTimeoutMs(timeoutMs, 1) : undefined;
+  if (options.requireProcessTreeExtinction && !killProcessTree) {
+    throw new Error("Process-tree extinction requires process-tree ownership");
+  }
   const hasInput = input !== undefined;
+  if (options.beforeInput && !hasInput) {
+    throw new Error("Child input admission requires explicit input");
+  }
   const resolvedKillGraceMs = resolveTimerTimeoutMs(
     killGraceMs,
     COMMAND_PROCESS_TREE_KILL_GRACE_MS,
@@ -114,16 +155,17 @@ async function runCommandWithOutputEncoding(
   );
 
   if (signal?.aborted) {
-    return {
-      stdout: "",
-      stderr: "",
+    const interrupted = {
       code: null,
       signal: null,
       killed: false,
-      termination: "signal",
-      cleanup: "normal",
+      termination: "signal" as const,
+      cleanup: "normal" as const,
       noOutputTimedOut: false,
     };
+    return raw
+      ? { ...interrupted, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), windowsEncoding: null }
+      : { ...interrupted, stdout: "", stderr: "" };
   }
 
   const stdoutCapture = createCapturedOutputBuffers();
@@ -168,6 +210,7 @@ async function runCommandWithOutputEncoding(
   const { child, invocation } = spawnCommandWithInvocation(argv, {
     buffer: false,
     cancelSignal: cancelController.signal,
+    inheritScopeCancellation: false,
     cwd,
     detached: Boolean(killProcessTree && process.platform !== "win32"),
     encoding: "buffer",
@@ -175,7 +218,7 @@ async function runCommandWithOutputEncoding(
     env,
     forceKillAfterDelay: resolvedKillGraceMs,
     killSignal,
-    ...(hasInput ? { input } : {}),
+    ...(hasInput && !options.beforeInput ? { input } : {}),
     reject: false,
     stdio: [hasInput ? "pipe" : "inherit", "pipe", "pipe"],
     stripFinalNewline: false,
@@ -214,7 +257,7 @@ async function runCommandWithOutputEncoding(
     }
     // An inner timeout can become an ordinary failed exit while its descendants survive.
     // Retain the existing tree owner through its drain without changing that exit result.
-    if (killProcessTree && !termination && code !== 0) {
+    if (killProcessTree && !termination && (code !== 0 || options.requireProcessTreeExtinction)) {
       terminationController.terminate();
     }
   });
@@ -395,6 +438,31 @@ async function runCommandWithOutputEncoding(
     armNoOutputTimer();
   });
 
+  let inputAdmissionError: Error | undefined;
+  if (options.beforeInput) {
+    nodeChild.stdin?.once("error", (cause) => {
+      inputAdmissionError ??= toErrorObject(cause, "Command input failed");
+      cancel("signal");
+    });
+    try {
+      if (nodeChild.pid === undefined || !nodeChild.stdin) {
+        throw new Error("Child input admission has no spawned process");
+      }
+      const admitted: unknown = options.beforeInput(nodeChild.pid);
+      if (admitted !== undefined) {
+        if (isPromiseLike(admitted)) {
+          void Promise.resolve(admitted).catch(() => undefined);
+        }
+        throw new TypeError("Child input admission must complete synchronously");
+      }
+      nodeChild.stdin.end(input);
+    } catch (cause) {
+      inputAdmissionError = toErrorObject(cause, "Child input admission failed");
+      nodeChild.stdin?.destroy();
+      cancel("signal");
+    }
+  }
+
   const result = await child.finally(() => {
     commandSettled = true;
     if (timeoutTimer) {
@@ -408,6 +476,9 @@ async function runCommandWithOutputEncoding(
   const resolvedSignal = result.signal ?? childExitState?.signal ?? nodeChild.signalCode ?? null;
   if (cleanup !== "forced" && resolvedSignal) {
     cleanup = "uncertain";
+  }
+  if (inputAdmissionError) {
+    throw Object.assign(inputAdmissionError, { cleanup });
   }
   if (terminatingOutputError) {
     throw Object.assign(terminatingOutputError, { cleanup });
@@ -518,20 +589,10 @@ async function runCommandWithOutputEncoding(
     }
   }
 
-  const decodeCapturedOutput = (
-    capture: CapturedOutputBuffers,
-    captureMode: CommandOutputCaptureMode,
-  ): string => {
-    const buffer = finalizeCapturedOutput(capture, captureMode, forceUtf8);
-    return forceUtf8
-      ? buffer.toString("utf8")
-      : decodeWindowsOutputBuffer({ buffer, windowsEncoding });
-  };
-
-  return {
+  const stdout = finalizeCapturedOutput(stdoutCapture, stdoutCaptureMode, forceUtf8);
+  const stderr = finalizeCapturedOutput(stderrCapture, stderrCaptureMode, forceUtf8);
+  const settled = {
     pid: nodeChild.pid,
-    stdout: decodeCapturedOutput(stdoutCapture, stdoutCaptureMode),
-    stderr: decodeCapturedOutput(stderrCapture, stderrCaptureMode),
     stdoutTruncatedBytes: stdoutCapture.truncatedBytes || undefined,
     stderrTruncatedBytes: stderrCapture.truncatedBytes || undefined,
     preservedStdoutLines:
@@ -542,9 +603,20 @@ async function runCommandWithOutputEncoding(
     signal: resolvedSignal,
     killed: nodeChild.killed,
     cleanup,
-    termination: termination === "output-limit" ? "signal" : termination,
+    termination: termination === "output-limit" ? ("signal" as const) : termination,
     noOutputTimedOut: termination === "no-output-timeout",
     outputLimitExceeded: termination === "output-limit" || undefined,
     ...(outputErrorStream ? { outputErrorStream } : {}),
   };
+  return raw
+    ? { ...settled, stdout, stderr, windowsEncoding }
+    : {
+        ...settled,
+        stdout: forceUtf8
+          ? stdout.toString("utf8")
+          : decodeWindowsOutputBuffer({ buffer: stdout, windowsEncoding }),
+        stderr: forceUtf8
+          ? stderr.toString("utf8")
+          : decodeWindowsOutputBuffer({ buffer: stderr, windowsEncoding }),
+      };
 }

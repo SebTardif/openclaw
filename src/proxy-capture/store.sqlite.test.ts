@@ -169,8 +169,8 @@ describe("DebugProxyCaptureStore", () => {
       sourceProcess: "cli",
     });
 
-    // Exit-time hook closes the shared handle out from under the cached store;
-    // finalizeDebugProxyCapture then re-fetches and must not get a dead handle.
+    // Explicit acquisition after shared-handle retirement must rebind; retained
+    // capture finalizers instead keep their exact owner and must not reopen it.
     closeOpenClawStateDatabaseForTest();
     expect(stale.isClosed).toBe(true);
 
@@ -643,8 +643,21 @@ describe("DebugProxyCaptureStore", () => {
             eventCount: 0,
           },
         ]);
+        for (const id of ["empty-z", "empty-a"]) {
+          store.upsertSession({
+            id,
+            startedAt: 2,
+            mode: "test",
+            sourceScope: "openclaw",
+            sourceProcess: "test",
+          });
+        }
+        expect(store.listSessions(2).map(({ id, eventCount }) => ({ id, eventCount }))).toEqual([
+          { id: "empty", eventCount: 0 },
+          { id: "empty-a", eventCount: 0 },
+        ]);
         expect(store.listSessions(0)).toEqual([]);
-        expect(store.listSessions(-1)).toHaveLength(3);
+        expect(store.listSessions(-1)).toHaveLength(5);
 
         store.db.setAuthorizer((action, table) =>
           action === constants.SQLITE_READ && table === "capture_events"

@@ -28,9 +28,11 @@ import {
   runPrepackCommand,
 } from "../scripts/openclaw-prepack.ts";
 import { preparePackageDocsMap } from "../scripts/package-docs-map.mjs";
+import { resolveTestNodeExecPath } from "../src/test-utils/node-process.js";
 import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const testNodeExecPath = resolveTestNodeExecPath();
 const rootPackageManager = (
   JSON.parse(readFileSync("package.json", "utf8")) as {
     packageManager: string;
@@ -163,6 +165,7 @@ function createPrepackLifecycleFixture() {
     devDependencies: { "@openclaw/session-url-contract": "workspace:*" },
     scripts: {
       "build:package": "node rebuild.mjs",
+      "update:compat:check": "node check-update-compat.mjs",
       prepack: "node lifecycle.mjs prepack",
       postpack: "node lifecycle.mjs postpack",
     },
@@ -177,6 +180,12 @@ function createPrepackLifecycleFixture() {
     'import { writeFileSync } from "node:fs";\n' +
       'writeFileSync("build-invoked", "build:package\\n");\n' +
       'writeFileSync("dist/index.js", "export const rebuilt = true;\\n");\n',
+  );
+  writeFileSync(
+    path.join(rootDir, "check-update-compat.mjs"),
+    'import { existsSync, writeFileSync } from "node:fs";\n' +
+      'writeFileSync("compat-check-invoked", "update:compat:check\\n");\n' +
+      'if (existsSync("stale-update-compat")) throw new Error("Missing latest updater inventory; run pnpm update:compat:gen");\n',
   );
   writeFileSync(
     path.join(rootDir, "lifecycle.mjs"),
@@ -277,7 +286,7 @@ function runStandaloneBundledChannelSmoke(
   }
 
   const result = spawnSync(
-    process.execPath,
+    testNodeExecPath,
     [
       path.join(rootDir, "scripts", "test-built-bundled-channel-entry-smoke.mts"),
       "--package-root",
@@ -396,7 +405,7 @@ describe("prepared prepack ownership", () => {
       const receipt = incumbent ? readFileSync(receiptPath, "utf8") : undefined;
       const ownerUrl = pathToFileURL(path.resolve("scripts/openclaw-prepack.ts")).href;
       const result = spawnSync(
-        process.execPath,
+        testNodeExecPath,
         [
           "--import",
           import.meta.resolve("tsx"),
@@ -443,6 +452,7 @@ describe("prepack lifecycle", () => {
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
     expect(existsSync(path.join(fixture.rootDir, "build-invoked"))).toBe(!prepared);
+    expect(existsSync(path.join(fixture.rootDir, "compat-check-invoked"))).toBe(prepared);
     const prepack = fixture.readLifecycleResult("prepack");
     expect(prepack).toMatchObject({ status: 0, signal: null });
     expect(prepack.stdout).toContain("channel=1");
@@ -466,19 +476,21 @@ describe("prepack lifecycle", () => {
     fixture.expectRestored();
   });
 
-  it.each(["missing asset", "invalid changelog"])(
+  it.each(["missing asset", "invalid changelog", "stale updater inventory"])(
     "rejects prepared packages with %s without rebuilding or leaving source mutations",
     (failure) => {
       const fixture = createPrepackLifecycleFixture();
       if (failure === "missing asset") {
         rmSync(path.join(fixture.rootDir, "dist/control-ui/assets/fixture.js.gz"));
-      } else {
+      } else if (failure === "invalid changelog") {
         fixture.sourceFiles["CHANGELOG.md"] =
           "# Changelog\n\n## 2026.7.1\n- Previous release notes.\n";
         writeFileSync(
           path.join(fixture.rootDir, "CHANGELOG.md"),
           fixture.sourceFiles["CHANGELOG.md"],
         );
+      } else {
+        writeFileSync(path.join(fixture.rootDir, "stale-update-compat"), "stale\n");
       }
       const result = fixture.pack(true);
 
@@ -489,7 +501,9 @@ describe("prepack lifecycle", () => {
       expect(prepack.stderr).toContain(
         failure === "missing asset"
           ? "missing prepared Control UI .gz asset"
-          : "CHANGELOG.md does not contain a release section for 2026.8.1",
+          : failure === "invalid changelog"
+            ? "CHANGELOG.md does not contain a release section for 2026.8.1"
+            : "Missing latest updater inventory; run pnpm update:compat:gen",
       );
       expect(existsSync(path.join(fixture.rootDir, "build-invoked"))).toBe(false);
       expect(readdirSync(fixture.packDir)).toEqual([]);
@@ -800,7 +814,7 @@ describe("runPrepackCommand", () => {
   });
 
   it("returns captured output for successful commands", () => {
-    const result = runPrepackCommand(process.execPath, ["--eval", "process.stdout.write('ok')"], {
+    const result = runPrepackCommand(testNodeExecPath, ["--eval", "process.stdout.write('ok')"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 1000,
@@ -813,7 +827,7 @@ describe("runPrepackCommand", () => {
   it("bounds commands that ignore termination", () => {
     const startedAt = Date.now();
     const result = runPrepackCommand(
-      process.execPath,
+      testNodeExecPath,
       ["--eval", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
       {
         stdio: ["ignore", "pipe", "pipe"],

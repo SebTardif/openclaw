@@ -34,6 +34,7 @@ import {
   runHeartbeatOnce,
 } from "./heartbeat-runner.js";
 import {
+  heartbeatTestConfig,
   readSessionStoreForTest,
   seedHeartbeatScratchForTest,
   seedSessionStore,
@@ -819,6 +820,14 @@ describe("resolveHeartbeatSenderContext", () => {
 });
 
 describe("runHeartbeatOnce", () => {
+  function createWhatsAppSendMock() {
+    return vi
+      .fn<
+        (to: string, text: string, opts?: unknown) => Promise<{ messageId: string; toJid: string }>
+      >()
+      .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+  }
+
   const createHeartbeatDeps = (
     sendWhatsApp: (
       to: string,
@@ -880,11 +889,7 @@ describe("runHeartbeatOnce", () => {
 
     const replySpy = vi.fn();
     replySpy.mockResolvedValue({ text: "Handled internally" });
-    const sendWhatsApp = vi
-      .fn<
-        (to: string, text: string, opts?: unknown) => Promise<{ messageId: string; toJid: string }>
-      >()
-      .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+    const sendWhatsApp = createWhatsAppSendMock();
 
     const res = await runHeartbeatOnce({
       cfg,
@@ -1113,18 +1118,7 @@ describe("runHeartbeatOnce", () => {
       await seedWhatsAppSession(storePath, sessionKey);
 
       replySpy.mockResolvedValue([{ text: "Let me check..." }, { text: "Final alert" }]);
-      const sendWhatsApp = vi
-        .fn<
-          (
-            to: string,
-            text: string,
-            opts?: unknown,
-          ) => Promise<{ messageId: string; toJid: string }>
-        >()
-        .mockResolvedValue({
-          messageId: "m1",
-          toJid: "jid",
-        });
+      const sendWhatsApp = createWhatsAppSendMock();
 
       await runHeartbeatOnce({
         cfg,
@@ -1227,18 +1221,7 @@ describe("runHeartbeatOnce", () => {
 
       await seedWhatsAppSession(storePath, sessionKey);
       replySpy.mockResolvedValue([{ text: "Final alert" }]);
-      const sendWhatsApp = vi
-        .fn<
-          (
-            to: string,
-            text: string,
-            opts?: unknown,
-          ) => Promise<{ messageId: string; toJid: string }>
-        >()
-        .mockResolvedValue({
-          messageId: "m1",
-          toJid: "jid",
-        });
+      const sendWhatsApp = createWhatsAppSendMock();
       await runHeartbeatOnce({
         cfg,
         agentId: "ops",
@@ -1305,18 +1288,7 @@ describe("runHeartbeatOnce", () => {
       await seedWhatsAppSession(storePath, sessionKey, { sessionId, sessionFile });
 
       replySpy.mockResolvedValue([{ text: "Final alert" }]);
-      const sendWhatsApp = vi
-        .fn<
-          (
-            to: string,
-            text: string,
-            opts?: unknown,
-          ) => Promise<{ messageId: string; toJid: string }>
-        >()
-        .mockResolvedValue({
-          messageId: "m1",
-          toJid: "jid",
-        });
+      const sendWhatsApp = createWhatsAppSendMock();
       const result = await runHeartbeatOnce({
         cfg,
         agentId,
@@ -1379,19 +1351,7 @@ describe("runHeartbeatOnce", () => {
       try {
         const tmpDir = await createCaseDir(caseDir);
         const storePath = path.join(tmpDir, "sessions.json");
-        const cfg: OpenClawConfig = {
-          agents: {
-            defaults: {
-              workspace: tmpDir,
-              heartbeat: {
-                every: "5m",
-                target: "last",
-              },
-            },
-          },
-          channels: { whatsapp: { allowFrom: ["*"] } },
-          session: { store: storePath },
-        };
+        const cfg: OpenClawConfig = heartbeatTestConfig(tmpDir, "last", "whatsapp", storePath);
         const mainSessionKey = resolveMainSessionKey(cfg);
         const agentId = resolveAgentIdFromSessionKey(mainSessionKey);
         const overrideSessionKey = buildAgentPeerSessionKey({
@@ -1411,15 +1371,7 @@ describe("runHeartbeatOnce", () => {
 
         replySpy.mockClear();
         replySpy.mockResolvedValue([{ text: message }]);
-        const sendWhatsApp = vi
-          .fn<
-            (
-              to: string,
-              text: string,
-              opts?: unknown,
-            ) => Promise<{ messageId: string; toJid: string }>
-          >()
-          .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+        const sendWhatsApp = createWhatsAppSendMock();
 
         await runHeartbeatOnce({
           cfg,
@@ -1462,19 +1414,7 @@ describe("runHeartbeatOnce", () => {
     try {
       const tmpDir = await createCaseDir("hb-subagent-guard");
       const storePath = path.join(tmpDir, "sessions.json");
-      const cfg: OpenClawConfig = {
-        agents: {
-          defaults: {
-            workspace: tmpDir,
-            heartbeat: {
-              every: "5m",
-              target: "last",
-            },
-          },
-        },
-        channels: { whatsapp: { allowFrom: ["*"] } },
-        session: { store: storePath },
-      };
+      const cfg: OpenClawConfig = heartbeatTestConfig(tmpDir, "last", "whatsapp", storePath);
       const mainSessionKey = resolveMainSessionKey(cfg);
       const agentId = resolveAgentIdFromSessionKey(mainSessionKey);
       const subagentKey = `agent:${agentId}:subagent:task-abc`;
@@ -1492,15 +1432,7 @@ describe("runHeartbeatOnce", () => {
 
       replySpy.mockClear();
       replySpy.mockResolvedValue([{ text: "Main session heartbeat" }]);
-      const sendWhatsApp = vi
-        .fn<
-          (
-            to: string,
-            text: string,
-            opts?: unknown,
-          ) => Promise<{ messageId: string; toJid: string }>
-        >()
-        .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+      const sendWhatsApp = createWhatsAppSendMock();
 
       await runHeartbeatOnce({
         cfg,
@@ -1526,16 +1458,7 @@ describe("runHeartbeatOnce", () => {
     const storePath = path.join(tmpDir, "sessions.json");
     const replySpy = vi.fn();
     try {
-      const cfg: OpenClawConfig = {
-        agents: {
-          defaults: {
-            workspace: tmpDir,
-            heartbeat: { every: "5m", target: "whatsapp" },
-          },
-        },
-        channels: { whatsapp: { allowFrom: ["*"] } },
-        session: { store: storePath },
-      };
+      const cfg: OpenClawConfig = heartbeatTestConfig(tmpDir, "whatsapp", "whatsapp", storePath);
       const sessionKey = resolveMainSessionKey(cfg);
 
       await seedWhatsAppSession(storePath, sessionKey, {
@@ -1544,15 +1467,7 @@ describe("runHeartbeatOnce", () => {
       });
 
       replySpy.mockResolvedValue([{ text: "Final alert" }]);
-      const sendWhatsApp = vi
-        .fn<
-          (
-            to: string,
-            text: string,
-            opts?: unknown,
-          ) => Promise<{ messageId: string; toJid: string }>
-        >()
-        .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+      const sendWhatsApp = createWhatsAppSendMock();
 
       await runHeartbeatOnce({
         cfg,
@@ -1573,16 +1488,7 @@ describe("runHeartbeatOnce", () => {
     const storePath = path.join(tmpDir, "sessions.json");
     const replySpy = vi.fn();
     try {
-      const cfg: OpenClawConfig = {
-        agents: {
-          defaults: {
-            workspace: tmpDir,
-            heartbeat: { every: "5m", target: "whatsapp" },
-          },
-        },
-        channels: { whatsapp: { allowFrom: ["*"] } },
-        session: { store: storePath },
-      };
+      const cfg: OpenClawConfig = heartbeatTestConfig(tmpDir, "whatsapp", "whatsapp", storePath);
       const sessionKey = resolveMainSessionKey(cfg);
       const nowMs = 60_000;
       await seedWhatsAppSession(storePath, sessionKey, {
@@ -1590,15 +1496,7 @@ describe("runHeartbeatOnce", () => {
         lastHeartbeatSentAt: nowMs + 60_000,
       });
       replySpy.mockResolvedValue([{ text: "Final alert" }]);
-      const sendWhatsApp = vi
-        .fn<
-          (
-            to: string,
-            text: string,
-            opts?: unknown,
-          ) => Promise<{ messageId: string; toJid: string }>
-        >()
-        .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+      const sendWhatsApp = createWhatsAppSendMock();
 
       await runHeartbeatOnce({
         cfg,
@@ -1673,34 +1571,14 @@ describe("runHeartbeatOnce", () => {
       try {
         const tmpDir = await createCaseDir(caseDir);
         const storePath = path.join(tmpDir, "sessions.json");
-        const cfg: OpenClawConfig = {
-          agents: {
-            defaults: {
-              workspace: tmpDir,
-              heartbeat: {
-                every: "5m",
-                target: "whatsapp",
-              },
-            },
-          },
-          channels: { whatsapp: { allowFrom: ["*"] } },
-          session: { store: storePath },
-        };
+        const cfg: OpenClawConfig = heartbeatTestConfig(tmpDir, "whatsapp", "whatsapp", storePath);
         const sessionKey = resolveMainSessionKey(cfg);
 
         await seedWhatsAppSession(storePath, sessionKey);
 
         replySpy.mockClear();
         replySpy.mockResolvedValue(replies);
-        const sendWhatsApp = vi
-          .fn<
-            (
-              to: string,
-              text: string,
-              opts?: unknown,
-            ) => Promise<{ messageId: string; toJid: string }>
-          >()
-          .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+        const sendWhatsApp = createWhatsAppSendMock();
 
         await runHeartbeatOnce({
           cfg,
@@ -1728,16 +1606,7 @@ describe("runHeartbeatOnce", () => {
     try {
       const tmpDir = await createCaseDir("hb-legacy-reasoning-unset");
       const storePath = path.join(tmpDir, "sessions.json");
-      const cfg: OpenClawConfig = {
-        agents: {
-          defaults: {
-            workspace: tmpDir,
-            heartbeat: { every: "5m", target: "whatsapp" },
-          },
-        },
-        channels: { whatsapp: { allowFrom: ["*"] } },
-        session: { store: storePath },
-      };
+      const cfg: OpenClawConfig = heartbeatTestConfig(tmpDir, "whatsapp", "whatsapp", storePath);
       const sessionKey = resolveMainSessionKey(cfg);
       await seedWhatsAppSession(storePath, sessionKey);
 
@@ -1745,15 +1614,7 @@ describe("runHeartbeatOnce", () => {
         { text: "All clear" },
         { text: "Reasoning: because nothing changed" },
       ]);
-      const sendWhatsApp = vi
-        .fn<
-          (
-            to: string,
-            text: string,
-            opts?: unknown,
-          ) => Promise<{ messageId: string; toJid: string }>
-        >()
-        .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+      const sendWhatsApp = createWhatsAppSendMock();
 
       await runHeartbeatOnce({
         cfg,
@@ -1789,18 +1650,7 @@ describe("runHeartbeatOnce", () => {
       await seedWhatsAppSession(storePath, sessionKey);
 
       replySpy.mockResolvedValue({ text: "Hello from heartbeat" });
-      const sendWhatsApp = vi
-        .fn<
-          (
-            to: string,
-            text: string,
-            opts?: unknown,
-          ) => Promise<{ messageId: string; toJid: string }>
-        >()
-        .mockResolvedValue({
-          messageId: "m1",
-          toJid: "jid",
-        });
+      const sendWhatsApp = createWhatsAppSendMock();
 
       await runHeartbeatOnce({
         cfg,
@@ -1888,11 +1738,7 @@ describe("runHeartbeatOnce", () => {
 
     const replySpy = vi.fn();
     replySpy.mockResolvedValue({ text: params.replyText ?? "Checked logs and PRs" });
-    const sendWhatsApp = vi
-      .fn<
-        (to: string, text: string, opts?: unknown) => Promise<{ messageId: string; toJid: string }>
-      >()
-      .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+    const sendWhatsApp = createWhatsAppSendMock();
     const res = await runHeartbeatOnce({
       cfg,
       ...(params.source
@@ -1995,11 +1841,7 @@ Some global directive after tasks.
     };
     await seedWhatsAppSession(storePath, resolveMainSessionKey(cfg));
     const replySpy = vi.fn().mockResolvedValue({ text: "Handled due heartbeat tasks" });
-    const sendWhatsApp = vi
-      .fn<
-        (to: string, text: string, opts?: unknown) => Promise<{ messageId: string; toJid: string }>
-      >()
-      .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+    const sendWhatsApp = createWhatsAppSendMock();
 
     const res = await runHeartbeatOnce({
       cfg,
@@ -2053,11 +1895,7 @@ tasks:
     };
     await seedWhatsAppSession(storePath, resolveMainSessionKey(cfg));
     const replySpy = vi.fn().mockResolvedValue({ text: "Handled due heartbeat tasks" });
-    const sendWhatsApp = vi
-      .fn<
-        (to: string, text: string, opts?: unknown) => Promise<{ messageId: string; toJid: string }>
-      >()
-      .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+    const sendWhatsApp = createWhatsAppSendMock();
 
     const res = await runHeartbeatOnce({
       cfg,
@@ -2255,16 +2093,7 @@ tasks:
   it("uses an internal-only cron prompt when heartbeat delivery target is none", async () => {
     const tmpDir = await createCaseDir("hb-cron-target-none");
     const storePath = path.join(tmpDir, "sessions.json");
-    const cfg: OpenClawConfig = {
-      agents: {
-        defaults: {
-          workspace: tmpDir,
-          heartbeat: { every: "5m", target: "none" },
-        },
-      },
-      channels: { whatsapp: { allowFrom: ["*"] } },
-      session: { store: storePath },
-    };
+    const cfg: OpenClawConfig = heartbeatTestConfig(tmpDir, "none", "whatsapp", storePath);
     const sessionKey = resolveMainSessionKey(cfg);
     await seedWhatsAppSession(storePath, sessionKey);
     enqueueSystemEvent("Cron: rotate logs", {
@@ -2274,11 +2103,7 @@ tasks:
 
     const replySpy = vi.fn();
     replySpy.mockResolvedValue({ text: "Handled internally" });
-    const sendWhatsApp = vi
-      .fn<
-        (to: string, text: string, opts?: unknown) => Promise<{ messageId: string; toJid: string }>
-      >()
-      .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+    const sendWhatsApp = createWhatsAppSendMock();
 
     try {
       const res = await runHeartbeatOnce({
@@ -2302,16 +2127,7 @@ tasks:
   it("uses an internal-only exec prompt when heartbeat delivery target is none", async () => {
     const tmpDir = await createCaseDir("hb-exec-target-none");
     const storePath = path.join(tmpDir, "sessions.json");
-    const cfg: OpenClawConfig = {
-      agents: {
-        defaults: {
-          workspace: tmpDir,
-          heartbeat: { every: "5m", target: "none" },
-        },
-      },
-      channels: { whatsapp: { allowFrom: ["*"] } },
-      session: { store: storePath },
-    };
+    const cfg: OpenClawConfig = heartbeatTestConfig(tmpDir, "none", "whatsapp", storePath);
     const sessionKey = resolveMainSessionKey(cfg);
     await seedWhatsAppSession(storePath, sessionKey);
     enqueueSystemEvent("exec finished: backup completed", {
@@ -2321,11 +2137,7 @@ tasks:
 
     const replySpy = vi.fn();
     replySpy.mockResolvedValue({ text: "Handled internally" });
-    const sendWhatsApp = vi
-      .fn<
-        (to: string, text: string, opts?: unknown) => Promise<{ messageId: string; toJid: string }>
-      >()
-      .mockResolvedValue({ messageId: "m1", toJid: "jid" });
+    const sendWhatsApp = createWhatsAppSendMock();
 
     try {
       const res = await runHeartbeatOnce({

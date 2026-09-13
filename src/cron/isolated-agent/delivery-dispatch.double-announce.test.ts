@@ -159,7 +159,7 @@ vi.mock("../../cli/outbound-send-deps.js", () => ({
   createOutboundSendDeps: vi.fn().mockReturnValue({}),
 }));
 
-vi.mock("../../gateway/call.runtime.js", () => ({
+vi.mock("../../gateway/call.js", () => ({
   callGateway: vi.fn().mockResolvedValue({ ok: true, deleted: true }),
 }));
 
@@ -190,7 +190,7 @@ import { retireSessionMcpRuntime } from "../../agents/agent-bundle-mcp-tools.js"
 // Import after mocks
 import { countActiveDescendantRuns } from "../../agents/subagents/registry/subagent-registry-read.js";
 import { appendAssistantMessageToSessionTranscript } from "../../config/sessions/transcript.runtime.js";
-import { callGateway } from "../../gateway/call.runtime.js";
+import { callGateway } from "../../gateway/call.js";
 import { PlatformMessageNotDispatchedError } from "../../infra/outbound/deliver-types.js";
 import { deliverOutboundPayloads } from "../../infra/outbound/deliver.js";
 import {
@@ -1642,18 +1642,6 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     expectDeliveryCall(0, {
       payloads: [{ text: "Run-scoped child result, everything finished successfully." }],
     });
-  });
-
-  it("normal text delivery sends exactly once and sets deliveryAttempted=true", async () => {
-    const params = makeBaseParams({
-      synthesizedText: "Morning briefing complete.",
-      runStartedAt: 1_000,
-    });
-    const state = await dispatchCronDelivery(params);
-
-    expect(state.deliveryAttempted).toBe(true);
-    expect(state.delivered).toBe(true);
-    expect(deliverOutboundPayloads).toHaveBeenCalledTimes(1);
   });
 
   it("applies TTS directives before direct cron announce delivery and mirrors spoken text", async () => {

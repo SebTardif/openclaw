@@ -4,7 +4,7 @@ use crate::quickchat;
 use crate::DesktopState;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Manager};
@@ -12,8 +12,11 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 const OPEN_ID: &str = "open-dashboard";
+const CONNECTION_SETTINGS_ID: &str = "connection-settings";
 const QUICKCHAT_ID: &str = "quickchat";
 const CHECK_UPDATES_ID: &str = "check-for-updates";
+const UPDATE_ACTION_ID: &str = "update-action";
+const NO_UPDATE_ACTION_LABEL: &str = "No update action available";
 const START_AT_LOGIN_ID: &str = "start-at-login";
 const QUICKCHAT_SHORTCUT_ID: &str = "quickchat-shortcut";
 const GLOBAL_SHORTCUT_ID: &str = "global-shortcut";
@@ -27,8 +30,11 @@ const QUIT_ID: &str = "quit";
 
 pub struct TrayHandles {
     _tray: TrayIcon<tauri::Wry>,
+    #[cfg(target_os = "linux")]
+    visible: Mutex<bool>,
     status: MenuItem<tauri::Wry>,
-    status_line: Mutex<StatusLine>,
+    status_line: Arc<Mutex<StatusLine>>,
+    update_action: MenuItem<tauri::Wry>,
     quickchat_shortcut: Option<CheckMenuItem<tauri::Wry>>,
     start: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
@@ -38,6 +44,9 @@ pub struct TrayHandles {
 struct StatusLine {
     gateway: String,
     pending_count: usize,
+    installed: bool,
+    running: bool,
+    stopped: bool,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -79,31 +88,81 @@ impl StatusLine {
 }
 
 impl TrayHandles {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn set_visible(&self, visible: bool) {
+        let mut current = self.visible.lock().expect("tray visibility mutex poisoned");
+        if *current == visible {
+            return;
+        }
+        match self._tray.set_visible(visible) {
+            Ok(()) => *current = visible,
+            Err(error) => eprintln!("Could not change desktop tray visibility: {error}"),
+        }
+    }
+
     pub fn update(&self, snapshot: &GatewaySnapshot) {
         let mut status_line = self.status_line.lock().expect("tray status mutex poisoned");
         status_line.gateway.clone_from(&snapshot.status);
+        status_line.installed = snapshot.installed;
+        status_line.running = snapshot.running;
+        status_line.stopped = snapshot.phase == "stopped";
         if !snapshot.reachable {
             status_line.pending_count = 0;
         }
-        let _ = self.status.set_text(status_line.text());
-        let _ = self
-            .start
-            .set_enabled(snapshot.installed && !snapshot.running && !snapshot.reachable);
-        let _ = self
-            .stop
-            .set_enabled(snapshot.installed && snapshot.running);
-        let _ = self.restart.set_enabled(snapshot.installed);
+        drop(status_line);
+        self.refresh_status(self._tray.app_handle());
     }
 
     pub fn update_pending_count(&self, count: usize) {
-        let mut status_line = self.status_line.lock().expect("tray status mutex poisoned");
-        status_line.pending_count = count;
-        let _ = self.status.set_text(status_line.text());
+        self.status_line
+            .lock()
+            .expect("tray status mutex poisoned")
+            .pending_count = count;
+        self.refresh_status(self._tray.app_handle());
+    }
+
+    fn refresh_status(&self, app: &AppHandle) {
+        let state = Arc::clone(&self.status_line);
+        let status = self.status.clone();
+        let start = self.start.clone();
+        let stop = self.stop.clone();
+        let restart = self.restart.clone();
+        let _ = app.run_on_main_thread(move || {
+            let current = state.lock().expect("tray status mutex poisoned");
+            let (text, installed, running, stopped) = (
+                current.text(),
+                current.installed,
+                current.running,
+                current.stopped,
+            );
+            drop(current);
+            let _ = status.set_text(text);
+            let _ = start.set_enabled(stopped);
+            let _ = stop.set_enabled(installed && running);
+            let _ = restart.set_enabled(installed);
+        });
     }
 
     pub fn set_quickchat_shortcut_checked(&self, checked: bool) {
         if let Some(item) = self.quickchat_shortcut.as_ref() {
             set_quickchat_shortcut_checked(item, checked);
+        }
+    }
+
+    pub fn refresh_update_action(&self, app: &AppHandle) {
+        let item = self.update_action.clone();
+        let current_app = app.clone();
+        // Read at dispatch time: queued refreshes must not replay stale action snapshots.
+        if let Err(error) = app.run_on_main_thread(move || {
+            let (text, enabled) = match crate::updater::current_action(&current_app) {
+                crate::updater::UpdateAction::Unavailable => (NO_UPDATE_ACTION_LABEL, false),
+                crate::updater::UpdateAction::OpenDownloadPage => ("Open download page", true),
+                crate::updater::UpdateAction::RestartToUpdate => ("Restart to update", true),
+            };
+            let _ = item.set_text(text);
+            let _ = item.set_enabled(enabled);
+        }) {
+            eprintln!("Could not refresh update menu: {error}");
         }
     }
 }
@@ -117,6 +176,13 @@ pub fn build(
         app,
         "gateway-status",
         "Gateway: Checking…",
+        false,
+        None::<&str>,
+    )?;
+    let update_action = MenuItem::with_id(
+        app,
+        UPDATE_ACTION_ID,
+        NO_UPDATE_ACTION_LABEL,
         false,
         None::<&str>,
     )?;
@@ -174,7 +240,9 @@ pub fn build(
         .separator()
         .text(QUICKCHAT_ID, "Quick Chat")
         .text(OPEN_ID, "Open Dashboard")
+        .text(CONNECTION_SETTINGS_ID, "Connection Settings")
         .text(CHECK_UPDATES_ID, "Check for Updates")
+        .item(&update_action)
         .item(&start_at_login);
     let menu_builder = if let Some(quickchat_shortcut) = quickchat_shortcut.as_ref() {
         menu_builder.item(quickchat_shortcut)
@@ -266,11 +334,17 @@ pub fn build(
 
     Ok(TrayHandles {
         _tray: tray,
+        #[cfg(target_os = "linux")]
+        visible: Mutex::new(true),
         status,
-        status_line: Mutex::new(StatusLine {
+        status_line: Arc::new(Mutex::new(StatusLine {
             gateway: "Checking…".to_string(),
             pending_count: 0,
-        }),
+            installed: false,
+            running: false,
+            stopped: false,
+        })),
+        update_action,
         quickchat_shortcut,
         start,
         stop,
@@ -279,7 +353,7 @@ pub fn build(
 }
 
 pub fn show_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -287,8 +361,43 @@ pub fn show_window(app: &AppHandle) {
 }
 
 pub fn open_dashboard(app: &AppHandle) {
-    show_window(app);
-    app.state::<GatewayOperationQueue>().submit_connect();
+    #[cfg(target_os = "linux")]
+    {
+        let current_app = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            let state = current_app.state::<DesktopState>();
+            if state.is_quitting() {
+                return;
+            }
+            let presented = state
+                .return_from_connection_settings(&current_app)
+                .and_then(|returned| {
+                    if returned {
+                        Ok(true)
+                    } else {
+                        state.present_remote_dashboard()
+                    }
+                });
+            show_window(&current_app);
+            match presented {
+                Ok(true) => {}
+                Ok(false) => current_app
+                    .state::<GatewayOperationQueue>()
+                    .submit_connect(),
+                Err(error) => {
+                    eprintln!("{error}");
+                    crate::notify::notify(&current_app, "OpenClaw", &error);
+                }
+            }
+        }) {
+            eprintln!("Could not open the dashboard: {error}");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        show_window(app);
+        app.state::<GatewayOperationQueue>().submit_connect();
+    }
 }
 
 fn handle_menu(
@@ -301,15 +410,20 @@ fn handle_menu(
 ) {
     match id {
         QUIT_ID => {
-            state.quit();
-            app.exit(0);
+            state.quit(app);
         }
         QUICKCHAT_ID => quickchat::toggle_quickchat(app),
         OPEN_ID => open_dashboard(app),
+        CONNECTION_SETTINGS_ID => {
+            if let Err(error) = state.show_connection_settings(app) {
+                eprintln!("Could not open Connection Settings: {error}");
+            }
+        }
         CHECK_UPDATES_ID => {
             show_window(app);
             crate::updater::spawn_check(app.clone());
         }
+        UPDATE_ACTION_ID => crate::updater::perform_action(app),
         START_AT_LOGIN_ID => toggle_autostart(app, start_at_login),
         QUICKCHAT_SHORTCUT_ID => {
             if let Some(quickchat_shortcut) = quickchat_shortcut {

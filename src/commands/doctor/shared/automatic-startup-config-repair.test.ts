@@ -2,9 +2,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { withEnvOverride } from "../../../config/test-helpers.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "../../../config/types.js";
 import { validateConfigObjectWithPlugins } from "../../../config/validation.js";
+import { withEnvAsync } from "../../../test-utils/env.js";
 import { VERSION } from "../../../version.js";
 import {
   isStartupConfigRepairResult,
@@ -129,9 +129,8 @@ describe("automatic startup config repair", () => {
     ).toBe(false);
   });
 
-  it("admits a config whose only migration is plugin-owned", () => {
-    // Regression: the pre-bootstrap trust check must reach plugin doctor contracts
-    // (here the bundled Active Memory retired-QMD removal), not only core migrations.
+  it("plans a config whose only migration is plugin-owned after state admission", () => {
+    // The full planner owns plugin contracts; pre-bootstrap uses core-only selection.
     const snapshot = invalidSnapshot({
       config: {
         plugins: { entries: { "active-memory": { config: { qmd: { enabled: true } } } } },
@@ -139,7 +138,7 @@ describe("automatic startup config repair", () => {
       issuePaths: ["plugins.entries.active-memory.config.qmd"],
     });
 
-    const resolved = resolveStartupConfigSnapshot(snapshot);
+    const resolved = planAutomaticConfigRepair(snapshot)?.snapshot;
 
     expect(resolved?.valid).toBe(true);
     expect(resolved?.sourceConfig.plugins?.entries?.["active-memory"]?.config).toEqual({});
@@ -151,9 +150,16 @@ describe("automatic startup config repair", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-startup-repair-preview-"));
     try {
       await fs.mkdir(path.join(root, "state", "openclaw.sqlite"), { recursive: true });
-      await withEnvOverride({ OPENCLAW_STATE_DIR: root }, async () => {
+      await withEnvAsync({ OPENCLAW_STATE_DIR: root }, async () => {
         const snapshot = invalidSnapshot({
-          config: { session: { idleMinutes: 45 } } as OpenClawConfig,
+          config: {
+            session: { idleMinutes: 45 },
+            meta: { lastTouchedAt: "2026-02-15T00:00:00.000Z" },
+            agents: { list: [{ id: "work", name: "Operator" }] },
+            plugins: {
+              installs: { example: { source: "path", installPath: "/synthetic/plugin" } },
+            },
+          } as OpenClawConfig,
           issuePaths: ["session.idleMinutes"],
         });
         const resolved = resolveStartupConfigSnapshot(snapshot);
@@ -161,6 +167,10 @@ describe("automatic startup config repair", () => {
         expect(resolved?.sourceConfig.session).toEqual({
           reset: { mode: "idle", idleMinutes: 45 },
         });
+        expect(resolved?.sourceConfig).not.toHaveProperty("meta.lastTouchedAt");
+        expect(resolved?.sourceConfig).not.toHaveProperty("plugins.installs");
+        expect(resolved?.sourceConfig.agents?.entries?.work).toEqual({ name: "Operator" });
+        expect(snapshot.sourceConfig).toHaveProperty("plugins.installs.example");
       });
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -197,6 +207,10 @@ describe("automatic startup config repair", () => {
       },
     },
     {
+      name: "malformed retired plugin records",
+      config: { plugins: { installs: { broken: { source: "invalid" } } } },
+    },
+    {
       name: "another invalid key at a retired key's schema parent",
       config: { meta: { lastTouchedAt: "2026-08-01T00:00:00.000Z", unrelatedRetiredKey: true } },
     },
@@ -208,5 +222,8 @@ describe("automatic startup config repair", () => {
     });
 
     expect(planAutomaticConfigRepair(snapshot)).toBeNull();
+    if (config.plugins && "installs" in config.plugins) {
+      expect(resolveStartupConfigSnapshot(snapshot)).toBeUndefined();
+    }
   });
 });

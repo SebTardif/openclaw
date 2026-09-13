@@ -7,6 +7,7 @@ import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import * as sqlite from "../../infra/node-sqlite.js";
 import * as integrity from "../../infra/sqlite-integrity-worker.js";
 import * as writerQueue from "../../shared/store-writer-queue.js";
+import { invalidateOpenClawAgentDatabaseValidation } from "../../state/openclaw-agent-db-validation-cache.js";
 import {
   closeOpenClawAgentDatabaseByPath,
   closeOpenClawAgentDatabasesAsync,
@@ -176,11 +177,13 @@ it.each([
   const f = fixture();
   if (phase === "preparation") {
     closeOpenClawAgentDatabaseByPath(f.databasePath);
+    invalidateOpenClawAgentDatabaseValidation(f.databasePath);
   }
   const parentChecks = nativeChecks(f.databasePath);
   const update = () => {
     if (phase === "commit") {
       closeOpenClawAgentDatabaseByPath(f.databasePath);
+      invalidateOpenClawAgentDatabaseValidation(f.databasePath);
     }
     return { label: "updated" };
   };
@@ -233,9 +236,13 @@ it.each([false, true])(
     const release = createDeferred();
     releases.push(() => release.resolve());
     const blocker = own(
-      runExclusiveSqliteSessionWrite(resolveSqliteScope(original), async () => {
-        await release.promise;
-      }),
+      runExclusiveSqliteSessionWrite(
+        resolveSqliteScope(original),
+        async () => {
+          await release.promise;
+        },
+        "session.transcript.batch",
+      ),
     );
     const scope = ambient ? { agentId: "main", sessionKey: original.sessionKey } : f.scope;
     const operation = own(
@@ -300,6 +307,7 @@ it("keeps the physical database owner for logical rows in a shared store", async
 it("retains FIFO, caller context and publication across cold admission", async () => {
   const f = fixture();
   closeOpenClawAgentDatabaseByPath(f.databasePath);
+  invalidateOpenClawAgentDatabaseValidation(f.databasePath);
   const gate = holdNative(f.databasePath);
   const contexts = new AsyncLocalStorage<string>();
   const order: string[] = [];
@@ -370,6 +378,7 @@ it.each(["dispose", "sync replacement"] as const)(
   async (mode) => {
     const f = fixture();
     closeOpenClawAgentDatabaseByPath(f.databasePath);
+    invalidateOpenClawAgentDatabaseValidation(f.databasePath);
     const gate = holdNative(f.databasePath);
     const update = vi.fn(() => ({ label: "must not commit" }));
     const committed = vi.fn();
@@ -413,6 +422,7 @@ it.each(["cancel", "revoke"] as const)(
         f.scope,
         () => {
           closeOpenClawAgentDatabaseByPath(f.databasePath);
+          invalidateOpenClawAgentDatabaseValidation(f.databasePath);
           return { sessionId: "uncommitted" };
         },
         {
@@ -488,9 +498,13 @@ it.each(["relative queued", "relative reopen", "implicit queued"] as const)(
       mode === "relative reopen"
         ? undefined
         : own(
-            runExclusiveSqliteSessionWrite(resolveSqliteScope(original), async () => {
-              await release.promise;
-            }),
+            runExclusiveSqliteSessionWrite(
+              resolveSqliteScope(original),
+              async () => {
+                await release.promise;
+              },
+              "session.transcript.batch",
+            ),
           );
     const operation = own(
       patchSessionEntryCore(

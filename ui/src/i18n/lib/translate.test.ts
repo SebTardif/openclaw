@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import { getSafeLocalStorage } from "../../local-storage.ts";
 import {
   createStorageMock,
@@ -25,16 +26,6 @@ function createManager() {
     loadTranslation,
     manager,
   };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, reject, resolve };
 }
 
 describe("I18nManager pending locale retry", () => {
@@ -113,6 +104,15 @@ describe("I18nManager pending locale retry", () => {
 
     expect(manager.getLocale()).toBe("de");
     expect(loadTranslation).not.toHaveBeenCalled();
+  });
+
+  it("looks up only the active locale when a caller owns its fallback", async () => {
+    const { manager } = createManager();
+    manager.registerTranslation("de", german);
+    await manager.setLocale("de");
+
+    expect(manager.translateActive("common.health")).toBe("Gesundheit");
+    expect(manager.translateActive("common.connected")).toBeUndefined();
   });
 
   it("deduplicates an in-flight target and permits retry after the shared load settles", async () => {

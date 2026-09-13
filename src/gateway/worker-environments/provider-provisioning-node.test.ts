@@ -46,6 +46,7 @@ describe("node worker provider provisioning", () => {
         payload: support.BOOTSTRAP_RECEIPT,
       }));
       const transport: NodeWorkerSupervisorTransport = {
+        getCurrentNode: async (nodeId) => (node.nodeId === nodeId ? node : undefined),
         hasCurrentRunner: () => true,
         listCurrentNodes: async () => [node],
         isCurrent: (candidate) => candidate === node,
@@ -196,6 +197,7 @@ describe("node worker provider provisioning", () => {
           prepareNodeBootstrap: async () => {
             entered.resolve();
             await prepared.promise;
+            return support.NODE_BOOTSTRAP.sha256;
           },
           prepareNodeEnrollment: async () => {
             throw new Error("provider does not need enrollment in this case");

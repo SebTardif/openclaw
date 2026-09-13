@@ -5,6 +5,7 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { withAgentRosterFactsBatch } from "../agents/agent-scope-config.js";
 import { resolveAgentConfig } from "../agents/agent-scope.js";
 import { DEFAULT_CONTEXT_TOKENS, DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
+import { readStartupRecoveryWarning } from "../agents/main-session-recovery/main-session-restart-recovery-diagnostics.js";
 import { areRuntimeModelRefsEquivalent } from "../agents/model-runtime-aliases.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { resolveProjectedSessionContextTokens } from "../config/sessions/context-token-provenance.js";
@@ -34,22 +35,23 @@ import {
   toPublicPluginVerificationDiagnostic,
 } from "../plugins/runtime-degraded-state.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
+import { getSecretEgressCertificateStatus } from "../secrets/egress-proxy/registry.js";
 import {
   listActiveDegradedSecretOwners,
   redactSecretDegradationReason,
 } from "../secrets/runtime-degraded-state.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import { createLazyRuntimeSurface } from "../shared/lazy-runtime.js";
-import {
-  summarizeActionableTaskAuditFindings,
-  summarizeRetainedLostTaskAuditFindings,
-} from "../tasks/task-registry.audit.js";
+import { sortAndLimitBy } from "../shared/sort-and-limit.js";
+import { readOpenClawStateWalHealth } from "../state/openclaw-state-db-cache.js";
 import { deliveryContextFromSession } from "../utils/delivery-context.shared.js";
 import { resolveRuntimeServiceVersion } from "../version.js";
-import { readStatusSessionStores } from "./session-stores.js";
+import {
+  readStatusSessionStores,
+  STATUS_RECENT_SESSION_LIMIT,
+  type StatusSessionStores,
+} from "./session-stores.js";
 import type { HeartbeatStatus, SessionStatus, StatusSummary } from "./types.js";
-
-const RECENT_SESSION_LIMIT = 10;
 
 const channelSummaryModuleLoader = createLazyImportLoader(
   () => import("../infra/channel-summary.js"),
@@ -116,46 +118,11 @@ const buildFlags = (entry?: SessionEntry): string[] => {
   return flags;
 };
 
-function discountRetainedLostTaskFailures(
-  tasks: StatusSummary["tasks"],
-  retainedLostCount: number,
-): StatusSummary["tasks"] {
-  // Retained lost tasks are reported separately; avoid double-counting them as active failures.
-  if (retainedLostCount <= 0 || tasks.failures <= 0) {
-    return tasks;
-  }
-  return {
-    ...tasks,
-    failures: Math.max(0, tasks.failures - retainedLostCount),
-  };
-}
-
 function compareSessionCandidatesByUpdatedAt(
   left: SessionEntrySummary,
   right: SessionEntrySummary,
 ) {
   return (right.entry.updatedAt ?? 0) - (left.entry.updatedAt ?? 0);
-}
-
-function selectRecentSessionCandidates(
-  candidates: SessionEntrySummary[],
-  limit: number,
-): SessionEntrySummary[] {
-  const selected: SessionEntrySummary[] = [];
-  for (const candidate of candidates) {
-    const insertAt = selected.findIndex(
-      (selectedCandidate) => compareSessionCandidatesByUpdatedAt(candidate, selectedCandidate) < 0,
-    );
-    if (insertAt >= 0) {
-      selected.splice(insertAt, 0, candidate);
-      if (selected.length > limit) {
-        selected.pop();
-      }
-    } else if (selected.length < limit) {
-      selected.push(candidate);
-    }
-  }
-  return selected;
 }
 
 async function prepareSessionStatusDetails(cfg: OpenClawConfig, now: number) {
@@ -250,7 +217,7 @@ async function prepareSessionStatusDetails(cfg: OpenClawConfig, now: number) {
         });
         const configuredSessionModel = configuredForSession.model ?? DEFAULT_MODEL;
         const configuredSessionModelLabel = `${configuredForSession.provider ?? DEFAULT_PROVIDER}/${configuredSessionModel}`;
-        const resolvedModel = resolveSessionModelRef(cfg, entry, agentId);
+        const resolvedModel = resolveSessionModelRef(configuredForSession, entry);
         const model = resolvedModel.model ?? configuredSessionModel ?? null;
         const lookupModel =
           resolveStatusModelLookupRef({
@@ -389,6 +356,7 @@ export async function getStatusSummary(
     config?: OpenClawConfig;
     sourceConfig?: OpenClawConfig;
     hostDesktopStatus?: import("../gateway/desktop/host-source.js").HostDesktopStatus;
+    sessionStores?: StatusSessionStores;
   } = {},
 ): Promise<StatusSummary> {
   const { includeSensitive = true, includeChannelSummary = true } = options;
@@ -423,7 +391,11 @@ export async function getStatusSummary(
     return agentList.agents.map((agent, index) => {
       const summary = expectDefined(heartbeatSummaries[index], "heartbeat summary");
       let waitingForRoute = false;
-      if (summary.enabled && (summary.target === "last" || summary.target === "owner")) {
+      if (
+        summary.enabled &&
+        !agent.admissionRefusal &&
+        (summary.target === "last" || summary.target === "owner")
+      ) {
         const heartbeatSession = resolveHeartbeatSessionKey(
           cfg,
           agent.id,
@@ -453,7 +425,7 @@ export async function getStatusSummary(
       }
       return {
         agentId: agent.id,
-        enabled: summary.enabled,
+        enabled: summary.enabled && !agent.admissionRefusal,
         every: summary.every,
         everyMs: summary.everyMs,
         waitingForRoute,
@@ -484,15 +456,11 @@ export async function getStatusSummary(
   const taskMaintenanceModule = await taskRegistryMaintenanceModuleLoader.load();
   // Status may overlap a live Gateway, so task inspection must not initialize
   // the writable process registry or its schema-owning shared-state handle.
-  const taskInspection = taskMaintenanceModule.inspectTasksReadOnly();
-  const inspectableTasks = taskInspection.tasks;
-  const rawTasks = taskMaintenanceModule.getInspectableTaskRegistrySummary(inspectableTasks);
-  const taskAuditFindings = taskMaintenanceModule.getInspectableTaskAuditFindings(inspectableTasks);
+  const taskInspection = await taskMaintenanceModule.getInspectableTaskStatusSummaryReadOnly();
   const now = Date.now();
-  const taskAudit = summarizeActionableTaskAuditFindings(taskAuditFindings, { now });
-  const taskAuditRetainedLost = summarizeRetainedLostTaskAuditFindings(taskAuditFindings, { now });
+  const { taskAudit, taskAuditRetainedLost } = taskInspection;
   const tasks: StatusSummary["tasks"] = {
-    ...discountRetainedLostTaskFailures(rawTasks, taskAuditRetainedLost.count),
+    ...taskInspection.tasks,
     ...(taskInspection.state === "migration-required"
       ? {
           warning:
@@ -503,14 +471,20 @@ export async function getStatusSummary(
 
   const sessionDetails = includeSensitive ? await prepareSessionStatusDetails(cfg, now) : undefined;
 
-  const sessionStores = readStatusSessionStores(
-    cfg,
-    agentList.agents,
-    includeSensitive ? RECENT_SESSION_LIMIT : 0,
-  );
+  const sessionStores =
+    options.sessionStores ??
+    readStatusSessionStores(
+      cfg,
+      agentList.agents,
+      includeSensitive ? STATUS_RECENT_SESSION_LIMIT : 0,
+    );
   const byAgent = await Promise.all(
     sessionStores.byAgent.map(async ({ agent, path, count, recent }) => ({
       agentId: agent.id,
+      ...(agent.status ? { status: agent.status } : {}),
+      ...(includeSensitive && agent.admissionRefusal
+        ? { admissionRefusal: agent.admissionRefusal }
+        : {}),
       path: includeSensitive ? path : "[redacted]",
       count,
       recent: sessionDetails ? await sessionDetails.buildSessionRows(recent) : [],
@@ -518,7 +492,11 @@ export async function getStatusSummary(
   );
   const recent = sessionDetails
     ? await sessionDetails.buildSessionRows(
-        selectRecentSessionCandidates(sessionStores.recent, RECENT_SESSION_LIMIT),
+        sortAndLimitBy(
+          sessionStores.recent,
+          STATUS_RECENT_SESSION_LIMIT,
+          compareSessionCandidatesByUpdatedAt,
+        ),
       )
     : [];
   const hostDesktopStatus =
@@ -528,8 +506,10 @@ export async function getStatusSummary(
         await import("../gateway/desktop/host-source.js")
       ).inspectHostDesktop({ config: cfg.desktop?.host })
     ).status;
+  const sqliteWal = readOpenClawStateWalHealth();
   return {
     runtimeVersion: resolveRuntimeServiceVersion(process.env),
+    sqliteWal: sqliteWal && !includeSensitive ? { ...sqliteWal, error: undefined } : sqliteWal,
     hostDesktop: hostDesktopStatus,
     linkChannel: linkContext
       ? {
@@ -546,6 +526,8 @@ export async function getStatusSummary(
     channelSummary,
     queuedSystemEvents,
     startupMigrationWarning: readStartupMigrationWarning(includeSensitive),
+    startupRecoveryWarning: readStartupRecoveryWarning(includeSensitive),
+    secretEgressProxy: getSecretEgressCertificateStatus(),
     degradedSecretOwners: listActiveDegradedSecretOwners().map(
       ({ ownerKind, ownerId, state, degradationState, paths: ownerPaths, reason }) => {
         const redactedReason: string = redactSecretDegradationReason(reason);

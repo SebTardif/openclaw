@@ -211,6 +211,7 @@ export async function runEmbeddedFallbackCandidate(
         suppressTranscriptOnlyAssistantPersistence:
           turn.followupRun.run.suppressTranscriptOnlyAssistantPersistence,
         assistantErrorTranscript: params.assistantErrorTranscript,
+        authProfileFailurePolicy: params.authProfileFailurePolicy,
         prepareAssistantTranscriptMessage: turn.opts?.prepareAssistantTranscriptMessage,
         onAutoCompactionSucceeded: (count) => {
           attemptCompactionCount = Math.max(attemptCompactionCount, count);
@@ -241,6 +242,7 @@ export async function runEmbeddedFallbackCandidate(
         },
         onDeferredLifecycleOwner: params.deferredLifecycle.adopt,
         onDeferredLifecycleAbort: params.deferredLifecycle.abort,
+        onRetryWait: params.deferredLifecycle.beginRetryWait,
         onExecutionStarted: (info) => {
           if (info?.lifecycleGeneration) {
             params.onLifecycleGeneration(info.lifecycleGeneration);

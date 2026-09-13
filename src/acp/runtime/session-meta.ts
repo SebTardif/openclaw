@@ -107,38 +107,11 @@ export function readAcpSessionMeta(params: {
   env?: NodeJS.ProcessEnv;
   databasePath?: string;
 }): SessionAcpMeta | undefined {
-  const sessionKey = params.sessionKey.trim();
-  if (!sessionKey) {
-    return undefined;
-  }
-  const storeEntry = readSessionEntryFromStore({
-    sessionKey,
-    agentId: params.agentId,
-    cfg: params.cfg,
-    env: params.env,
+  return readAcpSessionEntry({
+    ...params,
+    sessionKey: params.sessionKey.trim(),
     clone: false,
-  });
-  if (!storeEntry.storePath) {
-    return undefined;
-  }
-  const row = withExistingOpenClawStateDatabaseReadOnly(
-    ({ db }) =>
-      resolveReadableAcpSessionRow({
-        row: selectAcpSessionRowForStoreEntry(
-          db,
-          storeEntry.storeSessionKey,
-          storeEntry.agentId,
-          storeEntry.cfg,
-          storeEntry.entry,
-        ),
-        entry: storeEntry.entry,
-      }),
-    { env: params.env, path: params.databasePath },
-  );
-  if (!row) {
-    return undefined;
-  }
-  return rowToAcpSessionMeta(row);
+  })?.acp;
 }
 
 export function readAcpSessionMetaForEntry(params: {
@@ -191,9 +164,6 @@ export function readAcpSessionMetaBatch(params: {
   for (const item of params.entries) {
     const rawSessionKey = item.sessionKey.trim();
     const sessionKey = buildAcpDatabaseSessionKey(rawSessionKey, item.agentId);
-    if (!sessionKey) {
-      continue;
-    }
     if (item.entry?.acp) {
       result.set(item.entry, item.entry.acp);
       continue;
@@ -414,21 +384,14 @@ export function readAcpSessionEntry(params: {
   if (!storeEntry.storePath) {
     return null;
   }
-  const row = withExistingOpenClawStateDatabaseReadOnly(
-    ({ db }) =>
-      resolveReadableAcpSessionRow({
-        row: selectAcpSessionRowForStoreEntry(
-          db,
-          storeEntry.storeSessionKey,
-          storeEntry.agentId,
-          storeEntry.cfg,
-          storeEntry.entry,
-        ),
-        entry: storeEntry.entry,
-      }),
-    { env: params.env, path: params.databasePath },
-  );
-  const acp = row ? rowToAcpSessionMeta(row) : undefined;
+  const acp = readAcpSessionMetaForEntry({
+    sessionKey: storeEntry.storeSessionKey,
+    agentId: storeEntry.agentId,
+    cfg: storeEntry.cfg,
+    entry: storeEntry.entry,
+    env: params.env,
+    databasePath: params.databasePath,
+  });
   return {
     cfg: storeEntry.cfg,
     agentId: storeEntry.agentId,

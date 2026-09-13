@@ -135,6 +135,11 @@ type ProgressCallbackResult = boolean | void;
 
 /** Reply generation options shared by auto-reply, webchat, channels, and tests. */
 export type GetReplyOptions = {
+  /** Channel-owned participant name encoding for source replies sent through message actions. */
+  groupThreadReplyFormatter?: (
+    text: string,
+    participant: { agentId: string; name: string },
+  ) => string;
   /** Override run id for agent events (defaults to random UUID). */
   runId?: string;
   /** Stable provider prompt-cache affinity key; distinct from run id/idempotency. */
@@ -311,6 +316,8 @@ export type GetReplyOptions = {
     phase?: string;
     title?: string;
     explanation?: string;
+    /** Prepared literal text; unmarked explanations retain authored Markdown. */
+    explanationFormat?: "plain";
     steps?: AgentPlanStep[];
     source?: string;
   }) => Promise<ProgressCallbackResult> | ProgressCallbackResult;
@@ -394,4 +401,6 @@ export type GetReplyOptions = {
   hasRepliedRef?: { value: boolean };
   /** Override agent timeout in seconds (0 = no timeout). Threads through to resolveAgentTimeoutMs. */
   timeoutOverrideSeconds?: number;
+  /** Millisecond run timeout override; takes precedence over seconds (0 = no timeout). */
+  timeoutOverrideMs?: number;
 };

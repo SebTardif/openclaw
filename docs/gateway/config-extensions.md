@@ -13,18 +13,18 @@ For the full key index and the other top-level config domains, see [Configuratio
 
 ## MCP
 
-OpenClaw-managed MCP server definitions live under `mcp.servers` and are
-consumed by embedded OpenClaw and other runtime adapters. The `openclaw mcp list`,
-`show`, `set`, and `unset` commands manage this block without connecting to the
-target server during config edits.
+OpenClaw-managed MCP server definitions live under `mcp.servers` for embedded
+OpenClaw and other runtime adapters. `openclaw mcp list`, `show`, `set`, and
+`unset` manage this block without connecting to the servers. The Fetch example
+requires [`uv`/`uvx`](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```json5
 {
   mcp: {
     servers: {
       docs: {
-        command: "npx",
-        args: ["-y", "@modelcontextprotocol/server-fetch"],
+        command: "uvx",
+        args: ["mcp-server-fetch"],
       },
       remote: {
         url: "https://example.com/mcp",
@@ -205,7 +205,7 @@ See [MCP](/cli/mcp#openclaw-as-an-mcp-client-registry) and
 - Loaded from package or bundle directories under `~/.openclaw/extensions` and `<workspace>/.openclaw/extensions`, plus files or directories listed in `plugins.load.paths`.
 - Put standalone plugin files in `plugins.load.paths`; auto-discovered extension roots ignore top-level `.js`, `.mjs`, and `.ts` files so helper scripts in those roots do not block startup.
 - Discovery accepts native OpenClaw plugins plus compatible Codex bundles and Claude bundles, including manifestless Claude default-layout bundles.
-- With the default hybrid reload mode, ordinary plugin policy and entry changes hot-reload the plugin runtime. Plugin code, metadata, and discovery-root changes require a Gateway restart; active plugins can also declare restart-triggering config prefixes.
+- With the default hybrid reload mode, ordinary plugin policy, entry, and discovery-path changes hot-reload the plugin runtime. Entry config changes replace the affected instance. Use `openclaw plugins reload <id>` after source or manifest edits; active plugins can still declare restart-triggering config prefixes. See [Apply changes and inspect](/plugins/manage-plugins#apply-changes-and-inspect).
 - `allow`: optional allowlist (only listed plugins load). `deny` wins.
 - `plugins.entries.<id>.apiKey`: plugin-level API key convenience field (when supported by the plugin).
 - `plugins.entries.<id>.env`: plugin-scoped env var map.
@@ -373,6 +373,6 @@ See [Plugins](/tools/plugin).
 - Non-loopback binds: these routes require Gateway auth (token/password/trusted-proxy), same as other Gateway HTTP surfaces.
 - Node WebViews typically don't send auth headers; after a macOS node is paired and connected, the Gateway advertises a node-scoped `pluginSurfaceUrls.canvas` capability URL.
 - Capability URLs are bound to the active node WS session and expire quickly. IP-based fallback is not used.
-- Changes require a gateway restart.
+- `host.enabled` hot-applies through the Canvas plugin in the default hybrid reload mode. The `OPENCLAW_SKIP_CANVAS_HOST` environment override still requires a Gateway restart.
 
 ---

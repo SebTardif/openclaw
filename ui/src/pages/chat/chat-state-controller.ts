@@ -8,6 +8,7 @@ import { invalidateImageLightbox } from "./chat-state-page.ts";
 import { cancelChatStreamRenderFrame } from "./chat-state-render.ts";
 import { ChatAttachmentReadLifecycle } from "./components/chat-attachments.ts";
 import { releaseChatMediaResourceSubscriber } from "./components/chat-message-media.ts";
+import { clearSessionWorkspacePreviews } from "./components/chat-session-workspace-state.ts";
 import { clearSessionWorkspaceTimers } from "./components/chat-session-workspace.ts";
 import { ChatComposerPersistence, type ChatComposerPersistResult } from "./composer-persistence.ts";
 import type { AfterCommitEffect, RenderLifecycle } from "./render-lifecycle.ts";
@@ -24,6 +25,7 @@ export class ChatStateController<TState extends ChatPageHost> implements Reactiv
   private previousChatLoading = false;
   private previousChatMessages: unknown[] = [];
   private previousChatToolMessages: Record<string, unknown>[] = [];
+  private previousChatStreamSegments: ChatPageHost["chatStreamSegments"] = [];
   private previousGuardianNotices: ChatPageHost["guardianNotices"] = [];
   private previousChatStream: string | null = null;
   private previousRealtimeConversation: ChatPageHost["realtimeTalkConversation"] = [];
@@ -75,6 +77,7 @@ export class ChatStateController<TState extends ChatPageHost> implements Reactiv
     this.previousChatLoading = state.chatLoading;
     this.previousChatMessages = state.chatMessages;
     this.previousChatToolMessages = state.chatToolMessages;
+    this.previousChatStreamSegments = state.chatStreamSegments;
     this.previousGuardianNotices = state.guardianNotices;
     this.previousChatStream = state.chatStream;
     this.previousRealtimeConversation = state.realtimeTalkConversation;
@@ -216,6 +219,7 @@ export class ChatStateController<TState extends ChatPageHost> implements Reactiv
     const messagesChanged =
       this.previousChatMessages !== state.chatMessages ||
       this.previousChatToolMessages !== state.chatToolMessages ||
+      this.previousChatStreamSegments !== state.chatStreamSegments ||
       this.previousGuardianNotices !== state.guardianNotices ||
       this.previousRealtimeConversation !== state.realtimeTalkConversation;
     const streamChanged = this.previousChatStream !== state.chatStream;
@@ -225,6 +229,7 @@ export class ChatStateController<TState extends ChatPageHost> implements Reactiv
     this.previousChatLoading = state.chatLoading;
     this.previousChatMessages = state.chatMessages;
     this.previousChatToolMessages = state.chatToolMessages;
+    this.previousChatStreamSegments = state.chatStreamSegments;
     this.previousGuardianNotices = state.guardianNotices;
     this.previousChatStream = state.chatStream;
     this.previousRealtimeConversation = state.realtimeTalkConversation;
@@ -295,6 +300,13 @@ export class ChatStateController<TState extends ChatPageHost> implements Reactiv
       cancelChatStreamRenderFrame(state);
       cancelChatScroll(state);
       invalidateImageLightbox(state);
+      if (
+        state.sidebarContent?.kind === "loading" ||
+        state.sidebarContent?.kind === "unavailable"
+      ) {
+        state.sidebarContent = null;
+      }
+      clearSessionWorkspacePreviews(state);
       clearSessionWorkspaceTimers(state);
       stopChatRealtimeTalk(state);
       state.resetToolStream?.();

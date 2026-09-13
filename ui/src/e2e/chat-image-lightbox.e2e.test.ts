@@ -126,6 +126,21 @@ describeControlUiE2e("Control UI image lightbox", () => {
 
       const transcriptTrigger = page.getByRole("button", { name: "Open image OpenClaw banner" });
       await transcriptTrigger.waitFor({ state: "visible", timeout: 10_000 });
+      const transcriptImage = transcriptTrigger.getByRole("img");
+      const contextMenuPrevented = transcriptImage.evaluate(
+        (image) =>
+          new Promise<boolean>((resolve) => {
+            image.addEventListener(
+              "contextmenu",
+              (event) => setTimeout(() => resolve(event.defaultPrevented), 0),
+              { once: true },
+            );
+          }),
+      );
+      await transcriptImage.click({ button: "right" });
+      expect(await contextMenuPrevented).toBe(false);
+      expect(await page.locator(".chat-reply-context-menu").count()).toBe(0);
+      await page.keyboard.press("Escape");
       await transcriptTrigger.click();
 
       const dialog = page.getByRole("dialog", { name: "Image preview: OpenClaw banner" });
@@ -230,6 +245,7 @@ describeControlUiE2e("Control UI image lightbox", () => {
         .toBe(true);
 
       await openChatSidePanelType(page, "Files");
+      await page.locator(".chat-workspace-rail__group-summary", { hasText: "Artifacts" }).click();
       const artifactRow = page.locator(".chat-workspace-rail__file-open", {
         hasText: "openclaw-banner.png",
       });

@@ -30,18 +30,20 @@ import {
 import { resolveDefaultSessionStorePath, resolveSessionStorePathCore } from "./paths.js";
 import {
   loadSessionEntryReadOnly,
-  loadTranscriptEvents,
   isSessionTranscriptProjectionUnavailableError,
   persistSessionTranscriptTurn,
   readActiveTranscriptEntryAnchor,
+  readLatestSessionTranscriptMessageEvent,
   readLatestTranscriptAssistantText,
   readSessionTranscriptMessageEventPage,
   resolveSessionEntrySelection,
   updateSessionEntry,
+  waitForSessionTranscriptProjection,
   type SessionTranscriptTurnPersistOptions,
   type SessionTranscriptTurnWriteContext,
   type SessionTranscriptTurnExpectedState,
   type TranscriptEntryAnchor,
+  type TranscriptEvent,
 } from "./session-accessor.js";
 import type {
   SessionLifecycleRevisionExpectation,
@@ -59,10 +61,6 @@ import {
   readPreferredUpstreamUserText,
 } from "./transcript-recent-window.js";
 import { streamSessionTranscriptLinesReverse } from "./transcript-stream.js";
-import {
-  scanSessionTranscriptTree,
-  selectSessionTranscriptTreePathNodes,
-} from "./transcript-tree.js";
 import type { InternalSessionEntry as SessionEntry } from "./types.js";
 
 type SessionTranscriptAppendTarget = {
@@ -198,11 +196,11 @@ type SessionConversationTranscriptTarget = {
   sqliteScope?: SqliteSessionFileMarker;
 };
 
-function parseRecentConversationText(
-  line: string,
+function extractRecentConversationText(
+  event: TranscriptEvent,
   options: ReadRecentSessionConversationTextOptions = {},
 ): SessionRecentConversationText | undefined {
-  const parsed = JSON.parse(line) as {
+  const parsed = event as {
     id?: unknown;
     message?: unknown;
   };
@@ -282,26 +280,29 @@ async function readRecentUserAssistantTextFromSqliteTranscript(
       sessionId: scope.sessionId,
       storePath: scope.storePath,
     };
-    const recent: SessionRecentConversationText[] = [];
-    for (let offset = 0; recent.length < limit; offset += pageSize) {
-      const page = readSessionTranscriptMessageEventPage(readScope, {
-        maxMessages: pageSize,
-        offset,
-      });
-      if (page.events.length === 0) {
-        break;
-      }
-      for (const event of page.events.toReversed()) {
-        const entry = parseRecentConversationText(JSON.stringify(event.event), options);
-        if (entry && isWithinTranscriptWindow(entry.timestamp, options)) {
-          recent.push(entry);
-          if (recent.length >= limit) {
-            break;
+    const { readRestoredSessionTranscript } = await import("./session-cold-storage-read.js");
+    return await readRestoredSessionTranscript(readScope, () => {
+      const recent: SessionRecentConversationText[] = [];
+      for (let offset = 0; recent.length < limit; offset += pageSize) {
+        const page = readSessionTranscriptMessageEventPage(readScope, {
+          maxMessages: pageSize,
+          offset,
+        });
+        if (page.events.length === 0) {
+          break;
+        }
+        for (const event of page.events.toReversed()) {
+          const entry = extractRecentConversationText(event.event, options);
+          if (entry && isWithinTranscriptWindow(entry.timestamp, options)) {
+            recent.push(entry);
+            if (recent.length >= limit) {
+              break;
+            }
           }
         }
       }
-    }
-    return recent.toReversed();
+      return recent.toReversed();
+    });
   } catch (error) {
     if (isSessionTranscriptProjectionUnavailableError(error)) {
       return [];
@@ -365,18 +366,15 @@ export async function readLatestAssistantTextFromSessionTranscript(
       }
     | undefined,
 ): Promise<LatestAssistantTranscriptText | undefined> {
-  if (target && typeof target === "object") {
-    return readLatestTranscriptAssistantText(target);
+  const sqliteScope =
+    target && typeof target === "object" ? target : parseSqliteSessionFileMarker(target);
+  if (sqliteScope) {
+    const { readRestoredSessionTranscript } = await import("./session-cold-storage-read.js");
+    return readRestoredSessionTranscript(sqliteScope, () =>
+      readLatestTranscriptAssistantText(sqliteScope),
+    );
   }
-  const sessionFile = target;
-  const sqliteMarker = parseSqliteSessionFileMarker(sessionFile);
-  if (sqliteMarker) {
-    return readLatestTranscriptAssistantText({
-      agentId: sqliteMarker.agentId,
-      sessionId: sqliteMarker.sessionId,
-      storePath: sqliteMarker.storePath,
-    });
-  }
+  const sessionFile = typeof target === "string" ? target : undefined;
   if (!sessionFile?.trim()) {
     return undefined;
   }
@@ -592,6 +590,11 @@ export async function appendExactAssistantMessageToSessionTranscript(params: {
       sessionKey: resolved.normalizedKey,
       storePath,
     };
+    if (isRedundantDeliveryMirror(params.message) && !identifiedDeliveryMirror) {
+      // Reconciliation needs the writer queue. Wait before entering it, then
+      // read the current projected tail again inside the guarded append.
+      await waitForSessionTranscriptProjection(target);
+    }
     let latestEquivalentAssistantId: string | undefined;
     // Identified delivery mirrors, including suppressed finals, dedupe only by
     // key so same-text markers from different source ids remain separate rows.
@@ -741,29 +744,23 @@ async function readLatestVisibleTranscriptMessage(scope: {
   sessionKey?: string;
   storePath: string;
 }): Promise<{ id?: string; message: unknown } | undefined> {
-  const events = await loadTranscriptEvents(scope).catch(() => []);
-  const tree = scanSessionTranscriptTree(events);
-  const visiblePath = selectSessionTranscriptTreePathNodes(tree, tree.leafId);
-  const visibleEvents =
-    visiblePath.length > 0
-      ? visiblePath.map((node) => node.entry)
-      : tree.hasLeafControl
-        ? []
-        : events;
-  for (const event of visibleEvents.toReversed()) {
+  try {
+    const event = readLatestSessionTranscriptMessageEvent(scope)?.event;
     if (!event || typeof event !== "object" || Array.isArray(event)) {
-      continue;
+      return undefined;
     }
     const record = event as { id?: unknown; message?: unknown };
     if (record.message === undefined) {
-      continue;
+      return undefined;
     }
     return {
       ...(typeof record.id === "string" ? { id: record.id } : {}),
       message: record.message,
     };
+  } catch {
+    // Mirror deduplication remains best-effort when transcript reads are unavailable.
+    return undefined;
   }
-  return undefined;
 }
 
 function isIdentifiedDeliveryMirror(message: SessionTranscriptAssistantMessage): boolean {

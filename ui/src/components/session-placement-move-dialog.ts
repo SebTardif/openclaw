@@ -4,6 +4,7 @@ import { t } from "../i18n/index.ts";
 import { formatUiError } from "../lib/format-error.ts";
 import {
   renderCloudMachineMenuItems,
+  renderCloudOsMenuItems,
   renderCloudProfileMenuItems,
   renderSessionMenuItem,
 } from "../pages/new-session/cloud-target.ts";
@@ -23,6 +24,7 @@ type Options = {
   mode: "move" | "restart";
   sessionLabel: string;
   activeRun: boolean;
+  gatewayDisabledReason?: string;
   deviceDisabledReason?: string;
   profileDisabledReason?: (profile: DraftCloudProfile) => string | undefined;
   loadCatalog: () => Promise<Catalog>;
@@ -79,9 +81,11 @@ export function showSessionPlacementTargetDialog(
         return;
       }
       const machineClass = cloudMachines.resolve(selected.profileId);
+      const os = cloudMachines.resolveOs(selected.profileId);
       finish({
         ...selected,
         ...(machineClass ? { machineClass } : {}),
+        ...(os ? { os } : {}),
       });
     };
 
@@ -132,20 +136,18 @@ export function showSessionPlacementTargetDialog(
                     ? html`<div class="exec-approval-error" role="alert">${loadError}</div>`
                     : html`
                         <div class="new-session-page__picker-root">
-                          ${
-                            restart
-                              ? nothing
-                              : renderSessionMenuItem(
-                                  {
-                                    value: "gateway",
-                                    label: t("newSession.gateway"),
-                                    icon: icons.monitor,
-                                    checked: selectedKey === "gateway",
-                                    onSelect: () => select({ kind: "gateway" }),
-                                  },
-                                  false,
-                                )
-                          }
+                          ${renderSessionMenuItem(
+                            {
+                              value: "gateway",
+                              label: t("newSession.gateway"),
+                              icon: icons.monitor,
+                              checked: selectedKey === "gateway",
+                              disabled: Boolean(options.gatewayDisabledReason),
+                              title: options.gatewayDisabledReason,
+                              onSelect: () => select({ kind: "gateway" }),
+                            },
+                            false,
+                          )}
                           ${
                             catalog.devices.length > 0
                               ? html`
@@ -188,7 +190,8 @@ export function showSessionPlacementTargetDialog(
                                     const profileSelected =
                                       selected?.kind === "profile" &&
                                       selected.profileId === profile.id;
-                                    const machines = profile.machines ?? [];
+                                    const machines = cloudMachines.machines(profile);
+                                    const operatingSystems = profile.operatingSystems ?? [];
                                     const selectedMachineId =
                                       cloudMachines.resolve(profile.id) ||
                                       machines.find((machine) => machine.default === true)?.id ||
@@ -203,6 +206,28 @@ export function showSessionPlacementTargetDialog(
                                         onSelect: (profileId) =>
                                           select({ kind: "profile", profileId }),
                                       })}
+                                      ${
+                                        profileSelected && operatingSystems.length >= 2
+                                          ? html`
+                                              <div class="new-session-page__menu-title">
+                                                ${t("newSession.operatingSystem")}
+                                              </div>
+                                              ${renderCloudOsMenuItems({
+                                                operatingSystems,
+                                                selectedId: cloudMachines.selectedOs(profile),
+                                                submitting: false,
+                                                onSelect: (osId) =>
+                                                  cloudMachines.selectOs(
+                                                    profile.id,
+                                                    osId,
+                                                    catalog.profiles,
+                                                    false,
+                                                    paint,
+                                                  ),
+                                              })}
+                                            `
+                                          : nothing
+                                      }
                                       ${
                                         profileSelected && machines.length > 0
                                           ? html`

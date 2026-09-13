@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { WebClient } from "@slack/web-api";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import type { OpenKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
-import { createPluginStateSyncKeyedStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
+import { createPluginStateKeyedStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { assertSlackDetachedTargetAllowed } from "../detached-target-admission.js";
 import { getSlackInstallationKind } from "../installation-identity-state.js";
@@ -158,16 +158,13 @@ describe("auth.test boot call", () => {
     const actualClient = await vi.importActual<typeof import("../client.js")>("../client.js");
     useSlackStartupAuthClientOnce(actualClient.createSlackStartupAuthClient);
     const globalFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          bot_id: "BBOT",
-          is_enterprise_install: false,
-          ok: true,
-          team_id: "T1",
-          user_id: "UBOT",
-        }),
-        { headers: { "content-type": "application/json" }, status: 200 },
-      ),
+      Response.json({
+        bot_id: "BBOT",
+        is_enterprise_install: false,
+        ok: true,
+        team_id: "T1",
+        user_id: "UBOT",
+      }),
     );
     const monitor = startSlackMonitor(monitorSlackProvider);
     try {
@@ -476,8 +473,8 @@ describe("presence polling transport", () => {
       enterprise_id: "E1",
       is_enterprise_install: true,
     });
-    getSlackRuntime().state.openSyncKeyedStore = <T>(options: OpenKeyedStoreOptions) =>
-      createPluginStateSyncKeyedStoreForTests<T>("slack", {
+    getSlackRuntime().state.openKeyedStore = <T>(options: OpenKeyedStoreOptions) =>
+      createPluginStateKeyedStoreForTests<T>("slack", {
         ...options,
         env: options.env ?? process.env,
       });
@@ -513,8 +510,8 @@ describe("presence polling transport", () => {
         },
       },
     });
-    getSlackRuntime().state.openSyncKeyedStore = <T>(options: OpenKeyedStoreOptions) =>
-      createPluginStateSyncKeyedStoreForTests<T>("slack", {
+    getSlackRuntime().state.openKeyedStore = <T>(options: OpenKeyedStoreOptions) =>
+      createPluginStateKeyedStoreForTests<T>("slack", {
         ...options,
         env: options.env ?? process.env,
       });

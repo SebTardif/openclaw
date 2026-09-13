@@ -7,7 +7,7 @@ extension OpenClawChatComposer {
         Button {
             self.pickFilesMac()
         } label: {
-            CompactChatAttachmentLabel()
+            CompactChatAttachmentLabel(controlSize: self.cleanControlHeight)
         }
         .buttonStyle(.plain)
         .controlSize(.small)
@@ -65,7 +65,7 @@ extension OpenClawChatComposer {
             self.verbosityPicker
                 .disabled(!self.viewModel.composerEffortMutationAvailable)
         } label: {
-            CompactChatAttachmentLabel()
+            CompactChatAttachmentLabel(controlSize: self.cleanControlHeight)
         }
         .menuIndicator(.hidden)
         .fixedSize()
@@ -104,7 +104,7 @@ extension OpenClawChatComposer {
                 }
                 .disabled(!self.viewModel.canRequestSessionCompact)
             } label: {
-                CleanChatContextUsageLabel(usage: usage)
+                CleanChatContextUsageLabel(usage: usage, controlSize: self.cleanControlHeight)
             }
             #if os(macOS)
             .fixedSize()
@@ -140,9 +140,7 @@ extension OpenClawChatComposer {
             self.cleanContextUsageMenu
             // Camera switching only displaces settings in the compact iOS footer.
             #if os(macOS)
-            if self.viewModel.showsModelPicker {
-                self.cleanInlineModelPicker(compact: compactModel)
-            }
+            self.cleanInlineModelPicker(compact: compactModel)
             self.cleanInlineEffortMenu
             #else
             if !self.cleanShowsCameraFlip {
@@ -163,15 +161,10 @@ extension OpenClawChatComposer {
                     .accessibilityIdentifier("chat-composer-model-selection-target")
                 Divider()
             }
-            Picker(
-                "Model",
-                selection: Binding(
-                    get: { self.viewModel.canonicalModelSelectionID },
-                    set: { self.viewModel.selectModel($0) }))
-            {
-                Text(self.viewModel.defaultModelLabel)
-                    .font(OpenClawChatTypography.captionSemiBold)
-                    .tag(OpenClawChatViewModel.defaultModelSelectionID)
+            Group {
+                self.modelMenuOption(
+                    self.viewModel.defaultModelLabel,
+                    selectionID: OpenClawChatViewModel.defaultModelSelectionID)
                 if !sections.pinned.isEmpty {
                     Section("Pinned") {
                         self.cleanInlineModelOptions(sections.pinned)
@@ -188,10 +181,6 @@ extension OpenClawChatComposer {
                     }
                 }
             }
-            .labelsHidden()
-            #if os(macOS)
-            .pickerStyle(.inline)
-            #endif
             .disabled(
                 !self.viewModel.composerModelMutationAvailable ||
                     self.viewModel.isUpdatingSessionSettings)
@@ -205,6 +194,10 @@ extension OpenClawChatComposer {
                         self.viewModel.isSelectedModelPinned ? "Unpin model" : "Pin model",
                         systemImage: self.viewModel.isSelectedModelPinned ? "star.slash" : "star")
                 }
+            }
+            if self.usesDesktopModelMenu {
+                Divider()
+                self.modelSignInButton
             }
             #endif
         } label: {
@@ -242,10 +235,10 @@ extension OpenClawChatComposer {
                 .font(.system(size: 9, weight: .semibold))
                 .accessibilityHidden(true)
         }
-        .font(OpenClawChatTypography.captionSemiBold)
+        .font(OpenClawChatTypography.caption)
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 8)
-        .frame(width: compact ? 104 : 180, height: CleanChatComposerMetrics.controlTouchSize)
+        .padding(.horizontal, 6)
+        .frame(width: compact ? 104 : 160, height: self.cleanControlHeight)
         .contentShape(Rectangle())
         #else
         if compact {
@@ -273,9 +266,10 @@ extension OpenClawChatComposer {
     private func cleanInlineModelOptions(_ models: [OpenClawChatModelChoice]) -> some View {
         ForEach(models) { model in
             let unavailable = self.viewModel.modelUnavailableDescription(model)
-            Text(verbatim: [model.displayLabel, unavailable].compactMap(\.self).joined(separator: " — "))
-                .font(OpenClawChatTypography.captionSemiBold)
-                .tag(model.selectionID)
+            self.modelMenuOption(
+                [model.displayLabel, model.capabilityDescription, unavailable].compactMap(\.self)
+                    .filter { !$0.isEmpty }.joined(separator: " — "),
+                selectionID: model.selectionID)
                 .disabled(unavailable != nil)
                 .accessibilityHint(unavailable ?? "")
         }
@@ -286,7 +280,7 @@ extension OpenClawChatComposer {
             if self.viewModel.showsThinkingPicker {
                 self.thinkingPicker
             }
-            if self.viewModel.selectedModelSupportsFastMode {
+            if self.viewModel.showsFastModeControls {
                 self.fastModeToggle
             }
         } label: {
@@ -303,7 +297,7 @@ extension OpenClawChatComposer {
                         .rotationEffect(.degrees(self.viewModel.composerInlineEffortAngle))
                 }
                 .frame(width: 18, height: 18)
-                if self.viewModel.fastModeSelectionID == "on" {
+                if self.viewModel.fastModeIsEnabled {
                     Image(systemName: "bolt.fill")
                         .font(OpenClawChatTypography.caption)
                         .foregroundStyle(OpenClawChatTheme.accent)
@@ -311,8 +305,8 @@ extension OpenClawChatComposer {
                 }
             }
             .frame(
-                width: CleanChatComposerMetrics.controlTouchSize,
-                height: CleanChatComposerMetrics.controlTouchSize)
+                width: self.cleanControlHeight,
+                height: self.cleanControlHeight)
             .contentShape(Rectangle())
         }
         .menuIndicator(.hidden)
@@ -372,6 +366,7 @@ extension OpenClawChatComposer {
                 isRealtimeTalkActive: self.talkControl?.isEnabled == true,
                 isComposerEnabled: self.isComposerEnabled,
                 isAttachmentInputEnabled: self.isAttachmentInputEnabled,
+                controlSize: self.cleanControlHeight,
                 onCancelDictation: {
                     ChatDictationActions.cancel(task: self.$dictationTask, control: self.dictationControl)
                 },

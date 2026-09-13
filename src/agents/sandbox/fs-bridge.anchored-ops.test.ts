@@ -84,6 +84,48 @@ describe("sandbox fs bridge anchored ops", () => {
   });
 
   it.each([
+    { name: "uncapped", maxBytes: undefined },
+    { name: "bounded", maxBytes: 5 },
+  ])("yields during $name reads while retaining the opened file", async ({ maxBytes }) => {
+    await withTempDir("openclaw-fs-bridge-async-read-", async (stateDir) => {
+      const { bridge, workspaceDir } = await createSeededSandboxFsBridge(stateDir);
+      const openRootFile = mockedOpenRootFile.getMockImplementation();
+      if (!openRootFile) {
+        throw new Error("expected the real sandbox root-file opener");
+      }
+      const events: string[] = [];
+      let heartbeat: Promise<void> | undefined;
+      mockedOpenRootFile.mockImplementationOnce(async (params) => {
+        const opened = await openRootFile(params);
+        if (opened.ok) {
+          await fs.rename(
+            path.join(workspaceDir, "from.txt"),
+            path.join(workspaceDir, "pinned.txt"),
+          );
+          await fs.writeFile(path.join(workspaceDir, "from.txt"), "replacement");
+          heartbeat = new Promise<void>((resolve) => {
+            setImmediate(() => {
+              events.push("event-loop");
+              resolve();
+            });
+          });
+        }
+        return opened;
+      });
+
+      let contents: Buffer;
+      try {
+        contents = await bridge.readFile({ filePath: "from.txt", maxBytes });
+        events.push("read-complete");
+      } finally {
+        await heartbeat;
+      }
+      expect(contents).toEqual(Buffer.from("hello"));
+      expect(events).toEqual(["event-loop", "read-complete"]);
+    });
+  });
+
+  it.each([
     { name: "empty files", contents: "", maxBytes: 0 },
     { name: "files at the exact limit", contents: "hello", maxBytes: 5 },
     {
@@ -287,6 +329,94 @@ describe("sandbox fs bridge anchored ops", () => {
       });
     },
   );
+
+  it.runIf(process.platform !== "win32")(
+    "resolvePinnedMutationTarget canonicalizes symlinked parents",
+    async () => {
+      await withTempDir("openclaw-fs-bridge-pinned-target-", async (stateDir) => {
+        const workspaceDir = path.join(stateDir, "workspace");
+        const realDir = path.join(workspaceDir, "real");
+        await fs.mkdir(realDir, { recursive: true });
+        await fs.symlink(realDir, path.join(workspaceDir, "alias"));
+
+        mockedExecDockerRaw.mockImplementation(async (args) => {
+          const script = getDockerScript(args);
+          if (script.includes('readlink -f -- "$cursor"')) {
+            const target = getDockerArg(args, 1);
+            return dockerExecResult(`${target.replace("/workspace/alias", "/workspace/real")}\n`);
+          }
+          return dockerExecResult("");
+        });
+
+        const bridge = createSandboxFsBridge({
+          sandbox: createSandbox({ workspaceDir, agentWorkspaceDir: workspaceDir }),
+        });
+
+        await expect(
+          bridge.resolvePinnedMutationTarget!({ filePath: "alias/note.txt", action: "write" }),
+        ).resolves.toEqual({
+          policyPath: "/workspace/real/note.txt",
+          pinnedPath: "/workspace/real/note.txt",
+        });
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "writeFile pins an authorized canonical destination without re-resolving aliases",
+    async () => {
+      await withTempDir("openclaw-fs-bridge-pinned-write-", async (stateDir) => {
+        const workspaceDir = path.join(stateDir, "workspace");
+        const realDir = path.join(workspaceDir, "real");
+        await fs.mkdir(realDir, { recursive: true });
+        await fs.symlink(realDir, path.join(workspaceDir, "alias"));
+
+        mockedExecDockerRaw.mockImplementation(async (args) => {
+          const script = getDockerScript(args);
+          if (script.includes('readlink -f -- "$cursor"')) {
+            // Simulates an attacker swap: any re-canonicalization through the
+            // alias after authorization would redirect the pin into .git.
+            const target = getDockerArg(args, 1);
+            return dockerExecResult(`${target.replace("/workspace/real", "/workspace/.git")}\n`);
+          }
+          if (script.includes('stat -c "%F|%s|%y"')) {
+            return dockerExecResult("regular file|1|2");
+          }
+          return dockerExecResult("");
+        });
+
+        const bridge = createSandboxFsBridge({
+          sandbox: createSandbox({ workspaceDir, agentWorkspaceDir: workspaceDir }),
+        });
+
+        await bridge.writeFile({
+          filePath: "alias/note.txt",
+          data: "updated",
+          pinnedPath: "/workspace/real/note.txt",
+        });
+
+        const writeArgs = requireDockerCall(findCallByDockerArg(1, "write"), "write")[0];
+        expect(getDockerArg(writeArgs, 2)).toBe("/workspace");
+        expect(getDockerArg(writeArgs, 3)).toBe("real");
+        expect(getDockerArg(writeArgs, 4)).toBe("note.txt");
+        expect(writeArgs).not.toContain("/workspace/.git");
+      });
+    },
+  );
+
+  it("rejects pinned destinations that do not match the requested basename", async () => {
+    await withTempDir("openclaw-fs-bridge-pinned-mismatch-", async (stateDir) => {
+      const { bridge } = await createSeededSandboxFsBridge(stateDir);
+
+      await expect(
+        bridge.writeFile({
+          filePath: "notes/todo.txt",
+          data: "updated",
+          pinnedPath: "/workspace/notes/other.txt",
+        }),
+      ).rejects.toThrow("Pinned sandbox destination does not match the requested path");
+    });
+  });
 
   it("stat anchors parent + basename", async () => {
     await withTempDir("openclaw-fs-bridge-contract-stat-", async (stateDir) => {

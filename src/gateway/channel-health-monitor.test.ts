@@ -3,6 +3,7 @@ import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coerci
  * Channel health monitor regression tests.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 import type { ChannelId, ChannelAccountSnapshot } from "../channels/plugins/types.public.js";
 import { startChannelHealthMonitor } from "./channel-health-monitor.js";
 import type { ChannelRuntimeSnapshot } from "./server-channel-runtime.types.js";
@@ -23,6 +24,7 @@ function createMockChannelManager(overrides?: Partial<ChannelManager>): ChannelM
     isAmbientAutostartSuppressed: vi.fn(() => false),
     markChannelLoggedOut: vi.fn(),
     isHealthMonitorEnabled: vi.fn(() => true),
+    isAccountListed: vi.fn(() => true),
     isManuallyStopped: vi.fn(() => false),
     isAutoRestartScheduled: vi.fn(() => false),
     resetRestartAttempts: vi.fn(),
@@ -886,10 +888,7 @@ describe("channel-health-monitor", () => {
   it.each(["manual stop", "abort signal"] as const)(
     "does not resume an in-flight restart after %s",
     async (stopMode) => {
-      let releaseStop: (() => void) | undefined;
-      const stopGate = new Promise<void>((resolve) => {
-        releaseStop = resolve;
-      });
+      const { promise: stopGate, resolve: releaseStop } = createDeferred();
       const abort = new AbortController();
       const manager = createSlackSnapshotManager(disconnectedAccount(Date.now() - 300_000), {
         stopChannel: vi.fn(async () => {
@@ -951,10 +950,7 @@ describe("channel-health-monitor", () => {
     { label: "replacement", shutdownAfterRetire: false, expectedStarts: 1 },
     { label: "replacement followed by shutdown", shutdownAfterRetire: true, expectedStarts: 0 },
   ])("coordinates the in-flight restart during $label", async (testCase) => {
-    let releaseStop: (() => void) | undefined;
-    const stopGate = new Promise<void>((resolve) => {
-      releaseStop = resolve;
-    });
+    const { promise: stopGate, resolve: releaseStop } = createDeferred();
     const staleAccount = disconnectedAccount(Date.now() - 300_000);
     const manager = createSnapshotManager(
       { slack: { first: staleAccount, second: staleAccount } },
@@ -983,10 +979,7 @@ describe("channel-health-monitor", () => {
   });
 
   it("bounds replacement handoff and abandons a late restart", async () => {
-    let releaseStop: (() => void) | undefined;
-    const stopGate = new Promise<void>((resolve) => {
-      releaseStop = resolve;
-    });
+    const { promise: stopGate, resolve: releaseStop } = createDeferred();
     const manager = createSlackSnapshotManager(disconnectedAccount(Date.now() - 300_000), {
       stopChannel: vi.fn(async () => {
         await stopGate;

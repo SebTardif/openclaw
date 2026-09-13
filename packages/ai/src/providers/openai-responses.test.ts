@@ -26,7 +26,7 @@ vi.mock("openai", () => ({
 
 import { createOpenAIResponsesClient } from "../transports/openai-responses-client.js";
 import { buildOpenAIResponsesParams } from "../transports/openai-responses-params-internal.js";
-import { streamOpenAIResponses } from "./openai-responses.js";
+import { streamOpenAIResponses, streamSimpleOpenAIResponses } from "./openai-responses.js";
 
 const context = {
   messages: [{ role: "user", content: "hello", timestamp: 0 }],
@@ -70,6 +70,19 @@ describe("OpenAI Responses provider", () => {
     },
   );
 
+  it.each([undefined, "default", "priority"] as const)(
+    "sends service tier %s from simple completions",
+    async (serviceTier) => {
+      await streamSimpleOpenAIResponses(model(), context, { apiKey: "test", serviceTier }).result();
+      expect(openAiMockState.params).toHaveLength(1);
+      if (serviceTier) {
+        expect(openAiMockState.params[0]).toMatchObject({ service_tier: serviceTier });
+      } else {
+        expect(openAiMockState.params[0]).not.toHaveProperty("service_tier");
+      }
+    },
+  );
+
   it("constructs the SDK client with the host guarded fetch", async () => {
     const hostFetch: typeof fetch = async () => new Response(null, { status: 500 });
     configureAiTransportHost({ buildModelFetch: () => hostFetch });
@@ -98,7 +111,7 @@ describe("OpenAI Responses provider", () => {
     expect(result.stopReason).toBe("error");
     expect(result.errorMessage).toContain('Provider "openrouter" requires an explicit base URL');
     expect(() =>
-      createOpenAIResponsesClient(missingEndpointModel, context, "sentinel-openrouter-key"),
+      createOpenAIResponsesClient(missingEndpointModel, "sentinel-openrouter-key", {}),
     ).toThrow('Provider "openrouter" requires an explicit base URL');
     expect(openAiMockState.configs).toEqual([]);
 
@@ -110,7 +123,7 @@ describe("OpenAI Responses provider", () => {
       apiKey: "sentinel-openrouter-key",
     }).result();
     expect(() =>
-      createOpenAIResponsesClient(configuredModel, context, "sentinel-openrouter-key"),
+      createOpenAIResponsesClient(configuredModel, "sentinel-openrouter-key", {}),
     ).not.toThrow();
     expect(
       openAiMockState.configs.map((config) => (config as { baseURL?: string }).baseURL),

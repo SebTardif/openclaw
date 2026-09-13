@@ -10,6 +10,7 @@ import {
   resolveTaskScriptPath,
 } from "./schtasks-layout.js";
 import {
+  describeUnverifiedPortListeners,
   findInstalledProcessPid,
   isNodeHostArgv,
   readWindowsProcessSnapshot,
@@ -42,6 +43,7 @@ import {
 import { probeScheduledTaskExists } from "./schtasks-state-probe.js";
 import { ScheduledTaskAutoStartRecoveryError } from "./schtasks-update-recovery.js";
 import { createGatewayLifecycleMutationReporter } from "./service-mutation.js";
+import { withGatewayServiceOperationLock } from "./service-operation-lock.js";
 import type {
   GatewayServiceControlArgs,
   GatewayServiceEnv,
@@ -169,7 +171,10 @@ export async function runScheduledTaskOrThrow(params: {
   env: GatewayServiceEnv;
   scriptPath: string;
   onMutation?: () => void;
+  assertCurrent?: () => void;
+  allowFallback?: boolean;
 }): Promise<ScheduledTaskActivation> {
+  params.assertCurrent?.();
   const run = await execSchtasks(["/Run", "/TN", params.taskName]);
   if (run.code !== 0) {
     throw new Error(`schtasks run failed: ${run.stderr || run.stdout}`.trim());
@@ -180,8 +185,8 @@ export async function runScheduledTaskOrThrow(params: {
   ) {
     return "scheduled-task";
   }
-  if (!shouldManageGatewayListenerPort(params.env)) {
-    await launchFallbackTaskScript(params.env);
+  if (params.allowFallback !== false && !shouldManageGatewayListenerPort(params.env)) {
+    await launchFallbackTaskScript(params.env, undefined, params.assertCurrent);
     return "direct-fallback";
   }
   throw new Error(
@@ -204,6 +209,7 @@ async function changeScheduledTaskEnabledState(params: {
   env: GatewayServiceEnv;
   enabled: boolean;
   beforeMutation?: () => Promise<void>;
+  assertCurrent?: () => void;
   restoreOnFailure?: boolean;
 }): Promise<boolean> {
   const taskName = resolveTaskName(params.env);
@@ -228,6 +234,7 @@ async function changeScheduledTaskEnabledState(params: {
 
   const action = params.enabled ? "/ENABLE" : "/DISABLE";
   await params.beforeMutation?.();
+  params.assertCurrent?.();
   const result = await execSchtasks(["/Change", "/TN", taskName, action]);
   if (result.code !== 0) {
     const detail = (result.stderr || result.stdout).trim() || "unknown error";
@@ -238,6 +245,7 @@ async function changeScheduledTaskEnabledState(params: {
       // A timeout can follow a committed /DISABLE, so restore the proven prior state.
       try {
         await params.beforeMutation?.();
+        params.assertCurrent?.();
         const restore = await execSchtasks(["/Change", "/TN", taskName, "/ENABLE"]);
         if (restore.code !== 0) {
           const restoreDetail = (restore.stderr || restore.stdout).trim() || "unknown error";
@@ -258,16 +266,42 @@ async function changeScheduledTaskEnabledState(params: {
 
 export async function suspendScheduledTaskAutoStartForUpdate(
   env: GatewayServiceEnv = process.env as GatewayServiceEnv,
-  options?: { beforeMutation?: () => Promise<void>; restoreOnFailure?: boolean },
+  options?: {
+    beforeMutation?: () => Promise<void>;
+    assertCurrent?: () => void;
+    restoreOnFailure?: boolean;
+  },
 ): Promise<boolean> {
-  return changeScheduledTaskEnabledState({ env, enabled: false, ...options });
+  const assertCaller = options?.assertCurrent;
+  return withGatewayServiceOperationLock(env, async (assertNative) =>
+    changeScheduledTaskEnabledState({
+      env,
+      enabled: false,
+      ...options,
+      assertCurrent: () => {
+        assertNative();
+        assertCaller?.();
+      },
+    }),
+  );
 }
 
 export async function resumeScheduledTaskAutoStartAfterUpdate(
   env: GatewayServiceEnv = process.env as GatewayServiceEnv,
-  options?: { beforeMutation?: () => Promise<void> },
+  options?: { beforeMutation?: () => Promise<void>; assertCurrent?: () => void },
 ): Promise<boolean> {
-  return changeScheduledTaskEnabledState({ env, enabled: true, ...options });
+  const assertCaller = options?.assertCurrent;
+  return withGatewayServiceOperationLock(env, async (assertNative) =>
+    changeScheduledTaskEnabledState({
+      env,
+      enabled: true,
+      ...options,
+      assertCurrent: () => {
+        assertNative();
+        assertCaller?.();
+      },
+    }),
+  );
 }
 
 async function shouldControlStartupEntry(env: GatewayServiceEnv): Promise<boolean> {
@@ -286,14 +320,21 @@ export async function stopScheduledTask({
   stdout,
   env,
   onMutation,
+  assertCurrent,
 }: GatewayServiceControlArgs): Promise<void> {
   const effectiveEnv = env ?? (process.env as GatewayServiceEnv);
   const reportMutation = createGatewayLifecycleMutationReporter(onMutation);
   if (await shouldControlStartupEntry(effectiveEnv)) {
-    await stopStartupEntry(effectiveEnv, stdout, () => reportMutation("startup-entry-stop"));
+    await stopStartupEntry(
+      effectiveEnv,
+      stdout,
+      () => reportMutation("startup-entry-stop"),
+      assertCurrent,
+    );
     return;
   }
   const taskName = resolveTaskName(effectiveEnv);
+  assertCurrent?.();
   const res = await execSchtasks(["/End", "/TN", taskName]);
   if (res.code !== 0 && !isScheduledTaskDefinitelyNotRunning(taskName)) {
     throw new Error(`schtasks end failed: ${res.stderr || res.stdout}`.trim());
@@ -305,17 +346,22 @@ export async function stopScheduledTask({
     : null;
   const stopPort = stopContext?.port ?? null;
   if (manageGatewayPort) {
-    await terminateScheduledTaskGatewayListeners(effectiveEnv, stopContext ?? undefined);
+    await terminateScheduledTaskGatewayListeners(
+      effectiveEnv,
+      stopContext ?? undefined,
+      assertCurrent,
+    );
   } else {
-    await terminateScheduledTaskNodeHost(effectiveEnv);
+    await terminateScheduledTaskNodeHost(effectiveEnv, assertCurrent);
   }
-  await terminateInstalledStartupRuntime(effectiveEnv);
+  await terminateInstalledStartupRuntime(effectiveEnv, assertCurrent);
   if (stopPort) {
     const probeHosts = stopContext?.probeHosts ?? [];
     const released = await waitForGatewayPortRelease(stopPort, 5_000, { probeHosts });
     if (!released) {
+      const listenerDetails = await describeUnverifiedPortListeners(stopPort, probeHosts);
       throw new Error(
-        `gateway port ${stopPort} is still busy after stop; remaining listener ownership could not be verified`,
+        `gateway port ${stopPort} is still busy after stop; remaining listener ownership could not be verified.${listenerDetails}`,
       );
     }
   }
@@ -326,16 +372,30 @@ export async function startScheduledTask({
   stdout,
   env,
   onMutation,
+  assertCurrent,
+  preserveAutoStart,
 }: GatewayServiceControlArgs): Promise<void> {
   const effectiveEnv = env ?? (process.env as GatewayServiceEnv);
   const reportMutation = createGatewayLifecycleMutationReporter(onMutation);
   if (await shouldControlStartupEntry(effectiveEnv)) {
-    await startStartupEntry(effectiveEnv, stdout, () => reportMutation("startup-entry-start"));
+    if (preserveAutoStart) {
+      throw new Error(
+        "Captured Scheduled Task registration is unavailable; refusing login-item fallback.",
+      );
+    }
+    await startStartupEntry(
+      effectiveEnv,
+      stdout,
+      () => reportMutation("startup-entry-start"),
+      assertCurrent,
+    );
     return;
   }
   const taskName = resolveTaskName(effectiveEnv);
   await runScheduledTaskOrThrow({
     taskName,
+    assertCurrent,
+    allowFallback: preserveAutoStart !== true,
     env: effectiveEnv,
     scriptPath: resolveTaskScriptPath(effectiveEnv),
     onMutation: () => reportMutation("schtasks-start"),
@@ -350,8 +410,10 @@ export async function restartRegisteredScheduledTask(params: {
   mode: { kind: "standard" } | { kind: "fallback-takeover" };
   onEndMutation?: () => void;
   onRunMutation?: () => void;
+  assertCurrent?: () => void;
 }): Promise<GatewayServiceRestartResult> {
   const taskName = resolveTaskName(params.env);
+  params.assertCurrent?.();
   const end = await execSchtasks(["/End", "/TN", taskName]);
   if (end.code === 0) {
     params.onEndMutation?.();
@@ -363,11 +425,15 @@ export async function restartRegisteredScheduledTask(params: {
   const restartPort = restartContext?.port ?? null;
   if (params.mode.kind === "standard") {
     if (manageGatewayPort) {
-      await terminateScheduledTaskGatewayListeners(params.env, restartContext ?? undefined);
+      await terminateScheduledTaskGatewayListeners(
+        params.env,
+        restartContext ?? undefined,
+        params.assertCurrent,
+      );
     } else {
-      await terminateScheduledTaskNodeHost(params.env);
+      await terminateScheduledTaskNodeHost(params.env, params.assertCurrent);
     }
-    await terminateInstalledStartupRuntime(params.env);
+    await terminateInstalledStartupRuntime(params.env, params.assertCurrent);
   } else {
     const replacementRuntime = await resolveFallbackRuntime(params.env, undefined, "control");
     if (replacementRuntime.status === "unknown") {
@@ -377,7 +443,7 @@ export async function restartRegisteredScheduledTask(params: {
       );
     }
     if (replacementRuntime.status === "running" && replacementRuntime.pid) {
-      await terminateGatewayProcessTree(replacementRuntime.pid, 300);
+      await terminateGatewayProcessTree(replacementRuntime.pid, 300, params.assertCurrent);
     }
   }
   if (restartPort) {
@@ -389,13 +455,15 @@ export async function restartRegisteredScheduledTask(params: {
           `replacement gateway port ${restartPort} is occupied by an unverified process`,
         );
       }
+      const listenerDetails = await describeUnverifiedPortListeners(restartPort, probeHosts);
       throw new Error(
-        `gateway port ${restartPort} is still busy before restart; remaining listener ownership could not be verified`,
+        `gateway port ${restartPort} is still busy before restart; remaining listener ownership could not be verified.${listenerDetails}`,
       );
     }
   }
   const activation = await runScheduledTaskOrThrow({
     taskName,
+    assertCurrent: params.assertCurrent,
     env: params.env,
     scriptPath: resolveTaskScriptPath(params.env),
     ...(params.onRunMutation ? { onMutation: params.onRunMutation } : {}),
@@ -412,17 +480,18 @@ export async function restartRegisteredScheduledTask(params: {
     // Captured takeover owns the settling wait even if Startup vanished or its profile changed.
     const hasRunningEvidence = await waitForScheduledTaskRunningEvidence(params.env);
     if (params.mode.kind === "fallback-takeover" && !hasRunningEvidence) {
+      params.assertCurrent?.();
       await execSchtasks(["/End", "/TN", taskName]);
       const failedRuntime = await resolveFallbackRuntime(params.env, undefined, "control").catch(
         () => null,
       );
       if (failedRuntime?.status === "running" && failedRuntime.pid) {
-        await terminateGatewayProcessTree(failedRuntime.pid, 300);
+        await terminateGatewayProcessTree(failedRuntime.pid, 300, params.assertCurrent);
       }
       throw new Error("Replacement Windows Scheduled Task did not produce running evidence.");
     }
     if (shouldRemoveStartup && hasRunningEvidence) {
-      await removeStartupEntries(params.env, params.stdout);
+      await removeStartupEntries(params.env, params.stdout, params.assertCurrent);
     }
   }
   params.stdout.write(`${formatLine("Restarted Scheduled Task", taskName)}\n`);
@@ -434,16 +503,21 @@ export async function restartScheduledTask({
   stdout,
   env,
   onMutation,
+  assertCurrent,
 }: GatewayServiceControlArgs): Promise<GatewayServiceRestartResult> {
   const effectiveEnv = env ?? (process.env as GatewayServiceEnv);
   const reportMutation = createGatewayLifecycleMutationReporter(onMutation);
   if (await shouldControlStartupEntry(effectiveEnv)) {
-    return restartStartupEntry(effectiveEnv, stdout, (kind) =>
-      reportMutation(kind === "stop" ? "startup-entry-stop" : "startup-entry-restart"),
+    return restartStartupEntry(
+      effectiveEnv,
+      stdout,
+      (kind) => reportMutation(kind === "stop" ? "startup-entry-stop" : "startup-entry-restart"),
+      assertCurrent,
     );
   }
   return restartRegisteredScheduledTask({
     preserveDefinition,
+    assertCurrent,
     env: effectiveEnv,
     stdout,
     mode: { kind: "standard" },

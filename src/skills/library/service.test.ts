@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { constants } from "node:sqlite";
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SKILL_LIBRARY_MAX_FILE_BYTES } from "../../../packages/gateway-protocol/src/schema/skill-library.js";
 import { trackSqliteStatementExecutions } from "../../../test/helpers/sqlite-statement-execution-counter.js";
@@ -12,7 +13,7 @@ import {
   openOpenClawStateDatabase,
 } from "../../state/openclaw-state-db.js";
 import { ensureProfileForEmail, linkEmail, setDisplayName } from "../../state/user-profiles.js";
-import { withEnv, withEnvAsync } from "../../test-utils/env.js";
+import { withEnvAsync } from "../../test-utils/env.js";
 import { materializeSkillResources, prepareSkillResourceDelivery } from "../runtime/resources.js";
 import { prepareSkillLibraryBundle, skillLibraryRevisionDir } from "./bundle.js";
 import { uploadSkillLibrary } from "./import.js";
@@ -86,34 +87,48 @@ async function beginZipUpload(
 }
 
 describe("profile-owned skill publication and selection", () => {
-  it("uses the same readable identity in the prompt and picker and rejects a copied workspace command", async () => {
-    const { options, alice, stateDir } = fixture();
-    await saveSkillLibrary(alice, draft("long---skill---name"), options);
-    const pins = seedSkillLibrarySelection(alice, options);
-    const entries = loadSkillLibrarySelection(pins, options);
-    const { buildSkillSnapshot } = await import("../loading/workspace-skill-prompt.js");
-    const { buildWorkspaceSkillCommandSpecs } = await import("../discovery/command-specs.js");
-    const snapshot = buildSkillSnapshot(stateDir, { entries });
-    const commands = buildWorkspaceSkillCommandSpecs(stateDir, { entries });
-    expect(pins[0]!.name).toMatch(/^s_long_skil_[a-f0-9]{20}$/);
-    expect(commands[0]).toMatchObject({ name: pins[0]!.name, skillName: pins[0]!.name });
-    expect(snapshot.prompt).toContain(`<name>${pins[0]!.name}</name>`);
-    const copied = {
-      ...entries[0]!,
-      skill: { ...entries[0]!.skill, source: "openclaw-workspace" },
-    };
-    expect(() => buildSkillSnapshot(stateDir, { entries: [copied, ...entries] })).toThrow(
-      "ambiguous",
-    );
-    expect(() =>
-      buildWorkspaceSkillCommandSpecs(stateDir, { entries: [copied, ...entries] }),
-    ).toThrow("ambiguous");
-  });
+  it.each([
+    ["heading", "# Friendly Title", "Friendly Title"],
+    ["metadata fallback", "Plain introduction", "Guide"],
+  ])(
+    "keeps the %s separate from the selected command identity",
+    async (_label, heading, displayName) => {
+      const { options, alice, stateDir } = fixture();
+      await saveSkillLibrary(
+        alice,
+        { ...draft("long---skill---name"), content: content.replace("# Guide", heading) },
+        options,
+      );
+      const pins = seedSkillLibrarySelection(alice, options);
+      const entries = loadSkillLibrarySelection(pins, options);
+      const { buildSkillSnapshot } = await import("../loading/workspace-skill-prompt.js");
+      const { buildWorkspaceSkillCommandSpecs } = await import("../discovery/command-specs.js");
+      const snapshot = await buildSkillSnapshot(stateDir, { entries });
+      const commands = buildWorkspaceSkillCommandSpecs(stateDir, { entries });
+      expect(pins[0]!.name).toMatch(/^s_long_skil_[a-f0-9]{20}$/);
+      expect(commands[0]).toMatchObject({
+        name: pins[0]!.name,
+        skillName: pins[0]!.name,
+        displayName,
+      });
+      expect(snapshot.prompt).toContain(`<name>${pins[0]!.name}</name>`);
+      const copied = {
+        ...entries[0]!,
+        skill: { ...entries[0]!.skill, source: "openclaw-workspace" },
+      };
+      await expect(buildSkillSnapshot(stateDir, { entries: [copied, ...entries] })).rejects.toThrow(
+        "ambiguous",
+      );
+      expect(() =>
+        buildWorkspaceSkillCommandSpecs(stateDir, { entries: [copied, ...entries] }),
+      ).toThrow("ambiguous");
+    },
+  );
   it("discovers pinned commands through the loader without leaking them into workspace state", async () => {
     const { alice, options, stateDir } = fixture();
     const saved = await saveSkillLibrary(alice, draft(), options);
     const pins = seedSkillLibrarySelection(alice, options);
-    await saveSkillLibrary(
+    const updated = await saveSkillLibrary(
       alice,
       {
         ...draft(),
@@ -123,8 +138,31 @@ describe("profile-owned skill publication and selection", () => {
       },
       options,
     );
-    const { listSkillCommandsForWorkspace } = await import("../discovery/chat-commands.js");
-    withEnv({ OPENCLAW_STATE_DIR: stateDir }, () => {
+    const originalPin = expectDefined(pins[0], "original selected revision");
+    const mixedRevisions = [
+      { ...originalPin, revision: updated.entry.revision },
+      originalPin,
+      originalPin,
+    ];
+    expect(
+      loadSkillLibrarySelection(mixedRevisions, options).map((entry) => entry.skill.filePath),
+    ).toEqual(
+      mixedRevisions.map((pin) =>
+        path.join(skillLibraryRevisionDir(pin.skillId, pin.revision, options.env), "SKILL.md"),
+      ),
+    );
+    expect(() =>
+      loadSkillLibrarySelection(
+        [originalPin, { ...originalPin, revision: "0".repeat(64) }],
+        options,
+      ),
+    ).toThrow(expect.objectContaining({ code: "NOT_FOUND" }));
+    const {
+      listSkillCommandsForWorkspace,
+      listSkillCommandsForAgents,
+      prepareSkillCommandsForAgents,
+    } = await import("../discovery/chat-commands.js");
+    await withEnvAsync({ OPENCLAW_STATE_DIR: stateDir }, async () => {
       const cfg = { agents: { defaults: { skills: [] } } };
       const discover = (
         overrides: Partial<Parameters<typeof listSkillCommandsForWorkspace>[0]> = {},
@@ -151,6 +189,21 @@ describe("profile-owned skill publication and selection", () => {
         }).map((entry) => entry.name),
       ).not.toContain(saved.entry.name);
       expect(discover({ sessionEntry: undefined, skillFilter: [saved.entry.name] })).toEqual([]);
+      const agentParams = {
+        cfg: {
+          agents: {
+            defaults: { skills: [saved.entry.name] },
+            list: [{ id: "main", workspace: stateDir }],
+          },
+        },
+        agentIds: ["main"],
+        sessionEntry: { skillLibrarySelections: pins },
+      };
+      expect(listSkillCommandsForAgents(agentParams)).toEqual(commands);
+      expect(await prepareSkillCommandsForAgents(agentParams)).toEqual(commands);
+      expect(
+        await prepareSkillCommandsForAgents({ ...agentParams, sessionEntry: undefined }),
+      ).toEqual([]);
     });
   });
 
@@ -413,7 +466,10 @@ describe("profile-owned skill publication and selection", () => {
       const pins = seedSkillLibrarySelection(alice, options);
       const entries = loadSkillLibrarySelection(pins, options);
       const { buildSkillSnapshot } = await import("../loading/workspace-skill-prompt.js");
-      const snapshot = { ...buildSkillSnapshot(stateDir, { entries }), librarySelections: pins };
+      const snapshot = {
+        ...(await buildSkillSnapshot(stateDir, { entries })),
+        librarySelections: pins,
+      };
       expect(snapshot.resolvedSkills).toEqual([]);
       await saveSkillLibrary(
         alice,
@@ -466,7 +522,7 @@ describe("library admission and imports", () => {
       config: ["channels.fixture.enabled"],
     });
     const { buildSkillSnapshot } = await import("../loading/workspace-skill-prompt.js");
-    const snapshot = buildSkillSnapshot(stateDir, {
+    const snapshot = await buildSkillSnapshot(stateDir, {
       entries: selected,
       config: {
         skills: {
@@ -710,6 +766,24 @@ describe("library admission and imports", () => {
     const selected = seedSkillLibrarySelection(bob, options);
     expect(library.defaultSelectionNotice).toContain("detach");
     expect(selected).toHaveLength(64);
+    const revisionReads = trackSqliteStatementExecutions(
+      openOpenClawStateDatabase(options).db,
+      ["revisions"],
+      (sql) =>
+        sql.startsWith("select ") && sql.includes('from "skill_library_revisions"')
+          ? "revisions"
+          : null,
+    );
+    try {
+      const ordered = selected.toReversed();
+      expect(loadSkillLibrarySelection(ordered, options).map((entry) => entry.skill.name)).toEqual(
+        ordered.map((pin) => pin.name),
+      );
+      expect(revisionReads.counts.revisions).toBe(1);
+      expect(revisionReads.rowCounts.revisions).toBe(64);
+    } finally {
+      revisionReads.restore();
+    }
     const omitted = library.entries.find(
       (entry) => !selected.some((pin) => pin.skillId === entry.skillId),
     )!;

@@ -8,7 +8,11 @@ import {
   hasDeliberateSilentTerminalReply,
   hasIntentionalTerminalCompletion,
 } from "../../agents/embedded-agent-runner/result-fallback-classifier.js";
-import { deriveContextPromptTokens, hasBillableUsage } from "../../agents/usage.js";
+import {
+  deriveContextPromptTokens,
+  hasBillableUsage,
+  toDiagnosticUsage,
+} from "../../agents/usage.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import { emitAgentEvent } from "../../infra/agent-events.js";
 import { emitTrustedDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
@@ -18,7 +22,11 @@ import {
 } from "../../infra/diagnostic-trace-context.js";
 import { isSubagentSessionKey } from "../../routing/session-key.js";
 import { estimateAggregateUsageCost } from "../../utils/usage-format.js";
-import { buildFallbackClearedNotice, buildFallbackNotice } from "../fallback-state.js";
+import {
+  buildFallbackClearedNotice,
+  buildFallbackNotice,
+  buildProviderPolicyRetryNotice,
+} from "../fallback-state.js";
 import {
   getReplyPayloadMetadata,
   isReplyPayloadStatusNotice,
@@ -45,6 +53,7 @@ import {
 import type { accountAgentTurn } from "./agent-runner-result-accounting.js";
 import type { FinalizeReplyAgentRunInput } from "./agent-runner-result.types.js";
 import { resolveResponseUsageLine } from "./agent-runner-usage-line.js";
+import { hasBlockReplyDeliveryCustody } from "./block-reply-delivery.js";
 import type { PendingContinuationSettlement } from "./get-reply.types.js";
 import { attachMcpAppChannelAction } from "./mcp-app-channel-action.js";
 import { attachMcpConnectChannelAction } from "./mcp-connect-channel-action.js";
@@ -85,7 +94,7 @@ export async function prepareReplyAgentPayloads(state: {
     configuredFallbackModel,
     contextTokensUsed,
     directlySentBlockKeys,
-    directlySentBlockPayloads,
+    directBlockDeliveries,
     fallbackAttempts,
     fallbackExhausted,
     fallbackTransition,
@@ -145,7 +154,7 @@ export async function prepareReplyAgentPayloads(state: {
   const successfulTerminalDelivery =
     hasSuccessfulTerminalSourceReplyDelivery({
       blockReplyPipeline,
-      directlySentBlockPayloads,
+      directBlockDeliveries,
     }) || hasCompletedTerminalDeliveryEvidence(runResult);
   // Compaction notices are progress, not a terminal reply. Dispatcher-backed
   // delivery settles after this run returns, so it cannot prove turn completion here.
@@ -176,20 +185,27 @@ export async function prepareReplyAgentPayloads(state: {
           committedMessagingToolSourceReplyDelivery ||
           runResult.didSendDeterministicApprovalPrompt === true,
       });
-  const emptyInteractiveReplyPayload = terminalFailurePayload
-    ? undefined
-    : buildEmptyInteractiveReplyPayload({
-        isInteractive,
-        isHeartbeat,
-        silentExpected: followupRun.run.silentExpected,
-        allowEmptyAssistantReplyAsSilent: followupRun.run.allowEmptyAssistantReplyAsSilent,
-        hasPendingContinuation: pendingContinuation,
-        hasExplicitSilentReply: deliberateSilentTerminalReply,
-        hasCommittedDelivery: successfulTerminalDelivery,
-        hasIntentionalTerminalCompletion: hasIntentionalTerminalCompletion(runResult),
-        sessionCtx,
-        cfg,
-      });
+  const retryBlockedSourceReply =
+    blockReplyPipeline?.hasRetryBlockedTerminalDelivery?.() === true ||
+    directBlockDeliveries?.some(
+      (delivery) =>
+        isReplyPayloadTerminalContent(delivery.payload) && hasBlockReplyDeliveryCustody(delivery),
+    ) === true;
+  const emptyInteractiveReplyPayload =
+    terminalFailurePayload || retryBlockedSourceReply
+      ? undefined
+      : buildEmptyInteractiveReplyPayload({
+          isInteractive,
+          isHeartbeat,
+          silentExpected: followupRun.run.silentExpected,
+          allowEmptyAssistantReplyAsSilent: followupRun.run.allowEmptyAssistantReplyAsSilent,
+          hasPendingContinuation: pendingContinuation,
+          hasExplicitSilentReply: deliberateSilentTerminalReply,
+          hasCommittedDelivery: successfulTerminalDelivery,
+          hasIntentionalTerminalCompletion: hasIntentionalTerminalCompletion(runResult),
+          sessionCtx,
+          cfg,
+        });
   const buildStrandedRetryMissingDeliveryDiagnostic = (): ReplyPayload | undefined => {
     if (!sessionKey || !storePath || followupRun.strandedReplyRetry !== true) {
       return undefined;
@@ -209,6 +225,7 @@ export async function prepareReplyAgentPayloads(state: {
     // always gets a diagnostic, even when the retry produced no final text.
     const recovery = resolveStrandedReplyRecovery({
       base: followupRun,
+      payloads: [],
       finalText: "",
       sourceReplyDeliveryMode: sourceReplyPolicy.sourceReplyDeliveryMode,
       sendPolicyDenied: sourceReplyPolicy.sendPolicyDenied,
@@ -270,8 +287,7 @@ export async function prepareReplyAgentPayloads(state: {
       silentExpected: followupRun.run.silentExpected,
       blockStreamingEnabled,
       blockReplyPipeline,
-      directlySentBlockKeys,
-      directlySentBlockPayloads,
+      directBlockDeliveries,
       replyToMode,
       replyToChannel,
       currentMessageId,
@@ -304,6 +320,8 @@ export async function prepareReplyAgentPayloads(state: {
     const silentFallbackFailurePayload = buildSilentFallbackFailurePayload({
       fallbackTransition,
       fallbackFailureKnown,
+      fallbackAttempts,
+      cfg,
       isHeartbeat,
       hasSuccessfulTerminalDelivery: successfulTerminalDelivery,
       allowEmptyAssistantReplyAsSilent: followupRun.run.allowEmptyAssistantReplyAsSilent,
@@ -322,16 +340,33 @@ export async function prepareReplyAgentPayloads(state: {
     opts?.onAgentRunTerminalOutcome?.("failed");
     return returnPreparedFallbackPayload(silentFallbackFailurePayload);
   };
+  const providerPolicyRetry = runResult.meta?.executionTrace?.providerPolicyRetry;
+  const successfulProviderPolicyRetry =
+    isInteractive &&
+    !isHeartbeat &&
+    context.execution.status === "ok" &&
+    runResult.meta?.aborted !== true &&
+    providerPolicyRetry?.category === "cyber"
+      ? providerPolicyRetry
+      : undefined;
+  const providerPolicyRetrySucceeded = successfulProviderPolicyRetry !== undefined;
   const fallbackNoticeChanged =
     !fallbackExhausted &&
     !preserveUserFacingSessionState &&
     (fallbackTransition.fallbackTransitioned || fallbackTransition.fallbackCleared);
-  const fallbackNoticeChatType = fallbackNoticeChanged
-    ? normalizeChatType(sessionCtx.ChatType)
-    : undefined;
+  const fallbackNoticeChatType =
+    fallbackNoticeChanged && !providerPolicyRetrySucceeded
+      ? normalizeChatType(sessionCtx.ChatType)
+      : undefined;
   const shouldDeliverFallbackNotice =
     fallbackNoticeChatType !== "group" && fallbackNoticeChatType !== "channel";
-  let fallbackNoticeText: string | null = null;
+  let fallbackNoticeText: string | null = successfulProviderPolicyRetry
+    ? buildProviderPolicyRetryNotice({
+        provider: successfulProviderPolicyRetry.provider,
+        model: successfulProviderPolicyRetry.model,
+        cfg,
+      })
+    : null;
   if (fallbackNoticeChanged && fallbackTransition.fallbackTransitioned) {
     emitAgentEvent({
       runId,
@@ -348,7 +383,7 @@ export async function prepareReplyAgentPayloads(state: {
         attempts: fallbackAttempts,
       },
     });
-    if (shouldDeliverFallbackNotice) {
+    if (shouldDeliverFallbackNotice && !providerPolicyRetrySucceeded) {
       fallbackNoticeText = buildFallbackNotice({
         selectedProvider,
         selectedModel,
@@ -373,7 +408,7 @@ export async function prepareReplyAgentPayloads(state: {
         previousActiveModel: fallbackTransition.previousState.activeModel,
       },
     });
-    if (shouldDeliverFallbackNotice) {
+    if (shouldDeliverFallbackNotice && !providerPolicyRetrySucceeded) {
       fallbackNoticeText = buildFallbackClearedNotice({
         selectedProvider,
         selectedModel,
@@ -430,6 +465,9 @@ export async function prepareReplyAgentPayloads(state: {
   const hasTerminalReplyPayload = replyPayloadsWithoutToolWarnings.some(
     (payload) =>
       isReplyPayloadTerminalContent(payload) &&
+      ((!shouldDeliverTerminalFailure && !yieldAcknowledgmentPayload) ||
+        followupRun.run.sourceReplyDeliveryMode !== "message_tool_only" ||
+        getReplyPayloadMetadata(payload)?.deliverDespiteSourceReplySuppression === true) &&
       normalizeReplyPayload(payload, { applyChannelTransforms: false }) !== null,
   );
   if (yieldAcknowledgmentPayload && hasTerminalReplyPayload) {
@@ -454,7 +492,9 @@ export async function prepareReplyAgentPayloads(state: {
       return { kind: "return" as const, value: silentFallbackFailurePayload };
     }
   } else if (emptyInteractiveReplyPayload && !hasTerminalReplyPayload) {
-    const emptyPayloadResult = await buildFinalPayloads([emptyInteractiveReplyPayload]);
+    const emptyPayloadResult = await buildFinalPayloads([
+      buildStrandedRetryMissingDeliveryDiagnostic() ?? emptyInteractiveReplyPayload,
+    ]);
     replyPayloads = [...replyPayloads, ...emptyPayloadResult.replyPayloads];
     didLogHeartbeatStrip = emptyPayloadResult.didLogHeartbeatStrip;
     if (emptyPayloadResult.replyPayloads.length > 0) {
@@ -486,9 +526,7 @@ export async function prepareReplyAgentPayloads(state: {
       (payload.isCommentary !== true || opts?.commentaryPayloadsEnabled === true) &&
       normalizeReplyPayload(payload, { applyChannelTransforms: false }) !== null,
   );
-  const hasDeliveredBlockStream = Boolean(
-    blockReplyPipeline?.didStream() && !blockReplyPipeline.isAborted(),
-  );
+  const hasDeliveredBlockStream = Boolean(blockReplyPipeline?.didStream());
   const canDeliverStandaloneFallbackNotice =
     hasDeliveredBlockStream || successfulSideEffectDelivery;
   if (
@@ -563,12 +601,6 @@ export async function prepareReplyAgentPayloads(state: {
 
   const diagnosticUsage = runResult.meta?.agentMeta?.diagnosticUsage ?? usage;
   if (isDiagnosticsEnabled(cfg) && hasBillableUsage(diagnosticUsage)) {
-    const input = diagnosticUsage.input ?? 0;
-    const output = diagnosticUsage.output ?? 0;
-    const cacheRead = diagnosticUsage.cacheRead ?? 0;
-    const cacheWrite = diagnosticUsage.cacheWrite ?? 0;
-    const usagePromptTokens = input + cacheRead + cacheWrite;
-    const totalTokens = diagnosticUsage.total ?? usagePromptTokens + output;
     const contextUsedTokens = deriveContextPromptTokens({
       lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
       promptTokens,
@@ -596,14 +628,7 @@ export async function prepareReplyAgentPayloads(state: {
       agentId: followupRun.run.agentId,
       provider: providerUsed,
       model: modelUsed,
-      usage: {
-        input,
-        output,
-        cacheRead,
-        cacheWrite,
-        promptTokens: usagePromptTokens,
-        total: totalTokens,
-      },
+      usage: toDiagnosticUsage(diagnosticUsage),
       lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
       context: {
         limit: contextTokensUsed,
@@ -645,7 +670,6 @@ export async function prepareReplyAgentPayloads(state: {
     kind: "continue" as const,
     activeSessionEntry,
     completedSourceReplyDelivery,
-    didLogHeartbeatStrip,
     guardedReplyPayloads,
     responseUsageLine,
   };

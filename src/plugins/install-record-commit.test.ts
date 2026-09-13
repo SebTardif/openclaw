@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { createTestConfigFileStore } from "../commands/test-runtime-config-helpers.js";
 import type { ConfigWriteOptions } from "../config/io.js";
 import {
   createPluginInstallRecordMap,
@@ -26,6 +27,8 @@ import {
   resolveRetainedManagedNpmInstallMarkerPath,
 } from "./managed-npm-retention.js";
 import { writeManagedNpmPlugin } from "./test-helpers/managed-npm-plugin.js";
+
+const configFiles = createTestConfigFileStore();
 
 const retentionTempDirs = useAutoCleanupTempDirTracker(afterEach);
 
@@ -118,15 +121,10 @@ describe("commitConfigWithPendingPluginInstalls", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue({});
-    mocks.replaceConfigFile.mockImplementation(async (params: { nextConfig: OpenClawConfig }) => ({
-      path: "/tmp/openclaw.json",
-      previousHash: null,
-      snapshot: {} as never,
-      nextConfig: params.nextConfig,
-      persistedHash: "test-config-hash",
-      afterWrite: { mode: "auto" },
-      followUp: { mode: "auto", requiresRestart: false },
-    }));
+    configFiles.clear();
+    mocks.replaceConfigFile.mockImplementation(async (params: { nextConfig: OpenClawConfig }) =>
+      configFiles.write(params.nextConfig),
+    );
     mocks.restorePersistedInstalledPluginIndexIfCurrent.mockResolvedValue(true);
     mocks.writePersistedInstalledPluginIndexInstallRecordsWithLease.mockResolvedValue({
       previous: null,
@@ -194,12 +192,12 @@ describe("commitConfigWithPendingPluginInstalls", () => {
       },
       baseHash: "config-1",
       writeOptions: {
-        afterWrite: { mode: "restart", reason: "plugin source changed" },
         unsetPaths: [["plugins", "installs"]],
       },
     });
-    expect(result).toEqual({
-      config: {
+    expect(result).toMatchObject({
+      path: "/tmp/openclaw.json",
+      nextConfig: {
         plugins: {
           entries: {
             demo: { enabled: true },
@@ -272,7 +270,7 @@ describe("commitConfigWithPendingPluginInstalls", () => {
         },
       },
     };
-    const commit = vi.fn(async () => undefined);
+    const commit = vi.fn(async (candidate: OpenClawConfig) => configFiles.write(candidate));
     mocks.loadInstalledPluginIndexInstallRecords.mockResolvedValue(existingRecords);
 
     const result = await commitConfigWriteWithPendingPluginInstalls({
@@ -297,7 +295,6 @@ describe("commitConfigWithPendingPluginInstalls", () => {
     expect(commit).toHaveBeenCalledWith(
       {},
       {
-        afterWrite: { mode: "restart", reason: "plugin source changed" },
         unsetPaths: [["plugins", "installs"]],
       },
     );
@@ -310,7 +307,12 @@ describe("commitConfigWithPendingPluginInstalls", () => {
     expect(Object.getPrototypeOf(result.installRecords)).toBeNull();
   });
 
-  it.each([undefined, { mode: "auto" }, { mode: "restart", reason: "test restart" }] as const)(
+  it.each([
+    undefined,
+    { mode: "auto" },
+    { mode: "none", reason: "caller owns runtime application" },
+    { mode: "restart", reason: "test restart" },
+  ] as const)(
     "preserves source records and the runtime application receipt with intent %j",
     async (afterWrite) => {
       const sourceConfig: OpenClawConfig = {
@@ -339,21 +341,24 @@ describe("commitConfigWithPendingPluginInstalls", () => {
           commit: (input: unknown) => Promise<unknown>;
         };
         const transformed = transformParams.transform(sourceConfig, { snapshot });
-        await transformParams.commit({
+        return await transformParams.commit({
           nextConfig: transformed.nextConfig,
           snapshot,
           writeOptions: transformParams.writeOptions,
         });
-        return {};
       });
 
-      await transformConfigWithPendingPluginInstalls({
+      const result = await transformConfigWithPendingPluginInstalls({
         afterWrite,
         writeOptions: attachRuntimeConfigWriteApplication({}, application),
         transform: () => ({
           nextConfig: { plugins: { installs: { codex: codexRecord } } },
         }),
       });
+      expect(result.afterWrite).toEqual(afterWrite ?? { mode: "auto" });
+      expect(mocks.replaceConfigFile.mock.calls[0]?.[0].writeOptions.afterWrite).toEqual(
+        afterWrite,
+      );
       expect(application.claimed).toBe(true);
       await expect(application.result).resolves.toBe("applied");
 
@@ -1025,33 +1030,12 @@ describe("commitConfigWithPendingPluginInstalls", () => {
     expect(mocks.replaceConfigFile).toHaveBeenCalledWith({
       nextConfig,
     });
-    expect(result).toEqual({
-      config: nextConfig,
+    expect(result).toMatchObject({
+      path: "/tmp/openclaw.json",
+      nextConfig,
       installRecords: {},
       movedInstallRecords: false,
       persistedHash: "test-config-hash",
-    });
-  });
-
-  it("supports non-replace config writers without adding an undefined write options argument", async () => {
-    const writeConfigFile = vi.fn(async () => undefined);
-    const nextConfig: OpenClawConfig = {
-      gateway: {
-        mode: "local",
-      },
-    };
-
-    const result = await commitConfigWriteWithPendingPluginInstalls({
-      nextConfig,
-      commit: writeConfigFile,
-    });
-
-    expect(writeConfigFile).toHaveBeenCalledWith(nextConfig);
-    expect(result).toEqual({
-      config: nextConfig,
-      installRecords: {},
-      movedInstallRecords: false,
-      persistedHash: null,
     });
   });
 });

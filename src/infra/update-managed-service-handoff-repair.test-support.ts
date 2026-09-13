@@ -8,9 +8,14 @@ import {
   writeOpenAiResponsesSse,
   writeOpenAiResponsesText,
 } from "../../test/helpers/openai-responses-sse.js";
+import { createDeferred } from "../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withServer } from "../plugin-sdk/test-helpers/http-test-server.js";
-import { runtimeProcessEntrypoints } from "./runtime-process-entrypoints.js";
+import {
+  runtimeProcessEntrypoints,
+  SQLITE_READONLY_CHILD_ARG,
+} from "./runtime-process-entrypoints.js";
+import { resolveRuntimeWorkerArgv } from "./runtime-worker-url.js";
 import type {
   ManagedRepairBoundary,
   ManagedServiceManagerBoundaryRunner,
@@ -18,6 +23,7 @@ import type {
 
 export function readManagedRepairEffects(root: string) {
   return {
+    packagedReadOnly: existsSync(path.join(root, "repair-readonly-packaged")),
     firstSpawn: existsSync(path.join(root, "repair-spawn-first")),
     secondSpawn: existsSync(path.join(root, "repair-spawn-second")),
     firstExec: existsSync(path.join(root, "candidate", "repair-first-exec.txt")),
@@ -44,8 +50,7 @@ export async function releaseManagedRepairInference(
 export function managedRepairConfig(baseUrl: string): OpenClawConfig {
   const modelRef = "repair-test/repair-model";
   return {
-    commands: { ownerAllowFrom: ["slack:owner"] },
-    channels: { slack: { enabled: true } },
+    commands: { ownerAllowFrom: ["owner"] },
     plugins: { slots: { memory: "none" } },
     agents: {
       defaults: {
@@ -84,18 +89,44 @@ export function managedRepairConfig(baseUrl: string): OpenClawConfig {
 }
 
 function managedRepairSpawnPreload(root: string): string {
+  const snapshotWorkerArgs = resolveRuntimeWorkerArgv(
+    new URL("./update-candidate-state.worker.ts", import.meta.url),
+  );
+  const readOnlyWorkerArgs = resolveRuntimeWorkerArgv(
+    new URL(`./${runtimeProcessEntrypoints.sqliteReadOnly.sourceWorkerName}.ts`, import.meta.url),
+  );
   return `const fs = require("node:fs");
     const childProcess = require("node:child_process");
     const spawn = childProcess.spawn;
+    const spawnSync = childProcess.spawnSync;
+    const readOnlyWorkerArgs = ${JSON.stringify(readOnlyWorkerArgs)};
+    childProcess.spawnSync = function(command, args, options) {
+      // Keep each fresh, source-neutral snapshot; only replace its TS loader with this build's worker.
+      if (command !== process.execPath || !Array.isArray(args) ||
+          args.length !== readOnlyWorkerArgs.length + 4 ||
+          !readOnlyWorkerArgs.every((arg, index) => args[index] === arg) ||
+          args[readOnlyWorkerArgs.length] !== ${JSON.stringify(SQLITE_READONLY_CHILD_ARG)} ||
+          args[readOnlyWorkerArgs.length + 1] !== "sync") {
+        return spawnSync.apply(this, arguments);
+      }
+      const result = spawnSync.call(this, command,
+        [${JSON.stringify(path.resolve("dist", runtimeProcessEntrypoints.sqliteReadOnly.distWorkerPath))}, ...args.slice(readOnlyWorkerArgs.length)], options);
+      if (result.status === 0 && result.pid > 0) {
+        fs.writeFileSync(${JSON.stringify(path.join(root, "repair-readonly-packaged"))}, String(result.pid));
+      }
+      return result;
+    };
+    const snapshotWorkerArgs = ${JSON.stringify(snapshotWorkerArgs)};
     childProcess.spawn = function(command, args, options) {
-      // Rehearsal strips NODE_OPTIONS; carry the recorder only to its owned supervisor workers.
+      // Rehearsal strips NODE_OPTIONS; carry the recorder only to its owned repair and supervisor workers.
       if (command === process.execPath && Array.isArray(args) && args.length === 1 &&
-          ${JSON.stringify([runtimeProcessEntrypoints.serviceChildRelay, runtimeProcessEntrypoints.serviceChildGroupAnchor].map((entry) => path.resolve("dist", entry.distWorkerPath)))}.includes(args[0])) {
+          ${JSON.stringify([...[runtimeProcessEntrypoints.serviceChildRelay, runtimeProcessEntrypoints.serviceChildGroupAnchor].map((entry) => path.resolve("dist", entry.distWorkerPath)), path.join(root, "candidate", "dist", runtimeProcessEntrypoints.updateRepair.distWorkerPath)])}.includes(args[0])) {
         args = ["--require", __filename, ...args];
       }
       // Source orchestration consumes the packaged SQLite worker from the completed build.
-      if (Array.isArray(args) && args.length === 3 && args[0] === "--import" && args[1] === "tsx" &&
-          args[2] === ${JSON.stringify(path.resolve("src/infra/update-candidate-state.worker.ts"))}) {
+      // Share the argv builder so its pinned source-loader URL cannot bypass this redirect.
+      if (Array.isArray(args) && args.length === snapshotWorkerArgs.length &&
+          args.every((arg, index) => arg === snapshotWorkerArgs[index])) {
         args = [${JSON.stringify(path.resolve("dist", runtimeProcessEntrypoints.updateCandidateState.distWorkerPath))}];
       }
       const script = Array.isArray(args) ? args.join(" ") : "";
@@ -128,31 +159,12 @@ export async function managedRepairUpdaterScript(params: {
   const repairModule = new URL("../cli/update-cli/update-command-repair.ts", import.meta.url).href;
   const admissionModule = new URL("../cli/update-cli/update-command-run.ts", import.meta.url).href;
   const sentinelModule = new URL("./update-control-plane-sentinel.ts", import.meta.url).href;
-  const sourceRuntimePaths = ["js", "ts"].map(
-    (extension) => new URL(`./update-repair-agent.runtime.${extension}`, import.meta.url).pathname,
-  );
-  const builtRuntime = new URL("../../dist/update-repair-agent.runtime.js", import.meta.url).href;
   const installRoot = params.phase === "verifying" ? candidate : params.root;
   return `void (async () => {
     // Source workers resolve the checkout's toolchain from the driver cwd.
     process.chdir(${JSON.stringify(path.resolve("."))});
     ${params.sourceRuntimeImport}
     const fs = require("node:fs");
-    // Match the repair E2E's compiled host execution without replacing source admission or orchestration.
-    const sourceRuntimePaths = new Set(${JSON.stringify(sourceRuntimePaths)});
-    const { registerHooks } = require("node:module");
-    registerHooks({
-      resolve(specifier, context, nextResolve) {
-        if ((specifier.startsWith(".") || specifier.startsWith("file:")) && context.parentURL &&
-            sourceRuntimePaths.has(new URL(specifier, context.parentURL).pathname)) {
-          return { url: ${JSON.stringify(builtRuntime)}, shortCircuit: true };
-        }
-        const resolved = nextResolve(specifier, context);
-        return sourceRuntimePaths.has(new URL(resolved.url).pathname)
-          ? { url: ${JSON.stringify(builtRuntime)}, shortCircuit: true }
-          : resolved;
-      },
-    });
     process.stderr.write("repair-boundary: loading admission\\n");
     const { runUpdateCommandRepair } = await import(${JSON.stringify(repairModule)});
     const { admitUpdateCommandRun } = await import(${JSON.stringify(admissionModule)});
@@ -242,14 +254,8 @@ export async function runManagedRepairAuthorityBoundary(
   phase: ManagedRepairBoundary["phase"],
   revoke: boolean,
 ) {
-  let markPending!: () => void;
-  const inferencePending = new Promise<void>((resolve) => {
-    markPending = resolve;
-  });
-  let releaseInference!: () => void;
-  const released = new Promise<void>((resolve) => {
-    releaseInference = resolve;
-  });
+  const { promise: inferencePending, resolve: markPending } = createDeferred();
+  const { promise: released, resolve: releaseInference } = createDeferred();
   const errors: unknown[] = [];
   let toolResponses = 0;
   let result: Awaited<ReturnType<typeof runBoundary>> | undefined;
@@ -292,7 +298,7 @@ export async function runManagedRepairAuthorityBoundary(
         result = await runBoundary("systemd", {
           controlDisconnect: "transferred",
           validationResult: "skipped",
-          requester: { channel: "slack", accountId: "primary", senderId: "owner" },
+          requester: { channel: "synthetic", accountId: "primary", senderId: "owner" },
           ledger: true,
           helperExitCode: revoke ? 1 : 0,
           repair: { phase, baseUrl, revoke, inferencePending, releaseInference },

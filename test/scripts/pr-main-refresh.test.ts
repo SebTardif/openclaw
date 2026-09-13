@@ -36,6 +36,54 @@ function recoverFixtureLock(f: ReturnType<typeof fixture>, oid: string) {
 }
 
 describePosix("native PR main refresh boundaries", () => {
+  it.each([
+    "review-init",
+    "review-checkout-pr",
+    "prepare-init",
+    "prepare-run",
+    "prepare-sync-head",
+    "merge-verify",
+  ])("%s acquires the authenticated head despite a stale pull ref", (command) => {
+    const f = fixture();
+    if (command === "prepare-sync-head" || command === "merge-verify") {
+      const prepared = f.run("prepare-run");
+      expect(prepared.status, prepared.stdout + prepared.stderr).toBe(0);
+    }
+    f.git(f.origin, "update-ref", "refs/pull/42/head", f.main);
+    const result = f.run(command);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(f.git(f.worktree, "rev-parse", "refs/heads/pr-42")).toBe(f.head);
+    expect(f.git(f.origin, "rev-parse", "refs/pull/42/head")).toBe(f.main);
+    expect(f.git(f.origin, "rev-parse", "refs/heads/topic")).toBe(f.head);
+    expect(f.git(f.worktree, "status", "--porcelain")).toBe("");
+    expect(f.events().filter((event) => event.kind === "unexpected-push")).toEqual([]);
+  });
+
+  it.each(["oid", "branch", "repository"] as const)(
+    "rejects PR %s drift during acquisition before preparation stamps",
+    (boundary) => {
+      const f = fixture();
+      f.configure({ prIdentityDriftAfterFetch: boundary });
+      const result = f.run("prepare-init");
+      expect(result.status, result.stdout + result.stderr).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("PR head changed");
+      expect(existsSync(join(f.local, "prep-context.env"))).toBe(false);
+      expect(f.git(f.worktree, "rev-parse", "HEAD")).toBe(f.head);
+      expect(f.git(f.worktree, "status", "--porcelain")).toBe("");
+    },
+  );
+
+  it("refuses a non-SHA PR source before fetching or replacing its local ref", () => {
+    const f = fixture();
+    f.git(f.canonical, "branch", "pr-42", f.head);
+    f.configure({ metadata: { ...f.metadata, headRefOid: "refs/heads/main" } });
+    const result = f.run("review-init");
+    expect(result.status, result.stdout + result.stderr).not.toBe(0);
+    expect(result.stderr).toContain("full lowercase commit SHA");
+    expect(f.git(f.worktree, "rev-parse", "refs/heads/pr-42")).toBe(f.head);
+    expect(existsSync(join(f.local, "review-context.env"))).toBe(false);
+  });
+
   it.each(["detached", "pr-42", "pr-42-prep"])(
     "prepares directly from the reviewed head (%s) without visiting main",
     (branch) => {
@@ -442,27 +490,38 @@ ${readFileSync(gitShim, "utf8")}
     expect(readFileSync(join(f.local, "prep.env"), "utf8")).toContain(`PREP_HEAD_SHA=${f.head}\n`);
   });
 
-  it("captures private FETCH_HEAD despite a competing shared-ref write and worktree origin/refmap overrides", () => {
-    const f = fixture();
-    f.git(f.canonical, "remote", "set-url", "origin", "../origin.git");
-    f.git(f.worktree, "config", "--worktree", "remote.origin.url", join(f.root, "wrong-origin"));
-    f.git(
-      f.worktree,
-      "config",
-      "--worktree",
-      "remote.origin.fetch",
-      "+refs/heads/movement:refs/remotes/origin/main",
-    );
-    f.git(f.canonical, "update-ref", "refs/heads/origin/main", f.movedMain);
-    f.configure({ moveSharedAfterFetch: true });
-    const result = f.run("review-checkout-main");
-    expect(result.status, result.stdout + result.stderr).toBe(0);
-    expect(f.git(f.worktree, "rev-parse", "HEAD")).toBe(f.main);
-    expect(f.events().filter((e) => e.kind === "fetched")).toEqual([
-      { kind: "fetched", sha: f.main, shared: f.movedMain },
-    ]);
-    expect(f.git(f.canonical, "rev-parse", "refs/remotes/origin/main")).toBe(f.movedMain);
-  });
+  it.each(["review-checkout-main", "prepare-init"])(
+    "%s preserves private FETCH_HEAD despite shared-ref writes and worktree origin/refmap overrides",
+    (command) => {
+      const f = fixture();
+      const sharedFetchHead = join(f.canonical, ".git", "FETCH_HEAD");
+      const readSharedFetchHead = () =>
+        existsSync(sharedFetchHead) ? readFileSync(sharedFetchHead, "utf8") : null;
+      const beforeSharedFetchHead = readSharedFetchHead();
+      f.git(f.canonical, "remote", "set-url", "origin", "../origin.git");
+      f.git(f.worktree, "config", "--worktree", "remote.origin.url", join(f.root, "wrong-origin"));
+      f.git(
+        f.worktree,
+        "config",
+        "--worktree",
+        "remote.origin.fetch",
+        "+refs/heads/movement:refs/remotes/origin/main",
+      );
+      f.git(f.canonical, "update-ref", "refs/heads/origin/main", f.movedMain);
+      f.configure({ moveSharedAfterFetch: true });
+      const result = f.run(command);
+      expect(result.status, result.stdout + result.stderr).toBe(0);
+      expect(f.git(f.worktree, "rev-parse", "HEAD")).toBe(
+        command === "prepare-init" ? f.head : f.main,
+      );
+      expect(f.git(f.worktree, "rev-parse", "FETCH_HEAD")).toBe(f.main);
+      expect(readSharedFetchHead()).toBe(beforeSharedFetchHead);
+      expect(f.events().filter((e) => e.kind === "fetched")).toEqual([
+        { kind: "fetched", sha: f.main, shared: f.movedMain },
+      ]);
+      expect(f.git(f.canonical, "rev-parse", "refs/remotes/origin/main")).toBe(f.movedMain);
+    },
+  );
 
   it("starts a new operation fresh and rejects a stale detached main review", () => {
     const f = fixture();
@@ -697,11 +756,11 @@ read -r release < "$OPENCLAW_TEST_FETCH_HOLD"
         f.configure({ metadata: { ...f.metadata, headRefName: "renamed" } });
       }
       if (boundary === "fetched") {
-        f.git(f.canonical, "push", "origin", `${f.sameTreeHead}:refs/pull/42/head`);
+        f.configure({ wrongPrFetch: true });
       }
       const result = f.run("prepare-run");
       expect(result.status, result.stdout + result.stderr).not.toBe(0);
-      expect(result.stdout).toContain(
+      expect(result.stdout + result.stderr).toContain(
         boundary === "branch" ? "PR head branch changed" : "PR head changed",
       );
       expect(existsSync(join(f.local, "prep-context.env"))).toBe(false);
@@ -740,6 +799,102 @@ read -r release < "$OPENCLAW_TEST_FETCH_HOLD"
       expect(events.findLastIndex((e) => e.kind === "main-fetch")).toBeGreaterThan(checks);
     },
   );
+
+  it.each([
+    [
+      "commit read",
+      'git() { if [ "${DRIFT_FAULT_ACTIVE:-}" = 1 ] && [ "$1" = cat-file ]; then return 1; fi; command git "$@"; }',
+    ],
+    [
+      "scratch allocation",
+      'mktemp() { [ "${DRIFT_FAULT_ACTIVE:-}" != 1 ] || return 1; command mktemp "$@"; }',
+    ],
+    [
+      "mainline diff",
+      'git() { if [ "${DRIFT_FAULT_ACTIVE:-}" = 1 ] && [ "$1" = diff ] && [[ "$3" = *"$PR_MAIN_SHA" ]]; then return 1; fi; command git "$@"; }',
+    ],
+    [
+      "prepared diff",
+      'git() { if [ "${DRIFT_FAULT_ACTIVE:-}" = 1 ] && [ "$1" = diff ] && [[ "$3" = *"$PREP_HEAD_SHA" ]]; then return 1; fi; command git "$@"; }',
+    ],
+    [
+      "overlap read",
+      'comm() { [ "${DRIFT_FAULT_ACTIVE:-}" != 1 ] || return 1; command comm "$@"; }',
+    ],
+    [
+      "critical file write",
+      'is_mainline_drift_critical_path_for_merge() { rm -f "$critical_file"; mkdir "$critical_file"; return 0; }',
+    ],
+    ["path read", 'read() { [ "${DRIFT_FAULT_ACTIVE:-}" != 1 ] || return 1; builtin read "$@"; }'],
+    ["count read", 'wc() { [ "${DRIFT_FAULT_ACTIVE:-}" != 1 ] || return 1; command wc "$@"; }'],
+    [
+      "diagnostic read",
+      'sed() { if [ "${DRIFT_FAULT_ACTIVE:-}" = 1 ] && [ "$1" = -n ]; then return 1; fi; command sed "$@"; }',
+    ],
+  ])("rejects drift %s failure before merge intent or dispatch", (_name, fault) => {
+    const f = fixture();
+    expect(f.run("prepare-run").status).toBe(0);
+    f.configure({ moveAtChecks: true });
+    const result = f.shell(`
+eval "$(declare -f mainline_drift_requires_sync | sed '1s/mainline_drift_requires_sync/evaluate_actual_drift/')"
+mainline_drift_requires_sync() {
+  local DRIFT_FAULT_ACTIVE=1
+  evaluate_actual_drift "$@"
+}
+${fault}
+# Stop an unfixed verifier before it could create even a synthetic merge intent.
+prepare_squash_merge_body() { echo UNEXPECTED_AFTER_VERIFY >&2; return 99; }
+merge_run 42 || exit 1
+`);
+    const output = result.stdout + result.stderr;
+    expect(result.status, output).toBe(1);
+    expect(output, output).toContain("unable to evaluate mainline drift");
+    expect(output).not.toContain("UNEXPECTED_AFTER_VERIFY");
+    expect(output).not.toContain("because behind-main drift is unrelated");
+    expect(existsSync(join(f.local, "merge-output.log"))).toBe(false);
+    expect(
+      f.events().some((e) => e.kind === "gh" && e.args?.[0] === "pr" && e.args[1] === "merge"),
+    ).toBe(false);
+    expect(
+      f.git(
+        f.canonical,
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/openclaw/pr-merge-outcomes/42",
+      ),
+    ).toBe("");
+    expect(f.git(f.origin, "rev-parse", "refs/heads/main")).toBe(f.movedMain);
+    expect(readdirSync(f.root).filter((name) => name.startsWith("openclaw-pr-drift."))).toEqual([]);
+  });
+
+  it.each([false, true])("retains successful unrelated drift results (files=%s)", (hasFiles) => {
+    const f = fixture();
+    const result = f.shell(
+      `PR_MAIN_SHA=${hasFiles ? f.movedMain : f.main}
+if mainline_drift_requires_sync ${f.main} ${f.main}; then
+  exit 99
+else
+  test "$?" -eq 1
+fi`,
+      "/bin/bash",
+    );
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain(hasFiles ? "no overlap" : "no mainline changes");
+    expect(readdirSync(f.root).filter((name) => name.startsWith("openclaw-pr-drift."))).toEqual([]);
+  });
+
+  it("rejects drift evaluation errors in strict mode", () => {
+    const f = fixture();
+    expect(f.run("prepare-run").status).toBe(0);
+    f.configure({ moveAtChecks: true });
+    f.env.OPENCLAW_PR_STRICT_DRIFT = "1";
+    const result = f.shell(
+      "mainline_drift_requires_sync() { return 2; }\nmerge_verify 42 || exit 1",
+    );
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stderr).toContain("unable to evaluate mainline drift");
+    expect(result.stdout).not.toContain("because behind-main drift is unrelated");
+  });
 
   it("rejects a moved prepared branch without consuming CI proof", () => {
     const f = fixture();

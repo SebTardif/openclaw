@@ -6,28 +6,25 @@ import path from "node:path";
 import OpenAI from "openai";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
-import {
-  buildAgentRunTerminalOutcome,
-  buildAgentRunTerminalOutcomeFromLifecycleEvent,
-} from "../agents/agent-run-terminal-outcome.js";
 import { createClientToolNameConflictError } from "../agents/agent-tool-definition-adapter.js";
-import { createAgentCommandLifecycle } from "../agents/command/lifecycle.js";
+import { resolveEmbeddedRunTerminal } from "../agents/embedded-agent-runner/run/terminal-resolution.js";
+import { makeTerminalInput } from "../agents/embedded-agent-runner/run/terminal-resolution.test-support.js";
 import {
   createStubSessionHarness,
   emitAssistantTextDelta,
 } from "../agents/embedded-agent-subscribe.e2e-harness.js";
 import { subscribeEmbeddedAgentSession } from "../agents/embedded-agent-subscribe.js";
 import { FailoverError } from "../agents/failover-error.js";
+import {
+  buildEmbeddedRunnerAssistant,
+  makeEmbeddedRunnerAttempt,
+} from "../agents/test-helpers/embedded-agent-runner-e2e-fixtures.js";
 import { HISTORY_CONTEXT_MARKER } from "../auto-reply/reply/history.js";
 import { CURRENT_MESSAGE_MARKER } from "../auto-reply/reply/mentions.js";
 import { recordAgentRunTerminalOutcome } from "../channels/turn/agent-run-terminal-outcome.js";
 import { resetConfigRuntimeState } from "../config/config.js";
 import { upsertSessionEntryCore } from "../config/sessions/session-accessor.js";
-import {
-  emitAgentEvent,
-  getAgentEventLifecycleGeneration,
-  onAgentEvent,
-} from "../infra/agent-events.js";
+import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
 import { getGatewayContextResolver } from "../plugins/runtime/gateway-request-scope.js";
 import { enqueueCommandInLane } from "../process/command-queue.js";
 import {
@@ -40,6 +37,19 @@ import {
   expectHttpForeignSessionAuthority,
   expectSharedSecretHttpOwnerIdentity,
 } from "./http-authority.test-support.js";
+import {
+  assistantSnapshotCases,
+  streamingFailureCases,
+  captureStreamingTerminals,
+  emitResolvedStreamingFailure,
+  incompatibleReplacementCases,
+  compatibleReplacementCases,
+  bufferedReplacementCases,
+  emitIncompatibleAssistantReplacement,
+  emitCompatibleAssistantReplacement,
+  emitBufferedAssistantReplacement,
+  createOpenAiHttpTestClient,
+} from "./http-stream.test-support.js";
 import { buildAssistantDeltaResult } from "./test-helpers.agent-results.js";
 import {
   agentCommandMock,
@@ -133,15 +143,6 @@ async function postRawChatCompletions(port: number, body: string) {
   });
 }
 
-function createOpenAiChatClient(port: number): OpenAI {
-  return new OpenAI({
-    apiKey: "test",
-    baseURL: `http://127.0.0.1:${port}/v1`,
-    defaultHeaders: { "x-openclaw-scopes": "operator.write" },
-    maxRetries: 0,
-  });
-}
-
 function parseSseDataLines(text: string): string[] {
   return text
     .split("\n")
@@ -185,6 +186,101 @@ function firstAgentCommandOptions() {
 }
 
 describe("OpenAI-compatible HTTP API (e2e)", () => {
+  it.each([
+    { stream: false, includeUsage: false },
+    { stream: true, includeUsage: false },
+    { stream: true, includeUsage: true },
+  ])(
+    "preserves the output-budget finish reason (stream=$stream, usage=$includeUsage)",
+    async ({ stream, includeUsage }) => {
+      const partialText = "Here is the first half of the answer";
+      const assistant = buildEmbeddedRunnerAssistant({
+        stopReason: "length",
+        content: [{ type: "text", text: partialText }],
+      });
+      const resolved = await resolveEmbeddedRunTerminal(
+        makeTerminalInput({
+          attempt: makeEmbeddedRunnerAttempt({
+            assistantTexts: [partialText],
+            lastAssistant: assistant,
+            currentAttemptAssistant: assistant,
+            currentAttemptReplayMetadata: { hadPotentialSideEffects: false, replaySafe: true },
+          }),
+          attemptAssistant: assistant,
+          payloadsWithToolMedia: [{ text: partialText }],
+        }),
+      );
+      expect(resolved.action).toBe("complete");
+      if (resolved.action !== "complete") {
+        throw new Error("expected a deliverable partial response");
+      }
+      expect(resolved.result.meta.stopReason).toBe("length");
+      expect(resolved.result.meta.error).toBeUndefined();
+
+      const continueAgent = createDeferred();
+      agentCommandMock.mockClear();
+      agentCommandMock.mockImplementationOnce((async (opts: unknown) => {
+        if (stream) {
+          const runId = (opts as { runId: string }).runId;
+          emitAgentEvent({ runId, stream: "assistant", data: { delta: partialText } });
+          emitAgentEvent({ runId, stream: "lifecycle", data: { phase: "end" } });
+          await continueAgent.promise;
+        }
+        return recordAgentRunTerminalOutcome(resolved.result, "completed");
+      }) as never);
+
+      try {
+        const response = await postChatCompletions(enabledPort, {
+          stream,
+          ...(includeUsage ? { stream_options: { include_usage: true } } : {}),
+          model: "openclaw",
+          messages: [{ role: "user", content: "Explain the result." }],
+        });
+        expect(response.status).toBe(200);
+        if (!stream) {
+          const completion = (await response.json()) as OpenAI.ChatCompletion;
+          expect(completion.choices[0]?.message.content).toContain(partialText);
+          expect(completion.choices[0]?.finish_reason).toBe("length");
+          return;
+        }
+
+        if (!response.body) {
+          throw new Error("expected a streaming response body");
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let wire = "";
+        while (!wire.includes(partialText)) {
+          const { done, value } = await reader.read();
+          expect(done).toBe(false);
+          wire += decoder.decode(value, { stream: true });
+        }
+        expect(wire).not.toContain("[DONE]");
+        continueAgent.resolve();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            wire += decoder.decode();
+            break;
+          }
+          wire += decoder.decode(value, { stream: true });
+        }
+        const data = parseSseDataLines(wire);
+        const chunks = data
+          .filter((entry) => entry !== "[DONE]")
+          .map((entry) => JSON.parse(entry) as OpenAI.ChatCompletionChunk);
+        const choices = chunks.flatMap((chunk) => chunk.choices);
+        expect(choices.map((choice) => choice.delta.content ?? "").join("")).toContain(partialText);
+        expect(choices.map((choice) => choice.finish_reason).filter(Boolean)).toEqual(["length"]);
+        expect(chunks.filter((chunk) => chunk.usage)).toHaveLength(includeUsage ? 1 : 0);
+        expect(data.filter((entry) => entry === "[DONE]")).toHaveLength(1);
+        expect(data.at(-1)).toBe("[DONE]");
+      } finally {
+        continueAgent.resolve();
+      }
+    },
+  );
+
   it.each(
     (
       [
@@ -205,7 +301,7 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
   )("continues a client tool result with $name (stream=$stream)", async ({ result, stream }) => {
     agentCommandMock.mockClear();
     agentCommandMock.mockResolvedValueOnce({ payloads: [{ text: "Lookup completed." }] } as never);
-    const client = createOpenAiChatClient(enabledPort);
+    const client = createOpenAiHttpTestClient(enabledPort);
     const request = {
       model: "openclaw",
       messages: [
@@ -248,7 +344,7 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
         { role: "tool", tool_call_id: "call_1", content: "" },
         { role: "tool", tool_call_id: "call_2", content: "0" },
       ];
-      const response = await createOpenAiChatClient(enabledPort).chat.completions.create({
+      const response = await createOpenAiHttpTestClient(enabledPort).chat.completions.create({
         model: "openclaw",
         messages: [
           { role: "user", content: "Compare the accounts." },
@@ -1891,7 +1987,7 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
     }
 
     mockAgentOnce();
-    const client = createOpenAiChatClient(port);
+    const client = createOpenAiHttpTestClient(port);
     await client.chat.completions.create({
       model: "openclaw",
       max_completion_tokens: null,
@@ -2223,89 +2319,22 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
     await res.text();
   });
 
-  it.each(
-    [
-      {
-        label: "terminal metadata",
-        meta: { error: { kind: "incomplete_turn" as const, message: "private provider failure" } },
-        expectedPhase: "error" as const,
-      },
-      {
-        label: "an error stop reason",
-        meta: { stopReason: "error" },
-        expectedPhase: "end" as const,
-      },
-      {
-        label: "a run-budget timeout without error metadata",
-        meta: { aborted: false, timeoutPhase: "provider" as const, providerStarted: true },
-        expectedPhase: "end" as const,
-      },
-    ].flatMap((failure) =>
-      [false, true].map((producerTerminal) => ({
-        meta: failure.meta,
-        expectedPhase: failure.expectedPhase,
-        producerTerminal,
-        label: `${failure.label} ${producerTerminal ? "after" : "without"} a producer terminal`,
-      })),
-    ),
-  )(
+  it.each(streamingFailureCases)(
     "rejects resolved streaming agent failures from $label",
     async ({ meta, expectedPhase, producerTerminal }) => {
       let runId: string | undefined;
-      const terminals: Array<{ phase: "end" | "error"; status: string }> = [];
-      const unsubscribe = onAgentEvent((event) => {
-        if (event.runId === runId && event.stream === "lifecycle") {
-          const phase = event.data?.phase;
-          if (phase === "end" || phase === "error") {
-            terminals.push({
-              phase,
-              status: buildAgentRunTerminalOutcomeFromLifecycleEvent({ phase, data: event.data })
-                .status,
-            });
-          }
-        }
-      });
+      const { terminals, unsubscribe } = captureStreamingTerminals(() => runId);
       agentCommandMock.mockClear();
       agentCommandMock.mockImplementationOnce((async (options: unknown) => {
         runId = (options as { runId?: string }).runId;
         if (!runId) {
           throw new Error("expected a streaming chat-completion run ID");
         }
-        emitAgentEvent({ runId, stream: "assistant", data: { delta: "partial answer" } });
-        const result = {
-          payloads: [{ text: "Command may have changed state", isError: true }],
-          meta: { durationMs: 0, ...meta },
-        };
-        if (producerTerminal) {
-          const lifecycle = createAgentCommandLifecycle({
-            runId,
-            lifecycleGeneration: getAgentEventLifecycleGeneration,
-            startedAt: Date.now(),
-            state: {
-              currentTurnUserMessagePersisted: true,
-              lifecycleFinishing: false,
-              lifecycleEnded: false,
-            },
-          });
-          const terminal = {
-            metadata: {},
-            outcome: buildAgentRunTerminalOutcome({
-              status: meta.timeoutPhase ? "timeout" : "error",
-              stopReason: meta.timeoutPhase ? undefined : "error",
-              timeoutPhase: meta.timeoutPhase,
-            }),
-          };
-          if (lifecycle.resolveResultError(result, false)) {
-            lifecycle.emitResultError(result, false, terminal);
-          } else {
-            lifecycle.emitEnd(terminal);
-          }
-        }
-        return recordAgentRunTerminalOutcome(result, "failed");
+        return emitResolvedStreamingFailure(runId, { meta, producerTerminal });
       }) as never);
 
       try {
-        const stream = await createOpenAiChatClient(enabledPort).chat.completions.create({
+        const stream = await createOpenAiHttpTestClient(enabledPort).chat.completions.create({
           model: "openclaw",
           messages: [{ role: "user", content: "hi" }],
           stream: true,
@@ -2475,7 +2504,7 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
       return { payloads: [{ text: expected }] };
     }) as never);
 
-    const stream = await createOpenAiChatClient(enabledPort).chat.completions.create({
+    const stream = await createOpenAiHttpTestClient(enabledPort).chat.completions.create({
       model: "openclaw",
       messages: [{ role: "user", content: "Preserve the literal output." }],
       stream: true,
@@ -2496,8 +2525,8 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
     expect(agentCommandMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each([
-    {
+  it.each(
+    assistantSnapshotCases({
       name: "buffered leading content in cumulative assistant snapshots",
       events: [
         {
@@ -2506,44 +2535,8 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
         },
       ],
       expected: "<xiaohai-banli>milk tea</xiaohai-banli>",
-    },
-    {
-      name: "identical snapshots from distinct assistant items",
-      events: [
-        { itemId: "answer-1", text: "Echo", delta: "Echo" },
-        { itemId: "answer-2", text: "Echo", delta: "Echo" },
-      ],
-      expected: "EchoEcho",
-      resultTexts: ["Echo", "Echo"],
-    },
-    {
-      name: "replayed and growing snapshots across assistant items",
-      events: [
-        { itemId: "answer-1", text: "Echo", delta: "Echo" },
-        { itemId: "answer-1", text: "Echo", delta: "Echo" },
-        { itemId: "answer-2", text: "Echo", delta: "Echo" },
-        { itemId: "answer-2", text: "Echo", delta: "Echo" },
-        { itemId: "answer-2", text: "Echo!", delta: "!" },
-      ],
-      expected: "EchoEcho!",
-    },
-    {
-      name: "repeated delta-only text within an assistant item",
-      events: [
-        { itemId: "answer-1", delta: "Echo" },
-        { itemId: "answer-1", delta: "Echo" },
-      ],
-      expected: "EchoEcho",
-    },
-    {
-      name: "text beyond the live display cap",
-      events: [
-        { itemId: "answer-1", text: "x".repeat(500_001), delta: "x".repeat(500_001) },
-        { itemId: "answer-2", text: "tail", delta: "tail" },
-      ],
-      expected: `${"x".repeat(500_001)}tail`,
-    },
-  ])(
+    }),
+  )(
     "preserves $name in official SDK assistant streams",
     async ({ events, expected, resultTexts }) => {
       agentCommandMock.mockClear();
@@ -2556,7 +2549,7 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
         return { payloads: (resultTexts ?? [expected]).map((text) => ({ text })) };
       }) as never);
 
-      const stream = await createOpenAiChatClient(enabledPort).chat.completions.create({
+      const stream = await createOpenAiHttpTestClient(enabledPort).chat.completions.create({
         model: "openclaw",
         messages: [{ role: "user", content: "Preserve the full snapshot." }],
         stream: true,
@@ -2740,262 +2733,62 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
     },
   );
 
-  it.each([
-    { name: "rewritten", replacementText: "final answer" },
-    { name: "shortened", replacementText: "dra" },
-    { name: "cleared", replacementText: "" },
-    {
-      name: "replaced by a held provisional item",
-      previousText: "Echo",
-      replacementText: "Replacement",
-      replaceable: true,
-    },
-    {
-      name: "cleared by a held provisional item",
-      previousText: "Echo",
-      replacementText: "",
-      replaceable: true,
-    },
-    {
+  it.each(
+    incompatibleReplacementCases.toSpliced(6, 0, {
       name: "rewritten then explicitly restored",
       replacementText: "final answer",
       recoveryText: "draft answer",
-    },
-    {
-      name: "cleared by an explicit empty final result",
-      previousText: "Echo",
-      replacementText: "Echo tail",
-      resultText: "",
-      replaceable: true,
-    },
-    {
-      name: "cleared by held output without a text-bearing result",
-      previousText: "Echo",
-      replacementText: "",
-      noResultText: true,
-      replaceable: true,
-    },
-    {
-      name: "replaced by a held item followed by its native terminal echo",
-      previousText: "Echo",
-      replacementText: "Replacement",
-      replaceable: true,
-      terminalEcho: true,
-    },
-  ])(
-    "fails an official SDK stream when streamed text is $name",
-    async ({
-      replacementText,
-      previousText = "draft answer",
-      replaceable,
-      recoveryText,
-      resultText,
-      noResultText,
-      terminalEcho,
-    }) => {
-      agentCommandMock.mockClear();
-      agentCommandMock.mockImplementationOnce((async (opts: unknown) => {
-        const runId = (opts as { runId?: string }).runId;
-        if (!runId) {
-          throw new Error("expected a streaming chat-completion run ID");
-        }
-        emitAgentEvent({
-          runId,
-          stream: "assistant",
-          data: {
-            text: previousText,
-            delta: previousText,
-            ...(replaceable ? { itemId: "answer-1" } : {}),
-          },
-        });
-        emitAgentEvent({
-          runId,
-          stream: "assistant",
-          data: {
-            text: replacementText,
-            delta: "",
-            replace: true,
-            ...(replaceable ? { itemId: "answer-2", replaceable: true } : { phase: "commentary" }),
-          },
-        });
-        if (recoveryText !== undefined) {
-          emitAgentEvent({
-            runId,
-            stream: "assistant",
-            data: { text: recoveryText, delta: "", replace: true },
-          });
-        }
-        if (terminalEcho) {
-          emitAgentEvent({ runId, stream: "assistant", data: { text: replacementText } });
-        }
-        emitAgentEvent({ runId, stream: "lifecycle", data: { phase: "end" } });
-        return {
-          payloads: noResultText ? [] : [{ text: resultText ?? recoveryText ?? replacementText }],
-        };
-      }) as never);
+    }),
+  )("fails an official SDK stream when streamed text is $name", async (scenario) => {
+    const { previousText = "draft answer" } = scenario;
+    agentCommandMock.mockClear();
+    agentCommandMock.mockImplementationOnce((async (opts: unknown) => {
+      const runId = (opts as { runId?: string }).runId;
+      if (!runId) {
+        throw new Error("expected a streaming chat-completion run ID");
+      }
+      return emitIncompatibleAssistantReplacement(runId, scenario, "");
+    }) as never);
 
-      const stream = await createOpenAiChatClient(enabledPort).chat.completions.create({
-        model: "openclaw",
-        messages: [{ role: "user", content: "Reject an incompatible replacement snapshot." }],
-        stream: true,
-      });
-      const deliveredContent: string[] = [];
-      const finishReasons: Array<string | null> = [];
-      await expect(async () => {
-        for await (const chunk of stream) {
-          for (const choice of chunk.choices) {
-            if (typeof choice.delta.content === "string") {
-              deliveredContent.push(choice.delta.content);
-            }
-            finishReasons.push(choice.finish_reason);
+    const stream = await createOpenAiHttpTestClient(enabledPort).chat.completions.create({
+      model: "openclaw",
+      messages: [{ role: "user", content: "Reject an incompatible replacement snapshot." }],
+      stream: true,
+    });
+    const deliveredContent: string[] = [];
+    const finishReasons: Array<string | null> = [];
+    await expect(async () => {
+      for await (const chunk of stream) {
+        for (const choice of chunk.choices) {
+          if (typeof choice.delta.content === "string") {
+            deliveredContent.push(choice.delta.content);
           }
+          finishReasons.push(choice.finish_reason);
         }
-      }).rejects.toMatchObject({
-        message: "Assistant output cannot be represented as an append-only response stream.",
-        type: "api_error",
-      });
-      expect(deliveredContent).toEqual([previousText]);
-      expect(finishReasons).not.toContain("stop");
-      expect(agentCommandMock).toHaveBeenCalledTimes(1);
-    },
-  );
+      }
+    }).rejects.toMatchObject({
+      message: "Assistant output cannot be represented as an append-only response stream.",
+      type: "api_error",
+    });
+    expect(deliveredContent).toEqual([previousText]);
+    expect(finishReasons).not.toContain("stop");
+    expect(agentCommandMock).toHaveBeenCalledTimes(1);
+  });
 
-  it.each([
-    {
-      name: "a producer replacement snapshot without a delta",
-      previousDelta: undefined,
-      replacementDelta: undefined,
-    },
-    {
-      name: "a producer replacement snapshot with its own delta",
-      previousDelta: undefined,
-      replacementDelta: "final answer",
-    },
-    {
-      name: "an append-compatible replacement after streamed partial text",
-      previousDelta: "final ",
-      replacementDelta: "answer",
-    },
-    {
-      name: "a held append-compatible replacement",
-      previousDelta: "Echo",
-      replacementText: "Echo tail",
-      replacementDelta: "",
-      replaceable: true,
-    },
-    {
-      name: "a corrected held replacement",
-      previousDelta: "Echo",
-      intermediateText: "Replacement",
-      replacementText: "Echo tail",
-      replacementDelta: "",
-      replaceable: true,
-    },
-    {
-      name: "a held draft recovered only by the authoritative final result",
-      previousDelta: "Echo",
-      replacementText: "Replacement",
-      replacementDelta: "",
-      resultText: "Echo tail",
-      replaceable: true,
-    },
-    {
-      name: "held text without a text-bearing final payload",
-      previousDelta: "Echo",
-      replacementText: "Echo tail",
-      replacementDelta: "",
-      noResultText: true,
-      replaceable: true,
-    },
-    {
-      name: "an initial held draft cleared by an explicit empty result",
-      replacementText: "Draft",
-      replacementDelta: "",
-      resultText: "",
-      replaceable: true,
-    },
-    {
-      name: "a held replacement completed by its native terminal echo",
-      previousDelta: "Echo",
-      replacementText: "Echo tail",
-      replacementDelta: "",
-      replaceable: true,
-      terminalEcho: true,
-    },
-    {
-      name: "an incompatible native echo recovered by the final result",
-      previousDelta: "Echo",
-      replacementText: "Replacement",
-      replacementDelta: "",
-      resultText: "Echo tail",
-      replaceable: true,
-      terminalEcho: true,
-    },
-  ])(
+  it.each(compatibleReplacementCases)(
     "keeps official SDK text consistent for $name",
-    async ({
-      previousDelta,
-      replacementDelta,
-      replacementText = "final answer",
-      replaceable,
-      intermediateText,
-      resultText,
-      noResultText,
-      terminalEcho,
-    }) => {
+    async (scenario) => {
+      const { resultText, replacementText = "final answer" } = scenario;
       agentCommandMock.mockClear();
       agentCommandMock.mockImplementationOnce((async (opts: unknown) => {
         const runId = (opts as { runId?: string }).runId;
         if (!runId) {
           throw new Error("expected a streaming chat-completion run ID");
         }
-        if (previousDelta) {
-          emitAgentEvent({
-            runId,
-            stream: "assistant",
-            data: {
-              text: previousDelta,
-              delta: previousDelta,
-              ...(replaceable ? { itemId: "answer-1" } : {}),
-            },
-          });
-        }
-        if (intermediateText !== undefined) {
-          emitAgentEvent({
-            runId,
-            stream: "assistant",
-            data: {
-              itemId: "answer-2",
-              text: intermediateText,
-              delta: "",
-              replace: true,
-              replaceable: true,
-            },
-          });
-        }
-        emitAgentEvent({
-          runId,
-          stream: "assistant",
-          data: {
-            text: replacementText,
-            replace: true,
-            ...(replaceable
-              ? {
-                  itemId: intermediateText === undefined ? "answer-2" : "answer-3",
-                  replaceable: true,
-                }
-              : { phase: "commentary" }),
-            ...(replacementDelta === undefined ? {} : { delta: replacementDelta }),
-          },
-        });
-        if (terminalEcho) {
-          emitAgentEvent({ runId, stream: "assistant", data: { text: replacementText } });
-        }
-        emitAgentEvent({ runId, stream: "lifecycle", data: { phase: "end" } });
-        return { payloads: noResultText ? [] : [{ text: resultText ?? replacementText }] };
+        return emitCompatibleAssistantReplacement(runId, scenario);
       }) as never);
 
-      const stream = await createOpenAiChatClient(enabledPort).chat.completions.create({
+      const stream = await createOpenAiHttpTestClient(enabledPort).chat.completions.create({
         model: "openclaw",
         messages: [{ role: "user", content: "Preserve an append-compatible replacement." }],
         stream: true,
@@ -3083,7 +2876,7 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
       };
     }) as never);
 
-    const stream = await createOpenAiChatClient(enabledPort).chat.completions.create({
+    const stream = await createOpenAiHttpTestClient(enabledPort).chat.completions.create({
       model: "openclaw",
       messages: [{ role: "user", content: "Check the weather." }],
       stream: true,
@@ -3899,55 +3692,16 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
     await vi.waitFor(() => expect(getActiveGatewayRootWorkCount()).toBe(idleRootCount));
   });
 
-  it.each([
-    {
-      name: "a completed replacement",
-      replacement: { text: "final answer", delta: "", replace: true },
-      finalText: "final answer",
-      expected: "final answer",
-    },
-    {
-      name: "an empty snapshot",
-      replacement: { text: "", delta: "" },
-      finalText: "",
-      expected: "No response from OpenClaw.",
-    },
-    {
-      name: "an empty replacement snapshot",
-      replacement: { text: "", delta: "", replace: true },
-      finalText: "",
-      expected: "No response from OpenClaw.",
-    },
-    {
-      name: "an empty delta without a snapshot",
-      replacement: { delta: "" },
-      finalText: "",
-      expected: "coordination draft",
-    },
-  ])(
+  it.each(bufferedReplacementCases)(
     "buffers replaceable assistant events through $name",
     async ({ replacement, finalText, expected }) => {
       agentCommandMock.mockClear();
       agentCommandMock.mockImplementationOnce((async (opts: unknown) => {
         const runId = (opts as { runId?: string } | undefined)?.runId ?? "";
-        emitAgentEvent({
-          runId,
-          stream: "assistant",
-          data: { text: "coordination draft", delta: "coordination draft", replaceable: true },
-        });
-        emitAgentEvent({
-          runId,
-          stream: "assistant",
-          data: { ...replacement, replaceable: true },
-        });
-        if (finalText) {
-          emitAgentEvent({ runId, stream: "assistant", data: { text: finalText } });
-        }
-        emitAgentEvent({ runId, stream: "lifecycle", data: { phase: "end" } });
-        return { payloads: finalText ? [{ text: finalText }] : [] };
+        return emitBufferedAssistantReplacement(runId, { replacement, finalText });
       }) as never);
 
-      const stream = await createOpenAiChatClient(enabledPort).chat.completions.create({
+      const stream = await createOpenAiHttpTestClient(enabledPort).chat.completions.create({
         stream: true,
         model: "openclaw",
         messages: [{ role: "user", content: "hi" }],

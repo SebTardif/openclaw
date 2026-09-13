@@ -80,7 +80,42 @@ describe("archive transcript display positions", () => {
         ...activity("missing", "dispatch-anchor", 5),
         details: { ...activity("missing", "dispatch-anchor", 5).details, afterEntryId: undefined },
       }),
-      entry("final", "missing", { role: "assistant", content: "done" }),
+      {
+        type: "custom_message",
+        id: "notice",
+        parentId: "missing",
+        customType: "run-failed-before-reply",
+        content: "This turn ended before a reply.",
+        display: true,
+        timestamp: "2026-08-28T00:00:00.000Z",
+      },
+      {
+        type: "custom_message",
+        id: "hidden",
+        parentId: "notice",
+        customType: "private-report",
+        content: "PRIVATE_REPORT",
+        display: false,
+        timestamp: "2026-08-28T00:00:00.000Z",
+      },
+      {
+        type: "custom_message",
+        id: "missing-display",
+        parentId: "hidden",
+        customType: "private-report",
+        content: "PRIVATE_REPORT",
+        timestamp: "2026-08-28T00:00:00.000Z",
+      },
+      {
+        type: "custom_message",
+        id: "runtime-context",
+        parentId: "missing-display",
+        customType: "openclaw.runtime-context",
+        content: "PRIVATE_CONTEXT",
+        display: true,
+        timestamp: "2026-08-28T00:00:00.000Z",
+      },
+      entry("final", "runtime-context", { role: "assistant", content: "done" }),
     ]);
     const reader = new ArchivedTranscriptReader({ sessionId, storePath });
     const full = await reader.read({
@@ -88,7 +123,7 @@ describe("archive transcript display positions", () => {
       reason: "archive placement",
       ...archiveOptions,
     });
-    const recentOptions = { maxMessages: 8, maxLines: 8, ...archiveOptions };
+    const recentOptions = { maxMessages: 8, maxLines: 12, ...archiveOptions };
     const recent = await reader.readRecentWithStats(recentOptions);
     const bounded = await reader.read({ mode: "recent", ...recentOptions });
     const page = await reader.readPage({ offset: 0, maxMessages: 8, ...archiveOptions });
@@ -106,6 +141,7 @@ describe("archive transcript display positions", () => {
       "unknown",
       "invalid",
       "missing",
+      "notice",
       "final",
     ]);
     const expected = [
@@ -119,13 +155,34 @@ describe("archive transcript display positions", () => {
       { source, rawSeq: 11 },
       { source, rawSeq: 12 },
       { source, rawSeq: 13 },
+      { source, rawSeq: 17 },
     ];
     expect(positions(full.messages)).toEqual(expected);
     for (const result of [recent, bounded, page]) {
-      expect(positions(result.messages)).toEqual(expected.slice(2));
+      expect(positions(result.messages)).toEqual(expected.slice(-8));
     }
-    expect(recent.totalMessages).toBe(10);
-    expect(page).toMatchObject({ totalMessages: 10, displaySource: source });
+    expect(recent.totalMessages).toBe(11);
+    expect(page).toMatchObject({ totalMessages: 11, displaySource: source });
+    expect(
+      await reader.readPage({
+        offset: 0,
+        maxMessages: 0,
+        recentAtHead: { maxMessages: 0, maxLines: 0, maxBytes: 1024 },
+        ...archiveOptions,
+      }),
+    ).toMatchObject({ messages: [], totalMessages: 11, displaySource: source });
+    expect(full.messages.at(-2)).toMatchObject({
+      role: "custom",
+      customType: "run-failed-before-reply",
+      content: "This turn ended before a reply.",
+      timestamp: Date.parse("2026-08-28T00:00:00.000Z"),
+    });
+    for (const id of ["hidden", "missing-display", "runtime-context"]) {
+      expect(await reader.readById(id, archiveOptions)).toMatchObject({ found: false });
+      expect(
+        await reader.readAroundId({ messageId: id, maxMessages: 2, ...archiveOptions }),
+      ).toMatchObject({ found: false, messages: [] });
+    }
     for (const message of full.messages) {
       const id = metadata(message).id as string;
       const byId = await reader.readById(id, archiveOptions);
@@ -140,6 +197,29 @@ describe("archive transcript display positions", () => {
       );
       expect(around).toMatchObject({ found: true, displaySource: source });
       expect(around.messages.find((row) => metadata(row).id === id)).toEqual(message);
+    }
+    for (const [messageId, direction, maxMessages, messages, offset] of [
+      ["root", "older", 4, full.messages.slice(0, 1), 10],
+      ["final", "newer", 4, full.messages.slice(-1), 0],
+      ["progress", "newer", 2, full.messages.slice(1, 3), 8],
+      ["fast", "older", 2, full.messages.slice(1, 3), 8],
+      ["notice", "older", 1, full.messages.slice(9, 10), 1],
+      ["notice", "newer", 1, full.messages.slice(9, 10), 1],
+    ] as const) {
+      const directionalPage = await reader.readAroundId({
+        messageId,
+        direction,
+        maxMessages,
+        ...archiveOptions,
+      });
+      expect(directionalPage).toMatchObject({
+        found: true,
+        displaySource: source,
+        totalMessages: 11,
+        hasOverreadContext: false,
+        offset,
+      });
+      expect(directionalPage.messages).toEqual(messages);
     }
   });
 

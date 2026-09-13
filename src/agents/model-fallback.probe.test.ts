@@ -406,6 +406,21 @@ describe("runWithModelFallback – probe logic", () => {
     await expectPrimarySkippedAfterLongCooldown("billing");
   });
 
+  it.each(["timeout", "overloaded", "format", "empty_response"] as const)(
+    "distinguishes a local skip from its retained %s failure",
+    async (reason) => {
+      mockedGetSoonestCooldownExpiry.mockReturnValue(NOW + 30 * 60 * 1000);
+      mockedResolveProfilesUnavailableReason.mockReturnValue(reason);
+      probeThrottleInternals.lastProbeAttempt.set("openai", NOW - 10_000);
+      const run = vi.fn().mockResolvedValue("ok");
+
+      const result = await runPrimaryCandidate(makeCfg(), run);
+
+      expectPrimarySkippedForReason(result, run, reason);
+      expect(result.attempts[0]?.code).toBe("MODEL_FALLBACK_SKIPPED");
+    },
+  );
+
   it("re-probes a single-provider primary blocked by a far-future subscription_limit (#90702)", () => {
     // fallbacks:[] + a multi-day subscription_limit reset must still re-probe on
     // the throttle instead of suspending until blockedUntil literally arrives,
@@ -775,16 +790,7 @@ describe("runWithModelFallback – probe logic", () => {
   });
 
   it("re-probes a single-provider rate-limited primary instead of suspending", async () => {
-    const cfg = makeCfg({
-      agents: {
-        defaults: {
-          model: {
-            primary: "openai/gpt-4.1-mini",
-            fallbacks: [],
-          },
-        },
-      },
-    } as Partial<OpenClawConfig>);
+    const cfg = createModelFallbackConfig("openai/gpt-4.1-mini", []);
 
     // Far-future cooldown with no fallback chain: the primary must still be
     // probed so a recovered rolling cap resumes work instead of staying silent

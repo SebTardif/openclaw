@@ -49,6 +49,7 @@ import {
   applyAnthropicConfigDefaults,
   normalizeAnthropicProviderConfigForProvider,
 } from "./config-defaults.js";
+import { resolveFastModeSupport } from "./fast-mode-policy.js";
 import { acceptsAnthropicLiveModelContract } from "./live-model-contract-gate.js";
 import { anthropicMediaUnderstandingProvider } from "./media-understanding-provider.js";
 import manifest from "./openclaw.plugin.json" with { type: "json" };
@@ -566,7 +567,11 @@ function applyAnthropicModernMaxTokens(params: {
   modelId: string;
   model: ProviderRuntimeModel;
 }): ProviderRuntimeModel | undefined {
-  if (!isAnthropic128kOutputModel(params.modelId)) {
+  // Catalog defaults must not raise an operator-configured output cap.
+  if (
+    params.model.maxTokensSource === "configured" ||
+    !isAnthropic128kOutputModel(params.modelId)
+  ) {
     return undefined;
   }
   if ((params.model.maxTokens ?? 0) >= ANTHROPIC_MODERN_MAX_OUTPUT_TOKENS) {
@@ -873,6 +878,7 @@ export function buildAnthropicProvider(): ProviderPlugin {
           });
     },
     wrapStreamFn: wrapAnthropicProviderStream,
+    resolveFastModeSupport,
     resolveUsageAuth: resolveAnthropicUsageAuth,
     fetchUsageSnapshot: fetchAnthropicUsage,
     isCacheTtlEligible: () => true,

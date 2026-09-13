@@ -27,10 +27,7 @@ import {
   projectInternalRealtimeVoicePublicConfig,
   type InternalRealtimeVoiceBrowserSessionCreateRequest,
 } from "../../talk/provider-internal.js";
-import {
-  resolveConfiguredRealtimeVoiceProvider,
-  resolveRealtimeVoiceProviderCapabilities,
-} from "../../talk/provider-resolver.js";
+import { resolveConfiguredRealtimeVoiceProvider } from "../../talk/provider-resolver.js";
 import { resolveSandboxedSessionCreation } from "../operator-role-policy.js";
 import { SessionMutationAuthorizationChangedError } from "../session-sharing.js";
 import { readSessionPreviewItemsFromTranscript } from "../session-transcript-readers.js";
@@ -151,16 +148,10 @@ export const createTalkClient: GatewayRequestHandler = async ({
       agentId,
       defaultModel: realtimeConfig.model,
       surface: "browser-session",
+      requiredCapabilities: { supportsVideoFrames: wantsCameraFrames },
+      clientControl,
     });
-    const providerCapabilities = resolveRealtimeVoiceProviderCapabilities({
-      provider: resolution.provider,
-      providerConfig: resolution.providerConfig,
-      cfg: runtimeConfig,
-      agentId,
-      model: launchOptions.model,
-      ...(clientControl ? { clientControl } : {}),
-      surface: "browser-session",
-    });
+    const providerCapabilities = resolution.capabilities;
     if (wantsGatewayControl && providerCapabilities?.supportsGatewayControl !== true) {
       rejectTalkClientRequest(
         respond,
@@ -187,26 +178,35 @@ export const createTalkClient: GatewayRequestHandler = async ({
     sessionMutationAuthorization?.assertCurrent();
     if (resolution.provider.createBrowserSession && transport !== "gateway-relay") {
       const agentSessionId = resolveClientVoiceAgentSessionId(sessionTarget);
+      const { readRestoredSessionTranscript } =
+        await import("../../config/sessions/session-cold-storage-read.js");
       const initialItems = agentSessionId
-        ? boundTalkClientRealtimeInitialItems(
-            readSessionPreviewItemsFromTranscript(
-              {
-                ...sessionTarget,
-                sessionId: agentSessionId,
-              },
-              REALTIME_VOICE_CONTEXT_MAX_ITEMS,
-              REALTIME_VOICE_CONTEXT_MAX_ITEM_CHARS,
-              "model-context",
-            ).filter(
-              (
-                item,
-              ): item is {
-                role: "user" | "assistant";
-                text: string;
-              } => item.role === "user" || item.role === "assistant",
-            ),
+        ? await readRestoredSessionTranscript(
+            { ...sessionTarget, sessionId: agentSessionId },
+            () => {
+              sessionMutationAuthorization?.assertCurrent();
+              return boundTalkClientRealtimeInitialItems(
+                readSessionPreviewItemsFromTranscript(
+                  {
+                    ...sessionTarget,
+                    sessionId: agentSessionId,
+                  },
+                  REALTIME_VOICE_CONTEXT_MAX_ITEMS,
+                  REALTIME_VOICE_CONTEXT_MAX_ITEM_CHARS,
+                  "model-context",
+                ).filter(
+                  (
+                    item,
+                  ): item is {
+                    role: "user" | "assistant";
+                    text: string;
+                  } => item.role === "user" || item.role === "assistant",
+                ),
+              );
+            },
           )
         : [];
+      sessionMutationAuthorization?.assertCurrent();
       const controlSource =
         providerCapabilities?.handlesAgentConsult === true ? "delegation" : "transcript";
       const tools =
@@ -265,10 +265,11 @@ export const createTalkClient: GatewayRequestHandler = async ({
                 throw new Error("Realtime voice client disconnected");
               }
             },
-            runAgentConsult: consultRunner.runArgs,
+            runToolAgentConsult: consultRunner.runArgs,
+            runAgentConsult: consultRunner.runOwnedArgs,
             getToolAuthorityOverlay: (source) =>
               consultRunner.getToolAuthorityOverlay(undefined, source),
-            appendTranscript: ({ entryId, role, text }) =>
+            appendTranscript: ({ entryId, role, text, confirmation }) =>
               appendClientVoiceTranscript({
                 agentId,
                 sessionKey,
@@ -277,6 +278,7 @@ export const createTalkClient: GatewayRequestHandler = async ({
                 entryId,
                 role,
                 text,
+                confirmation,
                 config: runtimeConfig,
               }),
             flushTranscript: () =>

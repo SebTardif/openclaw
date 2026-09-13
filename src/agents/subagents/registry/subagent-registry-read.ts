@@ -34,6 +34,7 @@ import {
   getSubagentRunsSnapshotForController,
   getSubagentRunsSnapshotForRead,
 } from "./subagent-registry-state.js";
+import { loadSubagentRunsForChildSessionFromSqlite } from "./subagent-registry.store.sqlite.js";
 import type { SubagentRunReadRecord, SubagentRunRecord } from "./subagent-registry.types.js";
 
 export type { SubagentRunReadIndex } from "./subagent-registry-queries.js";
@@ -130,7 +131,7 @@ export function resolveRequesterForChildSession(childSessionKey: string): {
   requesterOrigin?: DeliveryContext;
 } | null {
   const resolved = resolveRequesterForChildSessionFromRuns(
-    getSubagentRunsSnapshotForRead(subagentRuns),
+    getSubagentRunsSnapshotForChildSession(subagentRuns, childSessionKey),
     childSessionKey,
   );
   if (!resolved) {
@@ -146,7 +147,7 @@ export function resolveRequesterForChildSession(childSessionKey: string): {
 /** True when post-completion announce should be skipped for a child session. */
 export function shouldIgnorePostCompletionAnnounceForSession(childSessionKey: string): boolean {
   return shouldIgnorePostCompletionAnnounceForSessionFromRuns(
-    getSubagentRunsSnapshotForRead(subagentRuns),
+    getSubagentRunsSnapshotForChildSession(subagentRuns, childSessionKey),
     childSessionKey,
   );
 }
@@ -164,6 +165,26 @@ export function listSubagentRunsForRequester(
 ): SubagentRunRecord[] {
   // Request-run lifetime scoping must observe the raw live map, including rows not persisted yet.
   return listRunsForRequesterFromRuns(subagentRuns, requesterSessionKey, options);
+}
+
+/** Whether any current or durable generation still owns this logical task, including waits/recovery. */
+export function hasSubagentTaskOwner(params: {
+  taskRunId: string;
+  childSessionKey: string;
+  requesterSessionKey: string;
+}): boolean {
+  const ownsTask = (entry: SubagentRunRecord) =>
+    (entry.taskRunId ?? entry.runId) === params.taskRunId &&
+    entry.childSessionKey === params.childSessionKey &&
+    entry.requesterSessionKey === params.requesterSessionKey;
+  for (const entry of getSubagentRunsForChildSession(params.childSessionKey)) {
+    if (ownsTask(entry)) {
+      return true;
+    }
+  }
+  // Absence permits maintenance to settle stranded tasks. Unlike presentation
+  // snapshots, this read must propagate failures rather than treating them as absence.
+  return loadSubagentRunsForChildSessionFromSqlite(params.childSessionKey).some(ownsTask);
 }
 
 /** Returns whether a registry entry still has a live agent run context. */
@@ -189,29 +210,6 @@ export function isSubagentRunQueued(entry: SubagentRunReadRecord | null | undefi
     current.collect &&
     current.execution.status === "queued" &&
     ownsSwarmRunReservation(current.schedulerSlotId ?? current.runId, current),
-  );
-}
-
-/** Returns the run to display for a child session, using live memory before snapshot state. */
-export function getSessionDisplaySubagentRunByChildSessionKey(
-  childSessionKey: string,
-): SubagentRunRecord | null {
-  const key = childSessionKey.trim();
-  if (!key) {
-    return null;
-  }
-
-  const latestInMemory = getLatestSubagentRunByChildSessionKeyFromRuns(
-    getSubagentRunsForChildSession(key),
-    key,
-  );
-  // Fresh in-memory terminal state is more accurate than an older active snapshot row.
-  return (
-    latestInMemory ??
-    getSubagentRunByChildSessionKeyFromRuns(
-      getSubagentRunsSnapshotForChildSession(subagentRuns, key),
-      key,
-    )
   );
 }
 

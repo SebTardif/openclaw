@@ -43,10 +43,13 @@ export async function installDesktopClientFake(panel: Locator): Promise<void> {
         element.dataset.usedCredentials = options.credentials?.password ? "true" : "false";
         return {
           disableInput() {},
+          setPresented() {
+            return true;
+          },
           sendBackspace() {},
           sendKeyboardEvent() {},
           sendText() {},
-          setScaleViewport() {},
+          setSizingMode() {},
           disconnect() {
             element.dataset.disconnectCount = String(
               Number(element.dataset.disconnectCount ?? "0") + 1,

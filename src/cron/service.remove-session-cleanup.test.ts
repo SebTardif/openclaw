@@ -24,7 +24,7 @@ const gatewayTestState = vi.hoisted(() => ({
   targetBySessionKey: new Map<string, { agentId: string; storePath: string }>(),
 }));
 
-vi.mock("../gateway/call.runtime.js", () => ({
+vi.mock("../gateway/call.js", () => ({
   callGateway: gatewayTestState.callGateway,
 }));
 
@@ -217,10 +217,14 @@ describe("CronService.remove session cleanup", () => {
       sessionKey,
       storePath: sessionStorePath,
     });
-    const heldWriter = runExclusiveSqliteSessionWrite(resolvedSessionScope, async () => {
-      writerEntered.resolve();
-      await releaseWriter.promise;
-    });
+    const heldWriter = runExclusiveSqliteSessionWrite(
+      resolvedSessionScope,
+      async () => {
+        writerEntered.resolve();
+        await releaseWriter.promise;
+      },
+      "session.transcript.batch",
+    );
     await writerEntered.promise;
 
     const removal = cron.remove(job.id);

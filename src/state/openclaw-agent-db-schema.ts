@@ -18,6 +18,8 @@ import {
 import {
   assertSqliteIntegrity,
   runSqliteIntegrityOperationSync,
+  sqliteIntegrityCheckSteps,
+  type SqliteIntegrityDiagnostics,
   type SqliteIntegrityOperation,
 } from "../infra/sqlite-integrity.js";
 import { migrateSqliteSchemaToStrictInTransaction } from "../infra/sqlite-strict.js";
@@ -55,6 +57,7 @@ import {
   ensureSessionAdditiveColumns,
   ensureSessionEntryValidityProjection,
   hasPendingSessionConversationRouteContextColumn,
+  hasPendingSessionProjectColumn,
   hasPendingSessionTranscriptContextEligibilityColumn,
   migrateConversationDeliveryTargetColumn,
   migrateSessionCreatorNamespaces,
@@ -132,11 +135,6 @@ function hasPendingSessionKeyContractSchemaMigration(db: DatabaseSync): boolean 
       .get(),
   );
   return !sessionNodeColumns.has("entry_valid") || !hasContractTable;
-}
-
-function hasPendingSessionProjectColumn(db: DatabaseSync): boolean {
-  const columns = readSqliteTableColumns(db, "session_nodes");
-  return Boolean(columns && !columns.has("project_id"));
 }
 
 function migrateMemoryChunkMetadataSchema(db: DatabaseSync): void {
@@ -482,6 +480,8 @@ export function* agentDatabaseIntegrityBeforeMutationSteps(
   database: DatabaseSync,
   agentId: string,
   pathname: string,
+  diagnostics?: SqliteIntegrityDiagnostics,
+  reuseIntegrity = false,
 ): SqliteIntegrityOperation<boolean> {
   database.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS};`);
   const userVersion = readSqliteUserVersion(database);
@@ -512,6 +512,8 @@ export function* agentDatabaseIntegrityBeforeMutationSteps(
       allowMissingColumns: true,
       validateAfterRepair: () =>
         assertOpenClawAgentCurrentRuntimeSchema(database, { agentId, pathname }),
+      diagnostics,
+      reuseIntegrity,
     });
     assertOpenClawAgentCurrentRuntimeSchema(database, { agentId, pathname });
   } else if (
@@ -523,8 +525,8 @@ export function* agentDatabaseIntegrityBeforeMutationSteps(
     // Yielding first leaves an occupied, unowned file that custom selectors must avoid.
     assertSqliteIntegrity(database, pathname);
   } else {
-    // Every physical open proves the full file before schema mutation or exposure.
-    yield { database, databaseLabel: pathname };
+    // Pending migrations cannot inherit an earlier runtime verification.
+    yield* sqliteIntegrityCheckSteps(database, pathname, diagnostics);
   }
   return hasPendingCurrentVersionMigration;
 }
@@ -692,7 +694,9 @@ function ensureAgentSchema(
       }
     });
   } finally {
-    db.exec("PRAGMA foreign_keys = ON;");
+    if (db.isOpen) {
+      db.exec("PRAGMA foreign_keys = ON;");
+    }
   }
 }
 
@@ -735,8 +739,7 @@ export function migrateOpenClawAgentDatabaseToMediaPrerequisiteSchema(
   options: OpenClawAgentDatabaseOptions,
 ): void {
   const targetVersion = AGENT_MEDIA_SCHEMA_VERSION - 1;
-  const userVersion = readSqliteUserVersion(db);
-  if (userVersion > targetVersion) {
+  if (readSqliteUserVersion(db) > targetVersion) {
     return;
   }
   const agentId = normalizeAgentId(options.agentId);

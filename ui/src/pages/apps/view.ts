@@ -4,11 +4,14 @@ import type { RouteId } from "../../app-route-paths.ts";
 import { inferControlUiPublicAssetPath } from "../../app/public-assets.ts";
 import { icons } from "../../components/icons.ts";
 import { t } from "../../i18n/index.ts";
+import { registerAppsEnglish } from "../../i18n/locales/en-apps.ts";
 import { buildExternalLinkRel, EXTERNAL_LINK_TARGET } from "../../lib/external-link.ts";
 import { COMMUNITY_DISCORD_URL } from "../../lib/product-links.ts";
 import "../../styles/apps.css";
 import { brandIcons } from "../about/brand-icons.ts";
 import { appsBrandIcons } from "./brand-icons.ts";
+
+registerAppsEnglish();
 
 type AppsProps = {
   onNavigate: (routeId: RouteId) => void;
@@ -182,7 +185,7 @@ const APP_SECTIONS: readonly AppSection[] = [
       {
         id: "plugins",
         gradient: ["#fb7185", "#9f1239"],
-        icon: icons.puzzle,
+        icon: icons.plug,
         title: () => t("appsPage.cards.plugins.title"),
         desc: () => t("appsPage.cards.plugins.desc"),
         ctas: [

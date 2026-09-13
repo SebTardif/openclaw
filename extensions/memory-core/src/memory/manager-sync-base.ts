@@ -1,5 +1,4 @@
 // Memory Core plugin module owns shared manager synchronization state.
-import type { DatabaseSync } from "node:sqlite";
 import type { FSWatcher } from "chokidar";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
@@ -12,7 +11,6 @@ import {
 import {
   ensureMemoryIndexSchema,
   loadSqliteVecExtension,
-  MEMORY_EMBEDDING_CACHE_TABLE,
   MEMORY_INDEX_VECTOR_TABLE,
   type MemorySessionSyncTarget,
   type MemoryEntryProvenance,
@@ -20,7 +18,6 @@ import {
   type MemorySyncParams,
   type MemorySyncProgressUpdate,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
-import { runSqliteImmediateTransactionSync } from "openclaw/plugin-sdk/sqlite-runtime";
 import type { MemoryCoreAcquireLocalService } from "./embedding-local-service.js";
 import {
   resolveEmbeddingProviderIndexIdentity,
@@ -29,10 +26,6 @@ import {
   type EmbeddingProviderRuntime,
 } from "./embeddings.js";
 import { MemoryManagerDatabaseContext } from "./manager-database-context.js";
-import {
-  prepareMemoryEmbeddingCacheUpsert,
-  type MemoryEmbeddingCacheRow,
-} from "./manager-embedding-cache.js";
 import {
   resolveMemoryPrimaryProviderRequest,
   type MemoryProviderLifecycleState,
@@ -47,11 +40,7 @@ import {
   type MemoryIndexProviderIdentity,
 } from "./manager-reindex-state.js";
 import { MemorySyncOutcomeLedger } from "./manager-sync-outcome.js";
-import {
-  markMemoryVectorRebuildRequired,
-  memoryTableExists,
-  requiresMemoryVectorRebuild,
-} from "./manager-vector-rebuild-state.js";
+import { memoryTableExists, requiresMemoryVectorRebuild } from "./manager-vector-rebuild-state.js";
 import { buildMemorySourceFilter } from "./source-filter.js";
 import type { MemoryWatchSettleQueue } from "./watch-settle.js";
 
@@ -100,10 +89,6 @@ export const MEMORY_INDEX_META_KEY = "memory_index_meta_v1";
 const META_KEY = MEMORY_INDEX_META_KEY;
 const VECTOR_TABLE = MEMORY_INDEX_VECTOR_TABLE;
 const LEGACY_VECTOR_TABLE = "chunks_vec";
-const EMBEDDING_CACHE_TABLE = MEMORY_EMBEDDING_CACHE_TABLE;
-// Production embeddings measured ~28 KB/row; 1,000-row synchronous commits
-// blocked the event loop for seconds. Keep each commit small between yields.
-const EMBEDDING_CACHE_SEED_BATCH_SIZE = 100;
 const VECTOR_LOAD_TIMEOUT_MS = 30_000;
 const log = createSubsystemLogger("memory");
 
@@ -138,7 +123,6 @@ export abstract class MemoryManagerSyncBase extends MemoryManagerDatabaseContext
   protected fallbackReason?: string;
   protected intervalTimer: NodeJS.Timeout | null = null;
   protected memoryWatchPressureStartupTimer: NodeJS.Timeout | null = null;
-  protected closed = false;
   protected dirty = false;
   // A success clears only the failure visible when it started. This keeps a
   // concurrent failure visible even when older or no-op work settles later.
@@ -217,6 +201,10 @@ export abstract class MemoryManagerSyncBase extends MemoryManagerDatabaseContext
     this.clearMemoryRetryState();
     this.clearSessionRetryState();
     return snapshot;
+  }
+
+  adoptReindexRetryState(snapshot: MemoryReindexRetryState): void {
+    this.restoreReindexRetryState(snapshot);
   }
 
   protected restoreReindexRetryState(snapshot: MemoryReindexRetryState): void {
@@ -483,7 +471,7 @@ export abstract class MemoryManagerSyncBase extends MemoryManagerDatabaseContext
       if (persistedMeta && persistedMeta.vectorDims !== this.vector.dims) {
         this.vector.dims = persistedMeta.vectorDims;
       }
-      this.ensureVectorTable(dimensions);
+      await this.withDatabaseWrite(() => this.ensureVectorTable(dimensions));
     }
     return ready;
   }
@@ -517,7 +505,10 @@ export abstract class MemoryManagerSyncBase extends MemoryManagerDatabaseContext
         this.markConfiguredSourcesForFullReindex();
         return false;
       }
-      if (!this.database.readOnly && this.dropLegacyVectorTable()) {
+      if (
+        !this.database.readOnly &&
+        (await this.withDatabaseWrite(() => this.dropLegacyVectorTable()))
+      ) {
         // A broad dirty sync can skip unchanged files whose source hashes were
         // migrated. Force the next sync to republish the derived vector rows.
         this.dirty = true;
@@ -531,31 +522,6 @@ export abstract class MemoryManagerSyncBase extends MemoryManagerDatabaseContext
       log.warn(`sqlite-vec unavailable: ${message}`);
       return false;
     }
-  }
-
-  protected deleteVectorRowsForSource(pathname: string, source: MemorySource): void {
-    if (!memoryTableExists(this.db, VECTOR_TABLE)) {
-      return;
-    }
-    if (!this.vector.enabled || this.vector.available !== true) {
-      this.markVectorRebuildRequired();
-      return;
-    }
-    try {
-      this.db
-        .prepare(
-          `DELETE FROM ${VECTOR_TABLE} WHERE id IN (
-             SELECT id FROM memory_index_chunks WHERE path = ? AND source = ?
-           )`,
-        )
-        .run(pathname, source);
-    } catch {
-      this.markVectorRebuildRequired();
-    }
-  }
-
-  protected markVectorRebuildRequired(): void {
-    markMemoryVectorRebuildRequired(this.db);
   }
 
   private hasVectorRebuildMarker(): boolean {
@@ -626,46 +592,6 @@ export abstract class MemoryManagerSyncBase extends MemoryManagerDatabaseContext
   ): { sql: string; params: MemorySource[] } {
     const sources = sourcesOverride ?? Array.from(this.sources);
     return buildMemorySourceFilter(alias, sources);
-  }
-
-  protected async seedEmbeddingCache(sourceDb: DatabaseSync): Promise<void> {
-    if (!this.cache.enabled) {
-      return;
-    }
-    type CacheRow = MemoryEmbeddingCacheRow & { rowid: number };
-    const selectBatch = sourceDb.prepare(
-      `SELECT rowid, provider, model, provider_key, hash, embedding, dims, updated_at
-       FROM ${EMBEDDING_CACHE_TABLE}
-       WHERE rowid > ?
-       ORDER BY rowid
-       LIMIT ?`,
-    );
-    const upsert = prepareMemoryEmbeddingCacheUpsert(this.db);
-    let lastRowid = 0;
-    while (true) {
-      // Materialize each source page so neither a read cursor nor a write
-      // transaction remains open when control returns to the event loop.
-      const batch = selectBatch.all(lastRowid, EMBEDDING_CACHE_SEED_BATCH_SIZE) as CacheRow[];
-      if (batch.length === 0) {
-        return;
-      }
-      runSqliteImmediateTransactionSync(
-        this.db,
-        () => {
-          for (const row of batch) {
-            upsert(row);
-          }
-        },
-        { operationLabel: "memory.embedding-cache.seed" },
-      );
-      lastRowid = batch[batch.length - 1]?.rowid ?? lastRowid;
-      if (batch.length < EMBEDDING_CACHE_SEED_BATCH_SIZE) {
-        return;
-      }
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
-      });
-    }
   }
 
   protected ensureSchema() {

@@ -1,21 +1,53 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CronRunLogEntry } from "../../api/types.ts";
-import { createCronViewJob, renderCronView as renderView } from "./view.test-support.ts";
-
-function getElement<T extends Element>(
-  container: Element,
-  selector: string,
-  constructor: new () => T,
-): T {
-  const element = container.querySelector<T>(selector);
-  expect(element).toBeInstanceOf(constructor);
-  if (!(element instanceof constructor)) {
-    throw new Error(`Expected ${selector} to match ${constructor.name}`);
-  }
-  return element;
-}
+import { i18n, t } from "../../i18n/index.ts";
+import { captureI18nStateForTesting } from "../../i18n/lib/translate.test-support.ts";
+import {
+  createCronViewJob,
+  getElement,
+  renderCronView as renderView,
+} from "./view.test-support.ts";
 
 describe("cron view run history", () => {
+  it.each(["overview", "job"] as const)(
+    "refreshes localized timestamps across %s history renders",
+    async (scope) => {
+      const restoreI18n = captureI18nStateForTesting();
+      const timestamp = Date.UTC(2026, 0, 2, 15, 4, 55);
+      try {
+        for (const locale of ["en", "fr", "en"] as const) {
+          await i18n.setLocale(locale);
+          const container = renderView({
+            listTab: "activity",
+            editingJob: scope === "job" ? createCronViewJob("job-1", { state: {} }) : null,
+            detailTab: "history",
+            runs: [
+              { ts: timestamp, runAtMs: 0, jobId: "job-1", action: "finished", status: "ok" },
+              { ts: 1, runAtMs: Number.NaN, jobId: "job-2", action: "finished", status: "ok" },
+            ],
+          });
+          const entries = container.querySelectorAll(".cron-run-entry__meta");
+          const dateOptions: Intl.DateTimeFormatOptions = {
+            year: "numeric",
+            month: "numeric",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+          };
+          expect(entries[0]?.firstElementChild?.textContent).toBe(
+            new Date(timestamp).toLocaleString(locale, dateOptions),
+          );
+          expect(entries[0]?.children[1]?.textContent).toContain(
+            new Date(0).toLocaleString(locale, dateOptions),
+          );
+          expect(entries[1]?.children[1]?.textContent).toContain(t("common.na"));
+        }
+      } finally {
+        await restoreI18n();
+      }
+    },
+  );
+
   it("renders runs sorted newest first and wires run filters", () => {
     const onRunsFiltersChange = vi.fn();
     const container = renderView({

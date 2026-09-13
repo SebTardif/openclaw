@@ -2,6 +2,7 @@
 summary: "Config snapshot, SQLite-backed plugin state, system utilities, events, and logging"
 read_when:
   - You need durable keyed or blob storage scoped to your plugin
+  - You maintain a bundled or official plugin that writes through per-agent SQLite handles
   - You are buffering channel ingress across restarts
   - You need the config snapshot, system utilities, events, or a scoped logger
 title: "Plugin runtime state and system"
@@ -52,6 +53,8 @@ The runtime config snapshot, durable plugin-scoped storage, system utilities, ev
     const hint = api.runtime.system.formatNativeDependencyHint(pkg);
     ```
 
+    `requestHeartbeatNow(...)` is tracked as `plugin-runtime-api-compat-aliases` in the [compatibility registry](/plugins/compatibility#current-compatibility-areas) with a `removeAfter` date of 2026-10-01; use `requestHeartbeat({ source, intent, reason })` in new code.
+
     `runHeartbeatOnce(...)` runs a single heartbeat cycle immediately, bypassing the normal coalesce timer. Delivery defaults to the configured operator DM (`commands.ownerAllowFrom`, then channel `allowFrom`); pass `{ heartbeat: { target: "none" } }` for an internal-only run.
 
     `runCommandWithTimeout(...)` returns captured `stdout` and `stderr`, optional
@@ -77,6 +80,13 @@ The runtime config snapshot, durable plugin-scoped storage, system utilities, ev
   </Accordion>
   <Accordion title="api.runtime.logging">
     Logging.
+
+    Generate private transport tokens with `generateSecureToken({ bytes: 32, redact: true })`
+    from `openclaw/plugin-sdk/secure-random-runtime`. The object form requires at least
+    16 random bytes and registers the generated value for exact diagnostic redaction
+    before returning it. Existing numeric calls keep their ordinary ID behavior.
+    This grants no credential access or request authority; preserve live protocol
+    values and redact only at presentation boundaries.
 
     ```typescript
     const verbose = api.runtime.logging.shouldLogVerbose();
@@ -123,13 +133,17 @@ The runtime config snapshot, durable plugin-scoped storage, system utilities, ev
 
     Current host factories provide `lookupMany`, but the public store types keep it optional for existing third-party adapters and declared older host versions. A plugin supporting those hosts must check the method and use its existing sequential `lookup` path when absent; never retry a failed bulk read through that path. Matrix, Microsoft Teams, and Voice Call retain this compatibility until their declared minimum host supplies the capability. Do not import a new helper export from an older host just to detect this method.
 
-    `openSyncKeyedStore<T>(...)` returns the same store shape with synchronous methods (`register`, `registerIfAbsent`, `deleteIf`, `lookup`, `lookupMany`, `consume`, `clear` all return values directly instead of promises) for callers that cannot await.
+    `count()` returns the number of live stored rows in the runtime-bound plugin and namespace without loading or decoding their JSON values. A row expires when its expiry timestamp is at or before the call's cutoff. Counting does not delete expired rows, create a missing database, or join the writable database lifecycle. Corrupt JSON still occupies a live row and is counted; `lookup` and `entries` retain their decoding errors. Database acquisition and query failures propagate with operation `count`. A count and a later write are separate operations; the write remains responsible for enforcing capacity.
+
+    Current host factories provide `count`, but it remains optional in the public async and synchronous store types for shipped hosts and adapters through the next Plugin SDK major. Callers supporting those stores can use `store.count ? await store.count() : (await store.entries()).length`; synchronous callers omit `await`. The fallback retains the older store's enumeration and decoding behavior. Only fall back when the method is absent, never after a failed count.
+
+    `openSyncKeyedStore<T>(...)` remains available for callers that cannot await, with its existing synchronous return values and errors. It is deprecated through the `next-plugin-sdk-major` compatibility gate. See [Synchronous keyed store migration](/plugins/sdk-runtime/state-and-system#synchronous-keyed-store-migration).
 
     `openBlobStore<TMetadata>(...)` stores bounded binary payloads in shared SQLite without base64 or file sidecars. It requires per-entry, per-namespace byte, and row limits; copies byte arrays at the API boundary; and lists metadata without loading every BLOB. `register(...)` is an explicit upsert, including for expired keys. `registerIfAbsent(...)` provides collision-safe creation: an expired key remains occupied until its owner claims it with `deleteExpiredKey(key)` or `deleteExpired()`, preserving metadata needed to remove related named artifacts after the SQLite commit. Any row with a TTL is transient and excluded from backup/restore even before it expires; omit TTL for durable, restorable state. Host fuses cap each BLOB at 100 MiB, each plugin at 512 MiB of physically stored BLOBs, and each plugin at 50,000 physically stored rows, including expired rows awaiting owner cleanup. Use `registerIfAbsent(...)` with `overflowPolicy: "reject-new"` when external materializations must not be silently orphaned by replacement or eviction.
 
     `openChannelIngressQueue<TPayload>(...)` opens a persisted ingress queue scoped to the calling plugin, for buffering inbound events that need at-least-once processing across restarts. When stale-claim recovery uses `shouldRecover`, also provide `shouldRecoverCorrupt` if corrupt claimed payloads should be quarantined: its payload-independent claim identity lets the plugin preserve live owner and lane policy before the queue tombstones the row.
 
-    Plugin-state leases were removed. Use short SQLite transactions for atomic database work and plugin-scoped keyed stores (`openKeyedStore` or `openSyncKeyedStore`) for bounded durable state.
+    Plugin-state leases were removed in 2026.8.1. Use short SQLite transactions for atomic database work and plugin-scoped keyed stores (`openKeyedStore` or `openSyncKeyedStore`) for bounded durable state.
 
     `openChannelIngressDrain(...)` opens the core channel-agnostic worker over that queue (or creates a queue when none is supplied). The drain owns stale-claim recovery, per-lane claim serialization, complete-at-adoption or complete-on-dispatch-return, retry/dead-letter disposition, optional pre-adoption supersede, and claim→adoption stall timeout. Wire claim ownership into reply generation with `turnAdoptionLifecycle` (via `bindIngressLifecycleToReplyOptions` from `plugin-sdk/channel-outbound`). Channel plugins keep accept-side enqueue, lane derivation, non-retryable classification, and any supersede authorization policy.
 
@@ -139,3 +153,114 @@ The runtime config snapshot, durable plugin-scoped storage, system utilities, ev
 
   </Accordion>
 </AccordionGroup>
+
+## Synchronous keyed store migration
+
+`api.runtime.state.openSyncKeyedStore` and `PluginStateSyncKeyedStore` are deprecated
+as of September 11, 2026. The existing `createPluginStateSyncKeyedStore` factory is
+the named `plugin-state-sync-keyed-store` compatibility adapter. Existing methods
+remain supported through the next Plugin SDK major; removal also requires a
+supported external-plugin migration and explicit breaking-release approval.
+
+Use `api.runtime.state.openKeyedStore` with the same namespace and options, then
+await its operations. The opener itself still returns a store synchronously.
+Both interfaces use the same plugin-scoped data, so no data migration is needed.
+
+```typescript
+const store = api.runtime.state.openKeyedStore<MyRecord>({
+  namespace: "my-feature",
+  maxEntries: 200,
+});
+await store.register("key-1", { value: "hello" });
+const value = await store.lookup("key-1");
+```
+
+The async store's `update` updater and `deleteIf` predicate remain synchronous
+callbacks inside the transaction containing the authoritative read and mutation.
+Finish asynchronous planning before calling these methods; do not make their
+callbacks async or replace atomic operations with separate lookups and writes.
+Returning `undefined` from an updater leaves the entry unchanged. `update`,
+`deleteIf`, `lookupMany`, and `count` remain optional in public store types, so preserve
+capability checks for supported older hosts and third-party adapters.
+
+This deprecation adds editor annotations, documentation, and compatibility
+inventory metadata. It adds no runtime warning and changes no trust eligibility:
+the runtime openers remain limited to bundled plugins and trusted official
+installations. Runtime warnings should wait for an actionable supported upgrade.
+The async interface does not promise off-thread SQL or change callback execution;
+callback-free worker capabilities are a separate contract.
+
+## Per-agent SQLite writes
+
+Bundled and official plugins that already use the private `sqlite-runtime`
+facade can import `withOpenClawAgentDatabaseWrite` from
+`openclaw/plugin-sdk/sqlite-runtime`. This remains an internal runtime facade,
+not a typed public SDK entrypoint for third-party plugins.
+
+Call it from an asynchronous producer before entering synchronous SQLite. It
+shares the agent database's in-process write admission with session writers and
+off-thread reclamation, leaving the Gateway thread available to authorize a
+reclamation commit.
+
+Asynchronous AgentSession message, model, compaction, and tree operations use
+this admission for their transcript writes. Embedded prompt preparation, replay
+repair, and tool-result cleanup await their writes before publishing dependent
+results or disposing their resources. Model-selection hooks run after write
+admission releases. Synchronous SessionManager and extension APIs, including
+`setThinkingLevel`, retain their existing synchronous contracts and still need
+an appropriate caller-owned write boundary.
+
+The signature is `withOpenClawAgentDatabaseWrite(options, operation, expectedDatabase?)`.
+`options` uses the existing agent database options, including the required
+`agentId` and optional concrete `path`. The synchronous `operation` receives the
+`OpenClawAgentDatabase`; the returned promise resolves to its result after the
+operation settles. Without `expectedDatabase`, the helper also owns asynchronous
+database-open admission. The helper captures the environment, selected state
+directory, and database path before waiting, so changing the working directory does not retarget
+a queued write. Opening or borrowing a handle alone does not admit a write.
+
+For an already borrowed handle, pass its exact `DatabaseSync` as the third
+argument. After waiting, the helper rejects a closed or replaced handle rather
+than opening a replacement on its behalf. Keep the original borrow alive until
+the operation settles. The caller still owns transactions and authorization.
+For example, given an existing `borrowedDb`, a live-owner `assertCurrent()` check,
+and synchronous `applyPreparedChanges(db)`:
+
+```typescript
+import {
+  runSqliteImmediateTransactionSync,
+  withOpenClawAgentDatabaseWrite,
+} from "openclaw/plugin-sdk/sqlite-runtime";
+
+await withOpenClawAgentDatabaseWrite(
+  { agentId, path: databasePath },
+  ({ db }) =>
+    runSqliteImmediateTransactionSync(db, () => {
+      assertCurrent();
+      applyPreparedChanges(db);
+    }),
+  borrowedDb,
+);
+```
+
+Prepare files, embeddings, network results, and hook decisions before requesting
+write admission. Keep the admitted callback synchronous; do not return a promise
+or hold admission across a provider call or an entire asynchronous hook. Recheck
+applicable manager/run ownership and cancellation inside the callback, immediately
+before mutation. Agent identity and handle equality are not authorization.
+
+For preparation that can repeat after SQLite lock contention,
+`runSqliteImmediateTransaction(db, prepare, options, admit)` accepts the same
+owner's admission callback. `prepare` runs before admission and returns a
+synchronous transaction callback. Pass `(write) =>
+withOpenClawAgentDatabaseWrite(databaseOptions, write, borrowedDb)` as `admit`;
+do not place asynchronous preparation inside the admitted callback. The helper
+rechecks transaction state after waiting and never repeats a callback that
+already entered its transaction.
+
+`withOpenClawAgentDatabaseWrite` does not start a transaction, grant an authority
+lease, or coordinate unrelated processes. Raw SQLite calls outside admission bypass it, and existing
+synchronous APIs do not become asynchronous automatically. A rejected stale-owner
+write must return to its lifecycle owner for recovery, not retry with a replacement
+handle. For storage design and migration requirements, see
+[Database schemas](/reference/database-schemas).

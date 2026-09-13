@@ -10,6 +10,7 @@ import type {
   RealtimeVoiceCloseOptions,
   RealtimeVoiceToolResultOptions,
 } from "../talk/provider-types.js";
+import { resolveRealtimeVoiceBargeIn } from "../talk/realtime-session-policy.js";
 import type { TalkEvent } from "../talk/talk-session-controller.js";
 import { abortChatRunById } from "./chat-abort.js";
 import { resolveOwnedActiveTalkRunTarget } from "./server-methods/talk-client-run-ownership.js";
@@ -100,12 +101,22 @@ export function pruneInactiveRelayAgentRuns(session: RelaySession): number {
 export function closeRelaySession(
   session: RelaySession,
   reason: "completed" | "error",
-  options?: RealtimeVoiceCloseOptions,
-): void {
+  options?: RealtimeVoiceCloseOptions & { eventReason?: "output-cancelled" },
+): void | Promise<void> {
+  if (session.closing) {
+    if (reason === "error") {
+      session.closing.reason = reason;
+    }
+    return session.closing.completion;
+  }
+  const closing: NonNullable<RelaySession["closing"]> = { reason };
+  session.closing = closing;
+  session.confirmationReadiness.close();
   const disposition = options?.disposition ?? "abort";
   session.harness.close();
   session.outputOwnership.drain?.resolve();
   relaySessions.delete(session.id);
+  drainingRelaySessions.add(session);
   forgetUnifiedTalkSession(session.id);
   clearTimeout(session.cleanupTimer);
   if (disposition === "detach") {
@@ -113,23 +124,45 @@ export function closeRelaySession(
   } else {
     abortRelayAgentRuns(session, reason === "error" ? "relay-error" : "relay-closed");
   }
-  try {
-    session.bridge.close({ disposition });
-  } finally {
-    // Provider teardown may throw, but the relay must still reach its durable
-    // voice and owner-visible terminal state before that error is surfaced.
-    void closeRelayVoiceSession(session);
+  const finish = () => {
+    const voiceClose = closeRelayVoiceSession(session);
+    void voiceClose.then(
+      () => drainingRelaySessions.delete(session),
+      () => drainingRelaySessions.delete(session),
+    );
     broadcastToOwner(session.context, session.connId, {
       relaySessionId: session.id,
       type: "close",
-      reason,
+      reason: closing.reason,
       talkEvent: session.harness.talk.emit({
         type: "session.closed",
-        payload: { reason },
+        payload: {
+          reason: closing.reason === "error" ? "error" : (options?.eventReason ?? closing.reason),
+        },
         final: true,
       }),
     });
+    return voiceClose;
+  };
+  const failClose = async (error: unknown): Promise<never> => {
+    closing.reason = "error";
+    await finish();
+    throw error;
+  };
+  let providerClose: void | Promise<void> = undefined;
+  try {
+    providerClose = session.bridge.close({ disposition });
+  } catch (error) {
+    closing.completion = failClose(error);
   }
+  closing.completion ??= providerClose ? providerClose.then(finish, failClose) : finish();
+  // Disconnects, expiry, and provider callbacks have no RPC caller to observe cleanup failures.
+  void closing.completion.catch((error: unknown) => {
+    session.context.logGateway.warn(
+      `failed to close realtime relay session: ${formatError(error)}`,
+    );
+  });
+  return closing.completion;
 }
 
 /** Releases every realtime relay session owned by a disconnected gateway connection. */
@@ -137,7 +170,9 @@ export function closeTalkRealtimeRelaySessionsForConnection(connId: string): voi
   closeTalkRelaySessionsForConnection({
     sessions: relaySessions.values(),
     connId,
-    closeSession: (session) => closeRelaySession(session, "completed", { disposition: "detach" }),
+    closeSession: (session) => {
+      void closeRelaySession(session, "completed", { disposition: "detach" });
+    },
     onCloseError: (error, session) => {
       session.context.logGateway.warn(
         `failed to close realtime relay session after connection disconnect: ${formatError(error)}`,
@@ -149,7 +184,9 @@ export function closeTalkRealtimeRelaySessionsForConnection(connId: string): voi
 function pruneExpiredRelaySessions(nowMs = Date.now()): void {
   closeExpiredTalkRelaySessions({
     sessions: relaySessions.values(),
-    closeSession: (session) => closeRelaySession(session, "completed"),
+    closeSession: (session) => {
+      void closeRelaySession(session, "completed");
+    },
     nowMs,
   });
 }
@@ -184,7 +221,9 @@ function getRelaySession(relaySessionId: string, connId: string): RelaySession {
     sessions: relaySessions,
     sessionId: relaySessionId,
     connId,
-    closeSession: (session) => closeRelaySession(session, "completed"),
+    closeSession: (session) => {
+      void closeRelaySession(session, "completed");
+    },
     unknownSessionMessage: "Unknown realtime relay session",
   });
 }
@@ -562,6 +601,32 @@ export async function cancelTalkRealtimeRelayTurn(params: {
   if (session.outputOwnership.phase === "owned" && session.outputOwnership.turnId !== turnId) {
     return { status: "stale" as const };
   }
+  const reason = params.reason ?? "client-cancelled";
+  const cancelTurn = () => {
+    const cancelled = session.harness.talk.cancelTurn({ turnId, payload: { reason } });
+    broadcastToOwner(session.context, session.connId, {
+      relaySessionId: session.id,
+      type: "clear",
+      talkEvent: cancelled.ok ? cancelled.event : undefined,
+    });
+  };
+  if (
+    !resolveRealtimeVoiceBargeIn({
+      configuredBargeIn: true,
+      interruptResponseOnInputAudio: true,
+      capabilities: session.capabilities,
+      outputAudioMode: session.bridge.bridge.outputAudioMode,
+    })
+  ) {
+    if (reason === "barge-in") {
+      return { status: "idle" as const };
+    }
+    // Continuous providers cannot confirm a cancelled response. Explicit stops end
+    // the session through its graceful owner instead of waiting for that event.
+    cancelTurn();
+    await closeRelaySession(session, "completed", { eventReason: "output-cancelled" });
+    return { status: "applied" as const, turnId };
+  }
   const forcedConsults = session.harness.forcedConsults.handles().map((handle) => ({
     handle,
     nativeCallIds: session.harness.forcedConsults.nativeCallIds(handle),
@@ -572,7 +637,6 @@ export async function cancelTalkRealtimeRelayTurn(params: {
   ]);
   const terminalEpoch = ++session.toolResultEpoch;
   session.forcedTerminalProviderResults.clear();
-  const reason = params.reason ?? "client-cancelled";
   if (
     !session.toolCalls.markCancelled(
       [...rootCallIds, ...forcedConsults.flatMap(({ nativeCallIds }) => nativeCallIds)],
@@ -597,26 +661,16 @@ export async function cancelTalkRealtimeRelayTurn(params: {
   session.outputOwnership.turnId = turnId;
   const cancellationDrained = (session.outputOwnership.drain = createDeferredCore());
   abortRelayAgentRuns(session, reason);
-  const cancelled = session.harness.talk.cancelTurn({
-    turnId,
-    payload: { reason },
-  });
-  broadcastToOwner(session.context, session.connId, {
-    relaySessionId: session.id,
-    type: "clear",
-    talkEvent: cancelled.ok ? cancelled.event : undefined,
-  });
-  const closeAfterCancellation = () => {
+  cancelTurn();
+  setTimeout(() => {
     if (
       relaySessions.get(session.id) === session &&
       session.toolResultEpoch === terminalEpoch &&
       session.outputOwnership.phase === "cancelling"
     ) {
-      session.outputOwnership.drain?.resolve();
-      closeRelaySession(session, "completed");
+      void closeRelaySession(session, "completed");
     }
-  };
-  setTimeout(closeAfterCancellation, TURN_BOUND_CANCELLATION_DRAIN_MS).unref?.();
+  }, TURN_BOUND_CANCELLATION_DRAIN_MS).unref?.();
   void Promise.allSettled(
     [...rootCallIds].map(async (callId) => {
       await submitTalkRealtimeRelayToolResult({
@@ -687,7 +741,7 @@ export function resetTalkRealtimeRelayContinuity(
 export function stopTalkRealtimeRelaySession(params: {
   relaySessionId: string;
   connId: string;
-}): void {
+}): void | Promise<void> {
   const session = getRelaySession(params.relaySessionId, params.connId);
-  closeRelaySession(session, "completed");
+  return closeRelaySession(session, "completed");
 }

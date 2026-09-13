@@ -7,8 +7,13 @@ import { buildSessionSwarmSummary } from "../../../../../src/gateway/session-swa
 import type { GatewaySessionRow } from "../../../api/types.ts";
 import { i18n } from "../../../i18n/index.ts";
 import { pt_BR } from "../../../i18n/locales/pt-BR.ts";
-import type { SessionCapability } from "../../../lib/sessions/index.ts";
+import {
+  createGatewayHarness,
+  createTestSessionCapability,
+  sessionsResult,
+} from "../../../lib/sessions/session-capability.test-support.ts";
 import { SwarmRosterHydrator } from "../../../lib/sessions/swarm-roster.ts";
+import { createTestGatewayClient } from "../../../test-helpers/gateway-client.ts";
 import { renderChatSwarmProgress } from "./chat-swarm-progress.ts";
 
 const parentSessionKey = "agent:main:parent";
@@ -168,25 +173,33 @@ describe("chat Swarm progress", () => {
   it("updates the same group heading through live rows, hydration, and a second child", async () => {
     vi.useFakeTimers();
     const child = session({ key: childSessionKey, status: "running" });
-    const hydrated = { ...child, label: "Review CI", updatedAt: 2 };
-    let currentRows = [child];
+    const hydrated = { ...child, sessionId: "child-session", label: "Review CI", updatedAt: 2 };
+    let serverRows: GatewaySessionRow[] = [hydrated];
     const hydrator = new SwarmRosterHydrator();
+    const client = createTestGatewayClient(async (method) =>
+      method === "sessions.list"
+        ? { ...sessionsResult(serverRows, 2), hasMore: false }
+        : { subscribed: true },
+    );
+    const { gateway, emitEvent } = createGatewayHarness(client);
+    const sessions = createTestSessionCapability(gateway);
     const container = document.createElement("div");
     document.body.append(container);
     const params = {
-      sessions: {
-        canonicalListRevision: 1,
-        list: vi.fn(async () => ({ sessions: [hydrated], hasMore: false })),
-      } as unknown as SessionCapability,
+      sessions,
       parentKey: parentSessionKey,
-      readParent: async () => ({ key: parentSessionKey, kind: "direct" as const }),
+      readParent: async () => ({
+        key: parentSessionKey,
+        sessionId: "parent-session",
+        kind: "direct" as const,
+      }),
       sourceEpoch: 1,
-      currentRows: () => currentRows,
-      onRows: (sessions: GatewaySessionRow[]) =>
+      currentRows: () => [child],
+      onRows: (rows: GatewaySessionRow[]) =>
         render(
           renderChatSwarmProgress({
             sessionKey: parentSessionKey,
-            sessions: withSummary(sessions),
+            sessions: withSummary(rows),
           }),
           container,
         ),
@@ -197,11 +210,23 @@ describe("chat Swarm progress", () => {
       expect(group?.querySelector("strong")?.textContent).toBe("Subagent:");
       await vi.runAllTimersAsync();
       expect(group?.querySelector("strong")?.textContent).toBe("Review CI");
-      currentRows = [
+      serverRows = [
         hydrated,
-        session({ key: "agent:main:subagent:second", label: "Check types", status: "running" }),
+        {
+          ...session({
+            key: "agent:main:subagent:second",
+            label: "Check types",
+            status: "running",
+          }),
+          sessionId: "second-child-session",
+        },
       ];
-      hydrator.update(params);
+      emitEvent({
+        type: "event",
+        event: "sessions.changed",
+        payload: { agentId: "main", session: serverRows[1], reason: "create" },
+      });
+      await vi.advanceTimersByTimeAsync(250);
       expect(container.querySelectorAll("[data-swarm-group]")).toHaveLength(1);
       expect(group?.getAttribute("data-swarm-group")).toBe(swarmGroupId);
       expect(group?.querySelector("strong")?.textContent).toBe("Parallel tasks");
@@ -211,6 +236,7 @@ describe("chat Swarm progress", () => {
       expect(container.textContent).not.toContain(parentRunId);
     } finally {
       hydrator.dispose();
+      sessions.dispose();
     }
   });
 

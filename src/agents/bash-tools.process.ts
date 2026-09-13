@@ -28,6 +28,7 @@ import {
   appendExecTimeoutRetryGuidance,
   renderExecExitLabel,
 } from "./bash-tools.exec-output.js";
+import { ProcessToolOutputSchema } from "./bash-tools.process-schema.js";
 import { handleProcessSendKeys, writeProcessStdin } from "./bash-tools.process-send-keys.js";
 import { processSchema } from "./bash-tools.schemas.js";
 import {
@@ -249,8 +250,8 @@ async function sleepPollInterval(ms: number, signal?: AbortSignal): Promise<void
       cleanup();
       reject(createAbortError(signal?.reason));
     };
+    // An active poll must outlive the child's last handle so one-shot callers receive its result.
     const timer: ReturnType<typeof setTimeout> | undefined = setTimeout(onResolve, ms);
-    timer.unref?.();
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
@@ -296,6 +297,7 @@ export function createProcessTool(
     displaySummary: PROCESS_TOOL_DISPLAY_SUMMARY,
     description: describeProcessTool({ hasCronTool: defaults?.hasCronTool === true }),
     parameters: processSchema,
+    outputSchema: ProcessToolOutputSchema,
     execute: async (_toolCallId, args, signal, _onUpdate): Promise<AgentToolResult<unknown>> => {
       const assertCurrent = () => {
         signal?.throwIfAborted();

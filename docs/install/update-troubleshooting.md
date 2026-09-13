@@ -7,10 +7,14 @@ title: "Update troubleshooting"
 ---
 
 Failed updates enter built-in triage after update recovery settles. In an
-interactive terminal, OpenClaw collects sanitized diagnostics and opens the
-[triage agent picker](/cli/triage). With `--yes`, `--json`, or no interactive
-terminal, it prepares diagnostics and handoff commands without launching an
-agent. The original update failure and exit status remain authoritative;
+interactive terminal, OpenClaw shows the selected agent, saved prompt path when
+available, and use of your own account/tokens, then asks before launching
+[triage](/cli/triage). Only an affirmative Yes proceeds. Enter, `n`, cancellation,
+or no answer within 30 seconds skips the launch and preserves diagnostics and
+a manual recovery command. Use `openclaw triage --agent codex` to choose another
+agent. With `--yes`, `--json`, or no interactive terminal, eligible failures can
+start one owned automatic repair; other failures retain diagnostics and handoff
+commands. See [automatic recovery](/cli/triage#automatic-failure-handoff). The original update failure and exit status remain authoritative;
 diagnostics do not turn a failed update into a successful one.
 
 In the Control UI, a failed attempt opens **Ask OpenClaw** with its recorded
@@ -97,9 +101,11 @@ the CLI fallback on the Gateway host.
 - `deps-install-failed`, `build-failed`, `ui-build-failed`: inspect the failing
   step, fix the dependency or build error, then retry.
 - `global-install-failed`: retry after checking package-manager ownership and
-  permissions. Re-run the installer if the package install is incomplete.
-- `doctor-failed`: run Doctor on the Gateway host, resolve its findings, then
-  retry.
+  permissions. Re-run the [installer](/install/installer) if the package
+  install is incomplete.
+- `doctor-failed`: run `openclaw doctor` on the Gateway host, resolve its
+  findings, then retry. See [Doctor](/cli/doctor) for the check list and
+  `--fix` behavior.
 - `restart-disabled`, `restart-unavailable`: restore a supported supervisor or
   enable Gateway restarts before retrying.
 - `restart-unhealthy`, `restart-revision-mismatch`,

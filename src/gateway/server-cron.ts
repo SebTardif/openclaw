@@ -74,18 +74,16 @@ import {
   resolveHeartbeatForWake,
   resolveHeartbeatTimeoutOverrideSeconds,
 } from "../infra/heartbeat-runner-config.js";
-import { runHeartbeatOnce } from "../infra/heartbeat-runner-run.js";
 import {
   requestHeartbeat,
   requestHeartbeatAndWait,
-  requestHeartbeatRetry,
   type HeartbeatWakeRequest,
 } from "../infra/heartbeat-wake.js";
 import { mergeSsrFPolicies } from "../infra/net/ssrf.js";
 import { listConfiguredMessageChannels } from "../infra/outbound/channel-selection.js";
 import { withSystemEventOwner } from "../infra/system-event-ownership.js";
 import { enqueueSystemEventWithReceipt } from "../infra/system-events.js";
-import { getChildLogger } from "../logging.js";
+import { getChildLogger, getResolvedLoggerSettings, toPinoLikeLogger } from "../logging.js";
 import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import type {
   PluginHookCronChangedEvent,
@@ -103,12 +101,15 @@ import {
   resolveEventSessionKey,
   toAgentStoreSessionKey,
 } from "../routing/session-key.js";
-import { defaultRuntime } from "../runtime.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
 import { truncateUtf16WithEllipsis } from "../shared/text-truncate.js";
 import { bumpSkillsSnapshotVersion } from "../skills/runtime/refresh-state.js";
 import { resolveSkillWorkshopConfig } from "../skills/workshop/config.js";
 import { resolveWorkshopSkillsDir } from "../skills/workshop/skills-root.js";
+import {
+  assertAgentDatabaseAdmitted,
+  readAgentDatabaseAdmissionRefusal,
+} from "../state/agent-database-admission.js";
 import {
   createCronExitWatchers,
   type CronExitResult,
@@ -432,6 +433,7 @@ export function buildGatewayCronService(params: {
   resolveGatewayContext?: () => GatewayRequestContext | undefined;
 }): GatewayCronState {
   const cronLogger = getChildLogger({ module: "cron" });
+  const cronServiceLogger = toPinoLikeLogger(cronLogger, getResolvedLoggerSettings().level);
   // Fence the raw context reference behind its Gateway instance lifecycle so a
   // long-running scheduled turn cannot resolve a retired context after shutdown.
   const scheduledGatewayContextResolver = fenceScheduledGatewayContextResolver(
@@ -469,6 +471,7 @@ export function buildGatewayCronService(params: {
     if (isAgentDeletionBlocked(agentId)) {
       throw new Error(`cron job agent is unavailable: ${agentId}`);
     }
+    assertAgentDatabaseAdmitted(agentId, { env });
     return { agentId, cfg: runtimeConfig };
   };
 
@@ -553,42 +556,22 @@ export function buildGatewayCronService(params: {
     return { runtimeConfig, agentId, sessionKey };
   };
 
-  const resolveCronHeartbeatWake = (
-    opts:
-      | {
-          source?: HeartbeatWakeRequest["source"];
-          intent?: HeartbeatWakeRequest["intent"];
-          reason?: string;
-          agentId?: string;
-          sessionKey?: string;
-          heartbeat?: HeartbeatWakeRequest["heartbeat"];
-          scheduledEveryMs?: number;
-          tasks?: HeartbeatWakeRequest["tasks"];
-        }
-      | undefined,
-    direct = false,
-  ) => {
-    const { runtimeConfig, agentId, sessionKey } = resolveCronTarget({
+  const resolveCronHeartbeatWake = (opts: HeartbeatWakeRequest): HeartbeatWakeRequest => {
+    const { agentId, sessionKey } = resolveCronTarget({
       ...opts,
-      preserveUntargeted: direct || opts?.source !== "manual",
+      preserveUntargeted: opts.source !== "manual",
     });
-    // Untargeted monitor ticks resolve their configured session in the runner;
-    // direct runs and caller-targeted wakes preserve their resolved session.
-    const useConfiguredSession = !direct && opts?.source === "interval" && !opts.sessionKey?.trim();
+    // Untargeted monitor ticks resolve their configured session in the runner.
+    const useConfiguredSession = opts.source === "interval" && !opts.sessionKey?.trim();
     return {
-      runtimeConfig,
-      wake: {
-        source: opts?.source ?? "cron",
-        intent: opts?.intent ?? "event",
-        reason: opts?.reason,
-        agentId,
-        sessionKey: useConfiguredSession ? undefined : sessionKey,
-        heartbeat: sanitizeCronHeartbeatOverride(opts?.heartbeat),
-        ...(opts?.scheduledEveryMs !== undefined
-          ? { scheduledEveryMs: opts.scheduledEveryMs }
-          : {}),
-        ...(opts?.tasks?.length ? { tasks: opts.tasks } : {}),
-      },
+      source: opts.source,
+      intent: opts.intent,
+      reason: opts.reason,
+      agentId,
+      sessionKey: useConfiguredSession ? undefined : sessionKey,
+      heartbeat: sanitizeCronHeartbeatOverride(opts.heartbeat),
+      ...(opts.scheduledEveryMs !== undefined ? { scheduledEveryMs: opts.scheduledEveryMs } : {}),
+      ...(opts.tasks?.length ? { tasks: opts.tasks } : {}),
     };
   };
 
@@ -813,6 +796,7 @@ export function buildGatewayCronService(params: {
     },
     isAgentAvailable: (agentId) =>
       !isAgentDeletionBlocked(agentId) &&
+      !readAgentDatabaseAdmissionRefusal(agentId, { env }) &&
       listAgentIds(getRuntimeConfig()).some((id) => normalizeAgentId(id) === agentId),
     resolveSessionStorePath,
     sessionStorePath,
@@ -856,16 +840,9 @@ export function buildGatewayCronService(params: {
             }),
         }
       : {}),
-    requestHeartbeat: (opts, retry) => {
-      const { wake } = resolveCronHeartbeatWake(opts);
-      if (retry) {
-        requestHeartbeatRetry(wake, retry);
-      } else {
-        requestHeartbeat(wake);
-      }
-    },
+    requestHeartbeat: (opts) => requestHeartbeat(resolveCronHeartbeatWake(opts)),
     requestHeartbeatAndWait: (opts, lifecycle) =>
-      requestHeartbeatAndWait(resolveCronHeartbeatWake(opts).wake, lifecycle),
+      requestHeartbeatAndWait(resolveCronHeartbeatWake(opts), lifecycle),
     resolveHeartbeatTimeoutMs: (opts) => {
       const { agentId, cfg: runtimeConfig } = resolveCronAgent(opts.agentId);
       const heartbeat = resolveHeartbeatForWake({
@@ -878,20 +855,6 @@ export function buildGatewayCronService(params: {
         resolveHeartbeatTimeoutOverrideSeconds(runtimeConfig, heartbeat),
       );
       return timeoutMs === 0 ? undefined : timeoutMs;
-    },
-    runHeartbeatOnce: async (opts) => {
-      const { runtimeConfig, wake } = resolveCronHeartbeatWake(opts, true);
-      const { getReplyFromConfig: _getReplyFromConfig, ...heartbeatDeps } = params.deps;
-      return await runHeartbeatOnce({
-        cfg: runtimeConfig,
-        ...wake,
-        // Preserve ownership across this adapter so the wake does not self-block on
-        // the cron run that is awaiting it.
-        owningCronJobMarker: opts?.owningCronJobMarker,
-        owningCronLaneTaskMarker: opts?.owningCronLaneTaskMarker,
-        // Gateway heartbeats acquire reply preparation from their published runtime boundary.
-        deps: { ...heartbeatDeps, runtime: defaultRuntime },
-      });
     },
     runIsolatedAgentJob: async ({
       job,
@@ -1083,12 +1046,15 @@ export function buildGatewayCronService(params: {
       await sendGatewayCronFailureAlert({
         ...alert,
         deps: params.deps,
-        logger: cronLogger,
+        logger: cronServiceLogger,
         resolveCronAgent,
         webhookToken: params.cfg.cron?.webhookToken,
         ssrfPolicy: webhookSsrfPolicy,
       }),
-    log: getChildLogger({ module: "cron", storeKey: storePath }),
+    log: toPinoLikeLogger(
+      getChildLogger({ module: "cron", storeKey: storePath }),
+      getResolvedLoggerSettings().level,
+    ),
     onEvent: (evt) => {
       // Any job/store change can alter session automation bindings, including
       // in-place enable flips during runs; run/schedule events bump too (cheap).
@@ -1191,7 +1157,7 @@ export function buildGatewayCronService(params: {
           evt,
           job,
           deps: params.deps,
-          logger: cronLogger,
+          logger: cronServiceLogger,
           resolveCronAgent,
           webhookToken: params.cfg.cron?.webhookToken,
           ssrfPolicy: webhookSsrfPolicy,
@@ -1266,7 +1232,7 @@ export function buildGatewayCronService(params: {
           return undefined;
         }
       }, "cron:watcher-state"),
-    logger: cronLogger,
+    logger: cronServiceLogger,
   } satisfies CronExitWatcherHandlers;
   exitWatchersRef.current = createCronExitWatchers(exitWatcherHandlers);
   const updateCron = cron.update.bind(cron);
@@ -1303,7 +1269,7 @@ export function buildGatewayCronService(params: {
           }),
         "cron:stream-batch",
       ),
-    logger: cronLogger,
+    logger: cronServiceLogger,
   });
   const routeCurrentStreamJob = async (
     jobId: string,
@@ -1587,7 +1553,7 @@ export function buildGatewayCronService(params: {
           const { ok } = await reconcile({
             cron,
             cfg,
-            logger: cronLogger,
+            logger: cronServiceLogger,
             commitGuard: assertCurrent,
           });
           assertCurrent();

@@ -57,6 +57,8 @@ export type SpawnSecretInput = {
 
 export type ProcessAdapterConstruction = {
   assertCurrent?: () => void;
+  /** Synchronous launch admission; never recheck after the target command starts. */
+  beforeSpawn?: () => void;
   abortSignal?: AbortSignal;
   /** Publish resource cleanup before readiness or private-input delivery can fail. */
   onSpawnCleanup?: (cleanup: Promise<void>) => void;
@@ -85,6 +87,8 @@ type SpawnBaseInput = {
   cleanupOwnership?: "external";
   /** Revalidate the caller at deferred spawn and private-input delivery boundaries. */
   assertCurrent?: () => void;
+  /** Revalidate launch policy at admission and immediately before each native launch attempt. */
+  beforeSpawn?: () => void;
   runId?: string;
   scopeKey?: string;
   replaceExistingScope?: boolean;
@@ -108,6 +112,8 @@ type SpawnBaseInput = {
 type SpawnChildInput = SpawnBaseInput & {
   mode: "child";
   argv: string[];
+  /** Append invocation arguments after queued scope admission, immediately before child construction. */
+  resolveArgs?: () => string[];
   /** Preserve a distinct invocation name while executing argv[0]. */
   argv0?: string;
   /** Preserve a caller-prepared environment without environment-mutating spawn wrappers. */

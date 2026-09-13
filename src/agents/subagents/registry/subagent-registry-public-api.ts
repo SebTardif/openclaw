@@ -7,10 +7,14 @@ import type { SubagentLifecycleController } from "./subagent-registry-lifecycle.
 import { getSubagentRunsForChildSession } from "./subagent-registry-memory.js";
 import {
   countActiveRunsForSessionFromRuns,
+  listSwarmRunsForGroupFromRuns,
   getLatestSubagentRunByChildSessionKeyFromRuns,
 } from "./subagent-registry-queries.js";
 import { markRequesterTurnYieldedInRuns } from "./subagent-registry-requester-yield.js";
-import { getSubagentRunsSnapshotForRead } from "./subagent-registry-state.js";
+import {
+  getSubagentRunsSnapshotForRead,
+  getSubagentRunsSnapshotForRunIds,
+} from "./subagent-registry-state.js";
 import type { SubagentRunRecord, SwarmStructuredOutputState } from "./subagent-registry.types.js";
 
 export function createSubagentRegistryPublicApi(config: {
@@ -79,14 +83,9 @@ export function createSubagentRegistryPublicApi(config: {
   function getSubagentRunsByRunIds(runIds: readonly string[]): {
     entries: Map<string, SubagentRunRecord>;
   } {
-    const requested = new Set(runIds.map((runId) => runId.trim()));
     const byId = new Map<string, SubagentRunRecord>();
     // Waiters need only their targets; retained results must not expand every wake's maps.
-    const selected = getSubagentRunsSnapshotForRead(
-      runs,
-      (entry) =>
-        requested.has(entry.runId) || Boolean(entry.swarmRunId && requested.has(entry.swarmRunId)),
-    );
+    const selected = getSubagentRunsSnapshotForRunIds(runs, runIds);
     for (const entry of selected.values()) {
       byId.set(entry.runId, entry);
       if (entry.swarmRunId) {
@@ -146,15 +145,11 @@ export function createSubagentRegistryPublicApi(config: {
     requesterSessionKey?: string,
     requesterAgentId?: string,
   ): SubagentRunRecord[] {
-    const key = groupId.trim();
-    const requesterKey = requesterSessionKey?.trim();
-    return [...readRuns().values()].filter(
-      (entry) =>
-        entry.collect === true &&
-        entry.groupId === key &&
-        (!requesterKey ||
-          (entry.swarmRequesterSessionKey ?? entry.requesterSessionKey) === requesterKey) &&
-        (!requesterAgentId || entry.requesterAgentId === requesterAgentId),
+    return listSwarmRunsForGroupFromRuns(
+      readRuns(),
+      groupId,
+      requesterSessionKey,
+      requesterAgentId,
     );
   }
 

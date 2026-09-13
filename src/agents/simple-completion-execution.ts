@@ -4,7 +4,10 @@ import {
   supportsOpenAIReasoningEffort,
 } from "@openclaw/ai/internal/openai";
 import { defaultApiRegistry } from "@openclaw/ai/internal/runtime";
-import { prepareModelForSimpleCompletion } from "@openclaw/ai/transports";
+import {
+  prepareHeadersForSimpleCompletion,
+  prepareModelForSimpleCompletion,
+} from "@openclaw/ai/transports";
 import {
   resolveClaudeOpus5ModelIdentity,
   resolveClaudeSonnet5ModelIdentity,
@@ -13,6 +16,7 @@ import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   bindModelLlmRuntime,
+  getModelCompletionOwner,
   getModelCompletionTransport,
   getModelLlmRuntime,
 } from "../llm/model-runtime-binding.js";
@@ -21,27 +25,55 @@ import type {
   AssistantMessage,
   Model,
   ModelThinkingLevel,
+  SimpleStreamOptions,
   ThinkingLevel as SimpleCompletionThinkingLevel,
 } from "../llm/types.js";
 import type { ResolvedProviderAuth } from "./model-auth.js";
 import { isOpenAIProvider } from "./openai-routing.js";
 
 type SimpleCompletionModelOptions = {
+  headers?: Record<string, string>;
+  sessionId?: string;
   maxTokens?: number;
   temperature?: number;
+  serviceTier?: SimpleStreamOptions["serviceTier"];
   reasoning?: ThinkLevel | SimpleCompletionThinkingLevel;
   strictReasoningTags?: boolean;
   signal?: AbortSignal;
 };
 
-export async function completeWithPreparedSimpleCompletionModel(params: {
+type PreparedCompletionParams = {
   assertCurrent?: () => void;
   model: Model;
   auth: ResolvedProviderAuth;
   context: Parameters<typeof completeSimple>[1];
   cfg?: OpenClawConfig;
   options?: SimpleCompletionModelOptions;
-}): Promise<AssistantMessage> {
+};
+
+export async function completeWithPreparedSimpleCompletionModel(
+  params: PreparedCompletionParams,
+): Promise<AssistantMessage> {
+  const owner = getModelCompletionOwner(params.model);
+  if (!owner) {
+    return await completePreparedModel(params);
+  }
+  return await owner.run(() =>
+    completePreparedModel({
+      ...params,
+      assertCurrent: () => {
+        owner.assertCurrent();
+        params.assertCurrent?.();
+      },
+    }),
+  );
+}
+
+async function completePreparedModel(params: PreparedCompletionParams): Promise<AssistantMessage> {
+  // Direct SDK calls prepare transport hooks before entering the stream facade.
+  await import("./ai-transport-runtime-host.js");
+  params.assertCurrent?.();
+  params.options?.signal?.throwIfAborted();
   const runtime = getModelLlmRuntime(params.model);
   let completionModel =
     getModelCompletionTransport(params.model) ??
@@ -57,10 +89,12 @@ export async function completeWithPreparedSimpleCompletionModel(params: {
   }
   const { reasoning: rawReasoning, strictReasoningTags, ...options } = params.options ?? {};
   const reasoning = normalizeSimpleCompletionReasoning(rawReasoning, completionModel);
+  const headers = prepareHeadersForSimpleCompletion(completionModel, options);
   const completionOptions = {
     ...options,
     ...(reasoning ? { reasoning } : {}),
     apiKey: params.auth.apiKey,
+    ...(headers ? { headers } : {}),
   };
   if (strictReasoningTags) {
     reasoningTagTextPolicy.markStrict(completionOptions);

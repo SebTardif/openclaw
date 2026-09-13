@@ -31,6 +31,8 @@ vi.mock("../../utils/sleep.js", () => ({ sleep: sleepMock }));
 
 export const { createComputerTool, invalidateComputerFrameIfMissing } =
   await import("./computer-tool.js");
+export const { loadPairedComputerUseAvailabilityForSurface } =
+  await import("../computer-use-node-capabilities.js");
 const { DEFAULT_IMAGE_MAX_DIMENSION_PX } = await import("../image-sanitization.js");
 
 // With no config the reference width is capped at the default sanitization limit.
@@ -98,10 +100,13 @@ export function readFrameId(result: { details?: unknown }): string {
   return frameId;
 }
 
-export function readLastComputerActParams(): Record<string, unknown> {
-  const call = callGatewayToolMock.mock.calls.findLast(
-    (entry) => (entry[2] as { command?: string }).command === COMPUTER_ACT_COMMAND,
-  );
+export function readLastComputerActParams(
+  action?: ComputerUseV2ActionName,
+): Record<string, unknown> {
+  const call = callGatewayToolMock.mock.calls.findLast((entry) => {
+    const body = entry[2] as ComputerActBody;
+    return body.command === COMPUTER_ACT_COMMAND && (!action || body.params?.action === action);
+  });
   const body = call?.[2] as { params?: Record<string, unknown> } | undefined;
   if (!body?.params) {
     throw new Error("missing computer.act request");

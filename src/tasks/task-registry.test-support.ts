@@ -1,5 +1,6 @@
+import { clearTaskRegistrySqliteForTests } from "../test-utils/task-registry-sqlite.js";
 import type { TaskRegistryControlRuntime } from "./task-registry-control.types.js";
-import type { TaskRegistryDeliveryRuntime } from "./task-registry-state.js";
+import type { TaskRegistryDeliveryRuntime } from "./task-registry-runtime-loaders.js";
 import { createTaskRecord as createTaskRecordOrNull } from "./task-registry.js";
 import type { TaskEventRecord, TaskRecord } from "./task-registry.types.js";
 
@@ -42,7 +43,7 @@ type TaskRegistryTestApi = {
     taskId: string,
     latestEvent?: TaskEventRecord,
   ): Promise<TaskRecord | null>;
-  resetTaskRegistryForTests(opts?: { persist?: boolean }): void;
+  resetTaskRegistryForTests(): void;
   resetTaskRegistryDeliveryRuntimeForTests(): void;
   setTaskRegistryDeliveryRuntimeForTests(runtime: TaskRegistryDeliveryRuntime): void;
   resetTaskRegistryControlRuntimeForTests(): void;
@@ -67,7 +68,10 @@ export async function maybeDeliverTaskStateChangeUpdate(
 }
 
 export function resetTaskRegistryForTests(opts?: { persist?: boolean }): void {
-  getTestApi().resetTaskRegistryForTests(opts);
+  getTestApi().resetTaskRegistryForTests();
+  if (opts?.persist !== false) {
+    clearTaskRegistrySqliteForTests("task");
+  }
 }
 
 export function resetTaskRegistryDeliveryRuntimeForTests(): void {

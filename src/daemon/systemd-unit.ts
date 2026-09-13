@@ -74,8 +74,10 @@ export function buildSystemdUnit({
     descriptionLine,
     "After=network-online.target",
     "Wants=network-online.target",
-    "StartLimitBurst=5",
-    "StartLimitIntervalSec=60",
+    // A five-minute lifecycle ownership wait spans this interval. Ten starts
+    // allow surrounding immediate failures while still bounding crash loops.
+    "StartLimitBurst=10",
+    "StartLimitIntervalSec=300",
     "",
     "[Service]",
     `ExecStart=${execStart}`,
@@ -109,12 +111,16 @@ export function parseSystemdExecStart(value: string): string[] {
   return splitArgsPreservingQuotes(value, { escapeMode: "backslash" });
 }
 
-export function parseSystemdEnvAssignments(raw: string): Array<{ key: string; value: string }> {
-  return splitArgsPreservingQuotes(raw, {
+export function splitSystemdEnvironmentWords(value: string): string[] {
+  return splitArgsPreservingQuotes(value, {
     escapeMode: "backslash",
     quoteChars: ['"', "'"],
     quoteStart: "item-start",
-  }).flatMap((entry) => {
+  });
+}
+
+export function parseSystemdEnvAssignments(raw: string): Array<{ key: string; value: string }> {
+  return splitSystemdEnvironmentWords(raw).flatMap((entry) => {
     // The splitter has already removed quotes and consumed escapes.
     const assignment = entry.trim();
     const separator = assignment.indexOf("=");

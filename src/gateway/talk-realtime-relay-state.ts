@@ -3,6 +3,8 @@ import type { OpenClawConfig } from "../config/types.js";
 import type { RealtimeVoiceProviderPlugin } from "../plugins/types.js";
 import type { BoundedSerialQueue } from "../shared/bounded-serial-queue.js";
 import type { RealtimeVoiceAgentControlResult } from "../talk/agent-run-control.js";
+import type { createClientVoiceConfirmationReadiness } from "../talk/client-voice-confirmation-readiness.js";
+import type { InternalRealtimeVoiceProviderCapabilities } from "../talk/provider-internal.js";
 import type {
   RealtimeVoiceBrowserAudioContract,
   RealtimeVoiceAudioClearReason,
@@ -191,6 +193,7 @@ export type RelaySession = {
   context: GatewayRequestContext;
   bridge: RealtimeVoiceBridgeSession;
   harness: RealtimeVoiceSessionHarness;
+  capabilities?: InternalRealtimeVoiceProviderCapabilities;
   outputOwnership: TalkRealtimeRelayOutputOwnership;
   sessionTarget: PreparedTalkSessionTarget;
   expiresAtMs: number;
@@ -215,7 +218,9 @@ export type RelaySession = {
   voiceSessionCreated: boolean;
   voiceTranscriptSeq: number;
   voiceTranscriptQueue: BoundedSerialQueue;
+  confirmationReadiness: ReturnType<typeof createClientVoiceConfirmationReadiness>;
   voiceSessionClose?: Promise<void>;
+  closing?: { reason: "completed" | "error"; completion?: Promise<void> };
   failSession: (message: string) => void;
 };
 
@@ -227,7 +232,7 @@ export type CreateTalkRealtimeRelaySessionParams = {
   provider: RealtimeVoiceProviderPlugin;
   providerConfig: RealtimeVoiceProviderConfig;
   controlSource: "delegation" | "transcript";
-  supportsToolCalls?: boolean;
+  capabilities?: InternalRealtimeVoiceProviderCapabilities;
   instructions: string;
   tools: RealtimeVoiceTool[];
   model?: string;
@@ -248,9 +253,8 @@ export type TalkRealtimeRelaySessionResult = {
 };
 
 export const relaySessions = new Map<string, RelaySession>();
-// Closed relays leave the active map immediately so late provider/client events
-// are ignored, but their accepted transcript prefix still owns bounded memory
-// until durable close settles. Session limits count both maps.
+// Closing relays reject new work but retain bounded final transcripts until
+// provider finalization and durable close settle. Session limits count both sets.
 export const drainingRelaySessions = new Set<RelaySession>();
 
 export function adoptRelayProviderToolCallId(

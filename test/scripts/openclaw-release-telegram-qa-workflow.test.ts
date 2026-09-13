@@ -3,12 +3,14 @@ import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
+import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const RELEASE_CHECKS_PATH = ".github/workflows/openclaw-release-checks.yml";
 const WORKFLOW_PATH = ".github/workflows/openclaw-release-telegram-qa.yml";
 const HELPER = "scripts/release-telegram-qa.mjs";
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const testNodeExecPath = resolveTestNodeExecPath();
 
 type WorkflowStep = {
   env?: Record<string, unknown>;
@@ -909,8 +911,10 @@ describe("release Telegram QA workflow", () => {
     const env = { ...process.env };
     delete env.OPENCLAW_QA_SUT_PREENTRY_STOP;
     expect(
-      spawnSync(process.execPath, ["--import", preloadPath, "-e", ""], { encoding: "utf8", env })
-        .status,
+      spawnSync(testNodeExecPath, ["--import", preloadPath, "-e", ""], {
+        encoding: "utf8",
+        env,
+      }).status,
     ).not.toBe(0);
   });
 
@@ -951,6 +955,12 @@ describe("release Telegram QA workflow", () => {
     expect(createSut).toContain(
       '"$(stat -c \'%F:%a:%u:%g\' "$requested_config_path")" == "regular file:600:${SUT_UID}:${SUT_GID}"',
     );
+    expect(createSut).toContain('generation_dir="${RUNTIME_ROOT}/config-generations"');
+    expect(createSut).toContain('install -d -o root -g root -m 0700 "$generation_dir"');
+    expect(createSut).toContain('"regular file:600:0:0"');
+    expect(createSut).toContain('/usr/bin/setpriv --reuid="$SUT_UID" --regid="$SUT_GID"');
+    expect(createSut).toContain('export OPENCLAW_CONFIG_PATH="$projection_dir/openclaw.json"');
+    expect(createSut).toContain('"${OPENCLAW_STATE_DIR}/qa-runtime-config/openclaw.json") ;;');
   });
 
   it("does not defer Bash startup cleanup to the privileged launcher", () => {

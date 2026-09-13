@@ -28,8 +28,9 @@ out of this repo. If a score needs private evidence, use the redacted
 - `taxonomy.yaml` is the hand-edited source of truth for surfaces, levels,
   QA profiles, categories, feature coverage IDs, docs refs, LTS overrides, and
   completeness-instruction paths.
-- Feature `coverageIds` are ANDed proof targets, not aliases. A feature may
-  list multiple IDs when each ID proves part of one capability.
+- Each feature has exactly one `coverageIds` entry. Keep that evidence ID
+  unique to the feature; broader many-to-many evidence mapping is not part of
+  the current taxonomy schema.
 - Coverage IDs use dotted `namespace.behavior` form, with lowercase
   alphanumeric/dash segments. Profile, surface, and category IDs may remain
   dashed or dotted.
@@ -40,8 +41,7 @@ out of this repo. If a score needs private evidence, use the redacted
 - `qa/maturity-scores.yaml` is the committed aggregate source for Quality,
   Completeness, and LTS review state.
 - `extensions/qa-lab/src/scorecard-taxonomy.ts` exports
-  `qaMaturityScoresSchema` and `readValidatedQaMaturityScoreSources`; use those
-  QA Lab utilities to validate score output.
+  `readValidatedQaMaturityScoreSources`; use it to validate score output.
 - Generated public docs are `docs/maturity/scorecard.md` and
   `docs/maturity/taxonomy.md`; both come from `pnpm maturity:render`. Do not
   hand-edit generated Markdown to change score results.
@@ -156,6 +156,27 @@ Default Completeness bands:
   some core tasks but not the full expected workflow.
 - `Experimental` (0-50): the category exposes only fragments of the intended
   capability.
+
+## Decision Context
+
+Record an optional `decision` beside `score` and `label` for surface and category
+Quality/Completeness, or beside `supported` for category LTS. In `taxonomy.yaml`,
+use optional `level_decision` beside the canonical surface `level`.
+
+Each record contains `value`, `rationale`, `reviewer`, `evidence_refs`, and
+`revalidate_when`. Use an integer from 0–100 for Quality/Completeness, a boolean
+for LTS, and a declared taxonomy level ID for `level_decision`. Supply nonempty
+text fields and at least one evidence reference. Name the actual reviewer and
+the condition that should trigger another review.
+
+Leave unavailable history absent: it is unknown, not an invitation to invent
+reviewers, rationale, or evidence. A record does not overwrite the current score,
+support flag, or canonical level. If its value differs, retain both; generated
+docs show a non-gating mismatch, including under strict input validation.
+
+Do not attach decisions to Coverage, computed rollups, surface LTS summaries, or
+the copied level in score aggregates. Decision context does not change coverage
+identity, score calculations, support commitments, or release gates.
 
 ## Score Semantics
 

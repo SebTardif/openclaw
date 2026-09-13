@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import type { Selectable } from "kysely";
+import { withAgentRosterFactsBatch } from "../agents/agent-scope-config.js";
 import { listAgentIds, resolveAgentWorkspaceDir } from "../agents/agent-scope.js";
 import { insideGitCheckout, runGit } from "../agents/worktrees/git.js";
 import { slugifyWorktreeTitle } from "../agents/worktrees/name.js";
@@ -65,6 +67,27 @@ function rowToProject(row: ProjectRow): ProjectRegistryRecord {
   };
 }
 
+function matchesProjectRecord(row: ProjectRow, project: ProjectRegistryRecord): boolean {
+  return (
+    row.id === project.id &&
+    row.repo_root === project.repoRoot &&
+    row.source === project.source &&
+    (row.origin_url ?? undefined) === project.originUrl
+  );
+}
+
+function readMatchingProject(
+  sqlite: DatabaseSync,
+  project: ProjectRegistryRecord,
+): ProjectRegistryRecord | undefined {
+  const db = getNodeSqliteKysely<ProjectsDatabase>(sqlite);
+  const row = executeSqliteQueryTakeFirstSync(
+    sqlite,
+    db.selectFrom("projects").selectAll().where("id", "=", project.id),
+  );
+  return row && matchesProjectRecord(row, project) ? rowToProject(row) : undefined;
+}
+
 function insertProjectRegistry(
   input: {
     displayName: string;
@@ -123,13 +146,14 @@ function insertProjectRegistry(
 
 export async function withProjectCheckoutLifecycle<T>(
   repoRoot: string,
-  options: OpenClawStateDatabaseOptions,
+  options: OpenClawStateDatabaseOptions & { signal?: AbortSignal },
   run: (lease: OpenClawStateLeaseContext) => Promise<T>,
 ): Promise<T> {
   return await withOpenClawStateLease(
     {
       scope: "projects.checkout",
       key: repoRoot,
+      signal: options.signal,
       database: { scope: "shared", options },
       leaseMs: PROJECT_CHECKOUT_LEASE_MS,
       waitMs: PROJECT_CHECKOUT_WAIT_MS,
@@ -262,7 +286,9 @@ export function listProjectRegistry(
   const stored = executeSqliteQuerySync(sqlite, kysely.selectFrom("projects").selectAll()).rows.map(
     rowToProject,
   );
-  const workspaces = listAgentIds(cfg).map((agentId) => workspaceProject(cfg, agentId));
+  const workspaces = withAgentRosterFactsBatch(cfg, () =>
+    listAgentIds(cfg).map((agentId) => workspaceProject(cfg, agentId)),
+  );
   return [...workspaces, ...stored].toSorted(compareProjects);
 }
 
@@ -335,6 +361,23 @@ export function removeProjectCheckoutReference(
   );
 }
 
+export function resolveProjectCloneRefreshOwner(
+  project: ProjectRegistryRecord,
+  lease: OpenClawStateLeaseContext,
+  options: OpenClawStateDatabaseOptions = {},
+): ProjectRegistryRecord | undefined {
+  ensureProjectRegistrySchema(options);
+  return runOpenClawStateWriteTransaction(
+    ({ db: sqlite }) => {
+      lease.assertOwnedInTransaction(sqlite);
+      const current = readMatchingProject(sqlite, project);
+      return current?.source === "cloned" ? current : undefined;
+    },
+    options,
+    { operationLabel: "projects.registry.refresh-owner.resolve" },
+  );
+}
+
 export async function resolveRecordedProjectRoot(
   projectPath: string,
   options: OpenClawStateDatabaseOptions = {},
@@ -351,20 +394,27 @@ export async function resolveRecordedProjectRoot(
   return row?.repo_root;
 }
 
-export function removeProjectRegistry(
-  id: string,
+export async function removeProjectRegistry(
+  project: ProjectRegistryRecord,
   options: OpenClawStateDatabaseOptions = {},
-): boolean {
-  ensureProjectRegistrySchema(options);
-  return runOpenClawStateWriteTransaction(
-    ({ db: sqlite }) => {
-      const db = getNodeSqliteKysely<ProjectsDatabase>(sqlite);
-      return (
-        executeSqliteQuerySync(sqlite, db.deleteFrom("projects").where("id", "=", id))
-          .numAffectedRows === 1n
-      );
-    },
-    options,
-    { operationLabel: "projects.registry.remove" },
+): Promise<boolean> {
+  return await withProjectCheckoutLifecycle(project.repoRoot, options, async (lease) =>
+    runOpenClawStateWriteTransaction(
+      ({ db: transaction }) => {
+        lease.assertOwnedInTransaction(transaction);
+        if (!readMatchingProject(transaction, project)) {
+          return false;
+        }
+        const db = getNodeSqliteKysely<ProjectsDatabase>(transaction);
+        return (
+          executeSqliteQuerySync(
+            transaction,
+            db.deleteFrom("projects").where("id", "=", project.id),
+          ).numAffectedRows === 1n
+        );
+      },
+      options,
+      { operationLabel: "projects.registry.remove" },
+    ),
   );
 }

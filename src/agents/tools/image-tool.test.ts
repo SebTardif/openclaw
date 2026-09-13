@@ -22,6 +22,10 @@ import {
   createOpenClawTestState,
   type OpenClawTestState,
 } from "../../test-utils/openclaw-test-state.js";
+import {
+  createApiKeyCredential,
+  createAuthProfileStoreFixture,
+} from "../auth-profiles/credential-fixtures.test-support.js";
 import type { AuthProfileCredential, AuthProfileStore } from "../auth-profiles/types.js";
 import {
   createModelGenerationFixture,
@@ -47,6 +51,7 @@ function jsonRoundTrip<T>(value: T): T {
 }
 
 const publicSurfaceLoaderMocks = vi.hoisted(() => ({
+  loadBundledPluginPublicArtifactModuleFromCandidatesSync: vi.fn(() => null),
   loadBundledPluginPublicArtifactModuleSync: vi.fn(
     ({ artifactBasename, dirName }: { artifactBasename: string; dirName: string }) => {
       if (dirName === "imessage" && artifactBasename === "media-contract-api.js") {
@@ -632,6 +637,7 @@ const resolveConfiguredImageModelForTest: NonNullable<
     (candidate) => candidate.id === model || candidate.id === `${provider}/${model}`,
   );
   return {
+    logicalRef: { provider, model },
     model: {
       ...configuredModel,
       id: model,
@@ -1515,9 +1521,9 @@ describe("image tool implicit imageModel config", () => {
 
   it("pairs minimax-portal primary with MiniMax-VL-01 (and fallbacks) when auth exists", async () => {
     await withTempAgentDir(async (agentDir) => {
-      await writeAuthProfiles(agentDir, {
-        version: 1,
-        profiles: {
+      await writeAuthProfiles(
+        agentDir,
+        createAuthProfileStoreFixture({
           "minimax-portal:default": {
             type: "oauth",
             provider: "minimax-portal",
@@ -1525,8 +1531,8 @@ describe("image tool implicit imageModel config", () => {
             refresh: "refresh-test",
             expires: Date.now() + 60_000,
           },
-        },
-      });
+        }),
+      );
       vi.stubEnv("OPENAI_API_KEY", "openai-test");
       vi.stubEnv("ANTHROPIC_API_KEY", "anthropic-test");
       const cfg: OpenClawConfig = {
@@ -1582,12 +1588,12 @@ describe("image tool implicit imageModel config", () => {
 
   it("pairs a custom provider when it declares an image-capable model", async () => {
     await withTempAgentDir(async (agentDir) => {
-      await writeAuthProfiles(agentDir, {
-        version: 1,
-        profiles: {
+      await writeAuthProfiles(
+        agentDir,
+        createAuthProfileStoreFixture({
           "acme:default": { type: "api_key", provider: "acme", key: "sk-test" },
-        },
-      });
+        }),
+      );
       const cfg: OpenClawConfig = {
         agents: { defaults: { model: { primary: "acme/text-1" } } },
         models: {
@@ -1635,12 +1641,12 @@ describe("image tool implicit imageModel config", () => {
 
   it("does not double-prefix custom provider model IDs that already include the provider", async () => {
     await withTempAgentDir(async (agentDir) => {
-      await writeAuthProfiles(agentDir, {
-        version: 1,
-        profiles: {
+      await writeAuthProfiles(
+        agentDir,
+        createAuthProfileStoreFixture({
           "kimchi:default": { type: "api_key", provider: "kimchi", key: "sk-test" },
-        },
-      });
+        }),
+      );
       const cfg: OpenClawConfig = {
         agents: { defaults: { model: { primary: "kimchi/text-1" } } },
         models: {
@@ -1664,16 +1670,12 @@ describe("image tool implicit imageModel config", () => {
 
   it("does not pair provider aliases through core normalization", async () => {
     await withTempAgentDir(async (agentDir) => {
-      await writeAuthProfiles(agentDir, {
-        version: 1,
-        profiles: {
-          "amazon-bedrock:default": {
-            type: "api_key",
-            provider: "amazon-bedrock",
-            key: "sk-test",
-          },
-        },
-      });
+      await writeAuthProfiles(
+        agentDir,
+        createAuthProfileStoreFixture({
+          "amazon-bedrock:default": createApiKeyCredential("amazon-bedrock", "sk-test"),
+        }),
+      );
       const cfg: OpenClawConfig = {
         agents: { defaults: { model: { primary: "aws-bedrock/text-1" } } },
         models: {
@@ -2026,9 +2028,9 @@ describe("image tool implicit imageModel config", () => {
   it("falls back to the generic image runtime when minimax-portal has no media provider registration", async () => {
     await withTempAgentDir(async (agentDir) => {
       installImageUnderstandingProviderStubs();
-      await writeAuthProfiles(agentDir, {
-        version: 1,
-        profiles: {
+      await writeAuthProfiles(
+        agentDir,
+        createAuthProfileStoreFixture({
           "minimax-portal:default": {
             type: "oauth",
             provider: "minimax-portal",
@@ -2036,8 +2038,8 @@ describe("image tool implicit imageModel config", () => {
             refresh: "refresh-test",
             expires: Date.now() + 60_000,
           },
-        },
-      });
+        }),
+      );
       // The generic image runtime still uses global.fetch, so mock it directly.
       const fetch = vi.fn().mockImplementation(async () =>
         Response.json({
@@ -3403,6 +3405,7 @@ describe("image compression policy", () => {
   it("keeps runtime Anthropic media limits for dated model variants", async () => {
     testing.setProviderDepsForTest({
       resolveModelAsync: async (_provider, model) => ({
+        logicalRef: { provider: _provider, model },
         model: {
           mediaInput: {
             image: model.includes("opus")
@@ -3439,6 +3442,7 @@ describe("image compression policy", () => {
   it("merges partial configured Anthropic media policy with runtime side limits", async () => {
     testing.setProviderDepsForTest({
       resolveModelAsync: async (_provider, _model, _agentDir, _cfg, options) => ({
+        logicalRef: { provider: _provider, model: _model },
         model: {
           mediaInput: {
             image: options?.skipProviderRuntimeHooks

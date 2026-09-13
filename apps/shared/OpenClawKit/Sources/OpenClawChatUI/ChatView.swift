@@ -138,6 +138,7 @@ public struct OpenClawChatView: View {
     @State private var isAtLiveEdge = true
     @State private var isUserScrolling = false
     @State private var isKeyboardVisible = false
+    @State private var hoveredMessageID: UUID?
     @State private var restoresLiveEdgeAfterKeyboardShows = false
     @State private var expandedUserMessageIDs: Set<UUID> = []
     @State private var searchMessageID: UUID?
@@ -204,7 +205,7 @@ public struct OpenClawChatView: View {
 
     private var readingColumnWidth: CGFloat {
         #if os(macOS)
-        self.isDesktopLayout ? 800 : .infinity
+        self.isDesktopLayout ? 760 : .infinity
         #else
         .infinity
         #endif
@@ -277,12 +278,7 @@ public struct OpenClawChatView: View {
         .sheet(item: self.$fullMessageRequest) { request in
             ChatFullMessageReader(
                 request: request,
-                markdownVariant: self.markdownVariant,
-                load: {
-                    try await self.viewModel.transport.requestFullMessage(
-                        sessionKey: request.sessionKey,
-                        messageID: request.messageID)
-                })
+                markdownVariant: self.markdownVariant)
         }
         #if os(iOS)
         .sheet(item: self.$selectTextMessage) {
@@ -401,7 +397,7 @@ public struct OpenClawChatView: View {
     private var messageList: some View {
         ZStack {
             ScrollView {
-                LazyVStack(spacing: Layout.messageSpacing) {
+                LazyVStack(spacing: self.isDesktopLayout ? 16 : Layout.messageSpacing) {
                     self.messageListRows
 
                     Color.clear
@@ -414,9 +410,9 @@ public struct OpenClawChatView: View {
                 }
                 // Use scroll targets for stable auto-scroll without ScrollViewReader relayout glitches.
                 .scrollTargetLayout()
-                .padding(.top, Layout.messageListPaddingTop)
-                .padding(.horizontal, Layout.messageListPaddingHorizontal)
+                .padding(.top, self.isDesktopLayout ? 24 : Layout.messageListPaddingTop)
                 .frame(maxWidth: self.readingColumnWidth)
+                .padding(.horizontal, self.isDesktopLayout ? 16 : Layout.messageListPaddingHorizontal)
                 .frame(maxWidth: .infinity)
             }
             #if !os(macOS)
@@ -484,7 +480,7 @@ public struct OpenClawChatView: View {
             self.hasPerformedInitialScroll = true
             self.lastTurnStartID = self.latestVisibleTurnStartID
         }
-        .onChange(of: self.viewModel.sessionKey) { _, _ in
+        .onChange(of: self.viewModel.currentSessionTarget) { _, _ in
             self.speech?.stop()
             self.hasPerformedInitialScroll = false
             self.followTarget = .latest
@@ -686,11 +682,15 @@ public struct OpenClawChatView: View {
                 HStack(spacing: 12) {
                     self.copyMessageButton(for: msg)
                         .help("Copy message")
+                        .modifier(ChatHoverAction(revealed: self.hoveredMessageID == msg.id))
                     self.replyMessageButton(for: msg)
                         .help("Reply")
+                        .modifier(ChatHoverAction(revealed: self.hoveredMessageID == msg.id))
                     self.listenMessageButton(for: msg)
+                        .modifier(ChatHoverAction(revealed: self.hoveredMessageID == msg.id))
                     self.messageActionsMenu(for: msg)
                         .help("Message actions")
+                        .modifier(ChatHoverAction(revealed: self.hoveredMessageID == msg.id))
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
@@ -703,6 +703,13 @@ public struct OpenClawChatView: View {
             #endif
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
+        .onHover { hovering in
+            if hovering {
+                self.hoveredMessageID = msg.id
+            } else if self.hoveredMessageID == msg.id {
+                self.hoveredMessageID = nil
+            }
+        }
         #if os(iOS)
         if isUser {
             row.contextMenu { self.messageMenuActions(for: msg) }
@@ -885,7 +892,10 @@ public struct OpenClawChatView: View {
     }
 
     private var activeErrorText: String? {
-        let activeError = self.viewModel.composerModelAvailabilityMessage ?? self.viewModel.errorText
+        let showsContextualSignIn = self.isDesktopLayout && self.composerChrome == .clean
+        let activeError = showsContextualSignIn
+            ? self.viewModel.errorText
+            : self.viewModel.composerModelAvailabilityMessage ?? self.viewModel.errorText
         guard let text = activeError?
             .trimmingCharacters(in: .whitespacesAndNewlines),
             !text.isEmpty
@@ -1171,12 +1181,9 @@ extension OpenClawChatView {
             }
 
             let toolText = self.toolResultText(from: message)
-            if toolText.isEmpty {
-                continue
-            }
-
             var content = last.content
-            // Tool-result diff metadata arrives on the message, but the UI renders the merged block.
+            // Preserve empty results too: receiving a result owns the outcome,
+            // independently of whether it contains display text.
             content.append(
                 OpenClawChatMessageContent(
                     type: "tool_result",
@@ -1228,7 +1235,7 @@ extension OpenClawChatView {
         }
 
         if self.isToolResultMessage(message) {
-            return self.displayOptions.contains(.toolActivity) && !primaryText.isEmpty
+            return self.displayOptions.contains(.toolActivity)
         }
 
         if !primaryText.isEmpty {
@@ -1335,7 +1342,7 @@ extension OpenClawChatView {
         {
             Button {
                 self.fullMessageRequest = ChatFullMessageReaderRequest(
-                    sessionKey: self.viewModel.sessionKey,
+                    viewModel: self.viewModel,
                     messageID: messageID)
             } label: {
                 Label {

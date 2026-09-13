@@ -32,7 +32,8 @@ import {
   resolveAgentConfig,
   resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
-  tryResolveLegacyCompatibilityAgentId,
+  tryResolveLegacyDataOwnerAgentId,
+  withAgentRosterFactsBatch,
 } from "./agent-scope-config.js";
 import { resolveCanonicalWorkspacePath } from "./workspace-state-identity.js";
 export { hasSessionAutoModelFallbackProvenance } from "../config/sessions/model-override-provenance.js";
@@ -304,15 +305,19 @@ export function clearAutoFallbackPrimaryProbeSelection(
 
 export { resolveAgentIdFromSessionKey };
 
-export function resolveSessionAgentIdsStrict(params: {
+type SessionAgentResolutionParams = {
   sessionKey?: string;
   config?: OpenClawConfig;
   agentId?: string | undefined;
   fallbackAgentId?: string;
-}): {
-  defaultAgentId: string;
-  sessionAgentId: string;
-} {
+};
+
+const SESSION_AGENT_SELECTION_CONTEXT = {
+  surface: "session agent resolution",
+  hint: "Pass an agentId, an agent-scoped session key, or a prepared fallbackAgentId.",
+};
+
+function resolveSelectedSessionAgentId(params: SessionAgentResolutionParams): string | undefined {
   const explicitAgentIdRaw = normalizeLowercaseStringOrEmpty(params.agentId);
   const explicitAgentId = explicitAgentIdRaw ? normalizeAgentId(explicitAgentIdRaw) : null;
   const fallbackAgentIdRaw = normalizeLowercaseStringOrEmpty(params.fallbackAgentId);
@@ -347,29 +352,40 @@ export function resolveSessionAgentIdsStrict(params: {
       hint: `The shared fixed-store row belongs to "${persistedStoreOwner.agentId}", not "${requestedUnscopedAgentId}".`,
     });
   }
-  const compatibilityAgentId = tryResolveLegacyCompatibilityAgentId(cfg);
-  const sessionAgentId =
+  return (
     sessionKeyAgentId ??
     (persistedStoreOwner.kind === "configured" ? persistedStoreOwner.agentId : undefined) ??
     requestedUnscopedAgentId ??
+    undefined
+  );
+}
+
+/** Strict session selection uses explicit context and legacy data ownership. */
+export function resolveSessionAgentIdsStrict(params: SessionAgentResolutionParams): {
+  defaultAgentId: string;
+  sessionAgentId: string;
+} {
+  const selectedAgentId = resolveSelectedSessionAgentId(params);
+  const cfg = params.config ?? {};
+  const compatibilityAgentId = tryResolveLegacyDataOwnerAgentId(cfg);
+  const sessionAgentId =
+    selectedAgentId ??
     compatibilityAgentId ??
-    resolveDefaultAgentId(cfg, {
-      surface: "session agent resolution",
-      hint: "Pass an agentId, an agent-scoped session key, or a prepared fallbackAgentId.",
-    });
+    resolveDefaultAgentId(cfg, SESSION_AGENT_SELECTION_CONTEXT);
   const defaultAgentId = compatibilityAgentId ?? sessionAgentId;
   return { defaultAgentId, sessionAgentId };
 }
 
 export const resolveSessionAgentIds = resolveSessionAgentIdsStrict;
 
-export function resolveSessionAgentIdStrict(params: {
-  sessionKey?: string;
-  config?: OpenClawConfig;
-  agentId?: string;
-  fallbackAgentId?: string;
-}): string {
-  return resolveSessionAgentIdsStrict(params).sessionAgentId;
+export function resolveSessionAgentIdStrict(params: SessionAgentResolutionParams): string {
+  const selectedAgentId = resolveSelectedSessionAgentId(params);
+  const cfg = params.config ?? {};
+  return (
+    selectedAgentId ??
+    tryResolveLegacyDataOwnerAgentId(cfg) ??
+    resolveDefaultAgentId(cfg, SESSION_AGENT_SELECTION_CONTEXT)
+  );
 }
 
 export const resolveSessionAgentId = resolveSessionAgentIdStrict;
@@ -692,18 +708,20 @@ export function resolveAgentIdByWorkspacePath(
   workspacePath: string,
 ): string | undefined {
   const normalizedWorkspacePath = resolveCanonicalWorkspacePath(workspacePath.replaceAll("\0", ""));
-  let matchedAgentId: string | undefined;
-  let matchedWorkspaceLength = -1;
+  return withAgentRosterFactsBatch(cfg, () => {
+    let matchedAgentId: string | undefined;
+    let matchedWorkspaceLength = -1;
 
-  for (const id of listAgentIds(cfg)) {
-    const workspaceDir = resolveCanonicalWorkspacePath(resolveAgentWorkspaceDir(cfg, id));
-    if (!isPathInside(workspaceDir, normalizedWorkspacePath)) {
-      continue;
+    for (const id of listAgentIds(cfg)) {
+      const workspaceDir = resolveCanonicalWorkspacePath(resolveAgentWorkspaceDir(cfg, id));
+      if (!isPathInside(workspaceDir, normalizedWorkspacePath)) {
+        continue;
+      }
+      if (workspaceDir.length > matchedWorkspaceLength) {
+        matchedAgentId = id;
+        matchedWorkspaceLength = workspaceDir.length;
+      }
     }
-    if (workspaceDir.length > matchedWorkspaceLength) {
-      matchedAgentId = id;
-      matchedWorkspaceLength = workspaceDir.length;
-    }
-  }
-  return matchedAgentId;
+    return matchedAgentId;
+  });
 }

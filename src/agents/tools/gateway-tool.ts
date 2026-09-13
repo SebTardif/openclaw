@@ -119,16 +119,24 @@ const GatewayToolSchema = Type.Object({
   ),
 });
 
+const GatewayUpdateToolSchema = Type.Object({
+  action: stringEnum(["update.run"]),
+  note: GatewayToolSchema.properties.note,
+});
+
 export function createGatewayTool(options?: {
+  allowConfigReads?: boolean;
   senderIsOwner?: boolean;
   requesterSenderId?: string | null;
 }): AnyAgentTool {
+  const allowConfigReads = options?.allowConfigReads !== false;
   return {
     label: "Gateway",
     name: "gateway",
-    description:
-      "Read gateway config/schema. update.run: owner-only update on explicit user request; restart + completion notice automatic. Never via shell.",
-    parameters: GatewayToolSchema,
+    description: allowConfigReads
+      ? "Read gateway config/schema. update.run: owner-only update on explicit user request; restart + completion notice automatic. Never via shell."
+      : "Update OpenClaw with update.run, only on an explicit owner request. Restart and completion notice are automatic. Never via shell.",
+    parameters: allowConfigReads ? GatewayToolSchema : GatewayUpdateToolSchema,
     execute: async (_toolCallId, args, signal) => {
       const params = args as Record<string, unknown>;
       const action = readToolStringParam(params, "action", { required: true });
@@ -165,7 +173,6 @@ export function createGatewayTool(options?: {
             sessionKey: caller?.sessionKey,
             deliveryContext,
             note: readToolStringParam(params, "note"),
-            timeoutMs: DEFAULT_UPDATE_TIMEOUT_MS,
           },
           {
             // An explicit binding prevents the standalone client's remote fallback.
@@ -176,11 +183,16 @@ export function createGatewayTool(options?: {
         );
         return jsonResult(summarizeUpdateRunResponse(result));
       }
+      if (!allowConfigReads) {
+        throw new ToolInputError(`Action not available: ${action}`);
+      }
       const gatewayOpts = readGatewayCallOptions(params);
+      const callConfigGateway = (method: string, requestParams: Record<string, unknown>) =>
+        callGatewayTool(method, gatewayOpts, requestParams, { signal });
 
       if (action === "config.get") {
         const path = readToolStringParam(params, "path");
-        const snapshot = await callGatewayTool("config.get", gatewayOpts, {}, { signal });
+        const snapshot = await callConfigGateway("config.get", {});
         const result = selectGatewayConfigGetResult(snapshot, path);
         return createGatewayConfigGetToolResult(result);
       }
@@ -190,12 +202,7 @@ export function createGatewayTool(options?: {
           label: "path",
         });
         try {
-          const result = await callGatewayTool(
-            "config.schema.lookup",
-            gatewayOpts,
-            { path },
-            { signal },
-          );
+          const result = await callConfigGateway("config.schema.lookup", { path });
           return jsonResult({ ok: true, result });
         } catch (error) {
           if (isConfigSchemaPathNotFoundError(error)) {

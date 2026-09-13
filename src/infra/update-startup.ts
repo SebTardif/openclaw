@@ -13,6 +13,8 @@ import type {
 import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text.js";
 import { formatCliCommand } from "../cli/command-format.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { resolveRemoteCatalogUrl } from "../model-catalog/remote-config.js";
+import { checkRemoteModelCatalogUpdate } from "../model-catalog/remote-overlay.js";
 import {
   refreshRemoteModelCatalog,
   REMOTE_MODEL_CATALOG_TTL_MS,
@@ -71,7 +73,8 @@ import {
   recordUpdateRunPhase,
   recordUpdateRunStep,
 } from "./update-run-ledger.js";
-import { summarizeUpdateStepFailure } from "./update-run-record.js";
+import { updateRunStepsFromResultStep } from "./update-run-step.js";
+import { AUTO_UPDATE_STEP_TIMEOUT_MS } from "./update-run-timeouts.js";
 import { runGatewayUpdatePreflight, type UpdateRunResult } from "./update-runner.js";
 
 type UpdateCheckState = {
@@ -219,7 +222,6 @@ export function resetUpdateAvailableStateForTest(): void {
 const UPDATE_CHECK_STATE_KEY = "update.checkState";
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const ONE_HOUR_MS = 60 * 60 * 1000;
-const AUTO_UPDATE_COMMAND_TIMEOUT_MS = 45 * 60 * 1000;
 const AUTO_STABLE_DELAY_HOURS = 6;
 const AUTO_STABLE_JITTER_HOURS = 12;
 const DEV_COMMIT_LIMIT = 5;
@@ -423,7 +425,6 @@ async function runAutoUpdateCommand(
   const command = formatManagedServiceUpdateCommand({
     channel: params.channel,
     ...(params.packageTargetVersion ? { tag: params.packageTargetVersion } : {}),
-    timeoutMs: params.timeoutMs,
   });
   const failure = (
     reason: string,
@@ -491,7 +492,7 @@ async function runAutoUpdateCommand(
     const handoffId = randomUUID();
     const started = await startManagedServiceUpdateHandoff({
       root: params.root,
-      timeoutMs: params.timeoutMs,
+      recoveryTimeoutMs: params.timeoutMs,
       restartDrainTimeoutMs:
         resolveGatewayRestartDeferralTimeoutMs(params.restartDrainTimeoutMs) ??
         resolveGatewayRestartDeferralTimeoutMs(),
@@ -822,7 +823,7 @@ async function runCampaignUpdate(params: {
       runId,
       channel: params.channel,
       mode: params.mode,
-      timeoutMs: AUTO_UPDATE_COMMAND_TIMEOUT_MS,
+      timeoutMs: AUTO_UPDATE_STEP_TIMEOUT_MS,
       restartDrainTimeoutMs: resolveGatewayRestartDeferralTimeoutMs(),
       ...(params.root ? { root: params.root } : {}),
       ...(params.channel === "dev" ? {} : { packageTargetVersion: params.version }),
@@ -846,15 +847,10 @@ async function runCampaignUpdate(params: {
         before: outcome.result.before,
         origin: { nextAction: outcome.message },
       });
-      for (const step of outcome.result.steps) {
+      for (const step of outcome.result.steps.flatMap(updateRunStepsFromResultStep)) {
         recordUpdateRunStep(runId, {
-          step: step.name,
-          status: step.exitCode === 0 || step.advisory ? "completed" : "failed",
+          ...step,
           endedAtMs: Date.now(),
-          detail:
-            step.exitCode === 0
-              ? undefined
-              : (step.advisory?.message ?? summarizeUpdateStepFailure(step)),
         });
       }
     }
@@ -1320,7 +1316,7 @@ async function runGatewayUpdateCheckOwned(
   const channel = configuredChannel;
   const resolved =
     shouldRunAutoUpdate || channel !== "stable"
-      ? await resolveNpmChannelTag({ channel, timeoutMs: 2500 })
+      ? await resolveNpmChannelTag({ channel })
       : {
           tag: "latest",
           version: telemetryUpdate?.version ?? null,
@@ -1483,6 +1479,7 @@ export function createGatewayUpdateCheck(params: {
   const lifecycle = createUpdateCheckLifecycle();
   updateCheckLifecycle = lifecycle;
   let started = false;
+  let observedCatalog: { sourceUrl: string; generatedAt: number } | undefined;
   return {
     initialize: lifecycle.initialize,
     stop: lifecycle.stop,
@@ -1500,30 +1497,47 @@ export function createGatewayUpdateCheck(params: {
         return resolveCheckIntervalMs(params.getConfig(), updateScheduleCache?.install?.kind);
       });
       lifecycle.schedule(async () => {
+        let nextCheckInMs = REMOTE_MODEL_CATALOG_TTL_MS;
         try {
+          const config = params.getConfig();
+          const sourceUrl = resolveRemoteCatalogUrl(config);
           const result = await refreshRemoteModelCatalog({
-            config: params.getConfig(),
+            config,
             signal: lifecycle.signal,
           });
           if (lifecycle.signal.aborted) {
             return REMOTE_MODEL_CATALOG_TTL_MS;
           }
+          nextCheckInMs =
+            result.status === "fresh" ? result.nextCheckInMs : REMOTE_MODEL_CATALOG_TTL_MS;
           if (result.status === "error") {
             params.log.info("remote model catalog refresh failed", { error: result.error });
-          } else if (result.status === "updated") {
-            params.log.info("remote model catalog downloaded; restart the Gateway to apply it", {
-              providers: result.providers,
-              models: result.models,
-              generatedAt: result.generatedAt,
-            });
+          } else if (
+            result.status !== "disabled" &&
+            (observedCatalog?.sourceUrl !== sourceUrl ||
+              observedCatalog.generatedAt !== result.generatedAt)
+          ) {
+            const expected = { sourceUrl, generatedAt: result.generatedAt };
+            const state = checkRemoteModelCatalogUpdate(params.getConfig(), expected);
+            if (state !== "superseded") {
+              observedCatalog = expected;
+            }
+            if (state === "restart-required") {
+              params.log.info("remote model catalog downloaded; restart the Gateway to apply it", {
+                providers: result.providers,
+                models: result.models,
+                generatedAt: result.generatedAt,
+              });
+            } else if (state === "superseded") {
+              params.log.info("remote model catalog check superseded; deferred to the next check");
+            }
           }
-          return result.status === "fresh" ? result.nextCheckInMs : REMOTE_MODEL_CATALOG_TTL_MS;
         } catch (error) {
           if (!lifecycle.signal.aborted) {
-            params.log.info("remote model catalog refresh failed", { error: String(error) });
+            params.log.info("remote model catalog check failed", { error: String(error) });
           }
-          return REMOTE_MODEL_CATALOG_TTL_MS;
         }
+        return nextCheckInMs;
       }, true);
     },
   };

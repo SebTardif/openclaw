@@ -4,6 +4,7 @@ import { beforeEach, expect, it } from "vitest";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import { takeControlUiViewportScreenshot } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
+import { deviceSystemInfo } from "../test-helpers/devices-fixtures.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({
@@ -21,7 +22,7 @@ beforeEach(() => {
 });
 
 suite.define(() => {
-  it("renders status, health, heartbeat, and model snapshots from the Gateway", async () => {
+  it("renders Gateway diagnostics and current work independently of session history", async () => {
     if (captureUiProof) {
       await mkdir(path.join(proofDir, "video"), { recursive: true });
     }
@@ -40,11 +41,71 @@ suite.define(() => {
           : {}),
       },
       async ({ page }) => {
+        const activeRows = Array.from({ length: 101 }, (_, index) => ({
+          key: index === 0 ? "global" : index === 1 ? "unknown" : `agent:main:older-${index}`,
+          agentId: "main",
+          sessionId: `active-session-${index}`,
+          kind: index === 0 ? "global" : index === 1 ? "unknown" : "direct",
+          updatedAt: 1000 - index,
+          hasActiveRun: true,
+          status: index === 1 ? "queued" : "running",
+          activeRunIds: [`active-run-${index}`],
+          archived: index === 2,
+        }));
+        const recentIdleRows = Array.from({ length: 100 }, (_, index) => ({
+          key: `agent:main:recent-${index}`,
+          sessionId: `idle-session-${index}`,
+          kind: "direct",
+          updatedAt: 2000 + index,
+          hasActiveRun: false,
+        }));
+        const listing = (sessions: object[], totalCount = sessions.length) => ({
+          ts: 3000,
+          path: "",
+          count: sessions.length,
+          totalCount,
+          limitApplied: 100,
+          nextOffset: sessions.length < totalCount ? sessions.length : null,
+          hasMore: sessions.length < totalCount,
+          sessions,
+          defaults: { model: null, modelProvider: null, contextTokens: null },
+        });
+        const currentWorkQuery = {
+          activeOnly: true,
+          archived: "all",
+          includeGlobal: true,
+          includeUnknown: true,
+        };
         const gateway = await installMockGateway(page, {
+          sessionScope: "global",
+          sessions: [...activeRows, ...recentIdleRows],
           methodResponses: {
+            "sessions.list": {
+              cases: [
+                { match: currentWorkQuery, response: listing(activeRows.slice(0, 100), 101) },
+                { match: {}, response: listing(recentIdleRows, 198) },
+              ],
+            },
             status: {
               runtime: "diagnostics-e2e",
               securityAudit: { summary: { critical: 0, warn: 1, info: 2 } },
+            },
+            "system.info": {
+              ...deviceSystemInfo,
+              eventLoop: {
+                degraded: false,
+                reasons: [],
+                intervalMs: 1_000,
+                utilization: 0.2,
+                cpuCoreRatio: 0.25,
+                delayP99Ms: 4,
+                delayMaxMs: 8,
+              },
+              processMemory: {
+                rssBytes: 432 * 1_048_576,
+                heapUsedBytes: 210 * 1_048_576,
+                heapTotalBytes: 256 * 1_048_576,
+              },
             },
             health: { ok: true, gateway: "healthy" },
             "models.list": {
@@ -100,7 +161,7 @@ suite.define(() => {
           const requests = await gateway.getRequests(method);
           expect(requests.length).toBeGreaterThanOrEqual(1);
           expect(requests[0]?.params).toEqual(
-            method === "models.list" ? { agentId: "main", preparedOnly: true } : {},
+            method === "models.list" ? { agentId: "main", view: "default" } : {},
           );
         }
 
@@ -117,6 +178,78 @@ suite.define(() => {
             path: path.join(proofDir, "models-snapshot.png"),
           });
         }
+
+        const snapshotMethods = ["status", "health", "models.list"];
+        const snapshotCounts = await Promise.all(
+          snapshotMethods.map(async (method) => (await gateway.getRequests(method)).length),
+        );
+        const systemInfoCount = (await gateway.getRequests("system.info")).length;
+        await page.getByRole("button", { name: /^Open overlay/u }).click();
+        const overlay = page.getByRole("complementary", { name: "System busyness" });
+        await expect
+          .poll(() => overlay.locator(".gateway-vital--memory").textContent())
+          .toContain("432 MB");
+        await expect
+          .poll(() => overlay.locator(".gateway-vital--cpu").textContent())
+          .toContain("25%");
+        await gateway.setMethodResponse("system.info", {
+          ...deviceSystemInfo,
+          eventLoop: {
+            degraded: false,
+            reasons: [],
+            intervalMs: 1_000,
+            utilization: 0.3,
+            cpuCoreRatio: 0.75,
+            delayP99Ms: 6,
+            delayMaxMs: 12,
+          },
+          processMemory: {
+            rssBytes: 654 * 1_048_576,
+            heapUsedBytes: 300 * 1_048_576,
+            heapTotalBytes: 384 * 1_048_576,
+          },
+        });
+        await expect
+          .poll(() => overlay.locator(".gateway-vital--memory").textContent())
+          .toContain("654 MB");
+        await expect
+          .poll(() => overlay.locator(".gateway-vital--cpu").textContent())
+          .toContain("75%");
+        await gateway.waitForRequest("system.info", { after: systemInfoCount + 2 });
+        expect(await overlay.locator(".gateway-vital--cpu polyline").count()).toBe(1);
+        expect(
+          await Promise.all(
+            snapshotMethods.map(async (method) => (await gateway.getRequests(method)).length),
+          ),
+        ).toEqual(snapshotCounts);
+        const activeRuns = overlay.locator("section", {
+          has: page.getByRole("heading", { name: "Active runs", exact: true }),
+        });
+        const activeCount = activeRuns.locator(".debug-overlay__count").first();
+        await activeCount.waitFor();
+        await activeCount.scrollIntoViewIfNeeded();
+        if (captureUiProof) {
+          await page.screenshot({ path: path.join(proofDir, "active-runs.png") });
+        }
+        expect((await activeCount.textContent())?.trim()).toBe("101 active");
+        expect(await activeRuns.getByText("Showing 100 of 101", { exact: true }).count()).toBe(1);
+        expect(await activeRuns.locator("li").count()).toBe(100);
+        expect(await activeRuns.getByText("active-session-100", { exact: true }).count()).toBe(0);
+        for (const sessionId of ["active-session-0", "active-session-1", "active-session-2"]) {
+          expect(await activeRuns.getByText(sessionId, { exact: true }).count()).toBe(1);
+        }
+        expect(
+          await gateway.getRequests("sessions.list", { ...currentWorkQuery, offset: 100 }),
+        ).toHaveLength(0);
+        await gateway.setMethodResponse("sessions.list", listing([]));
+        await activeRuns.getByText("No active runs.", { exact: true }).waitFor();
+        expect((await activeCount.textContent())?.trim()).toBe("0 active");
+        expect(await activeRuns.locator("li").count()).toBe(0);
+        expect(await activeRuns.getByText("Showing 100 of 101", { exact: true }).count()).toBe(0);
+        if (captureUiProof) {
+          await page.screenshot({ path: path.join(proofDir, "active-runs-idle.png") });
+        }
+        await overlay.getByRole("button", { name: "Close", exact: true }).click();
 
         const refresh = snapshots.getByRole("button", { name: "Refresh" });
         const statusRequestCount = (await gateway.getRequests("status")).length;

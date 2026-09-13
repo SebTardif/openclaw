@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../test/helpers/promise.js";
 import {
   getPreparedModelRuntimeBorrowedSnapshot,
   getPreparedModelRuntimePluginGeneration,
@@ -15,11 +16,8 @@ vi.mock("./agent-run-dispatch.js", () => ({
 function createExecution(options: { aborted?: boolean; assertContextCurrent?: () => void } = {}) {
   const abortCleanup = vi.fn();
   const gatewayRelease = vi.fn();
-  let resolveRuntimeReleased!: () => void;
-  const runtimeReleased = new Promise<void>((resolve) => {
-    resolveRuntimeReleased = resolve;
-  });
-  const runtimeRelease = vi.fn(resolveRuntimeReleased);
+  const { promise: runtimeReleased, resolve: resolveRuntimeReleased } = createDeferred();
+  const runtimeRelease = vi.fn(async () => resolveRuntimeReleased());
   const controller = new AbortController();
   if (options.aborted) {
     controller.abort();
@@ -45,7 +43,7 @@ function createExecution(options: { aborted?: boolean; assertContextCurrent?: ()
         effectiveAllowModelOverride: false,
         lifecycleStorePath: "",
         operationalRunInstance: {},
-        preparedModelRuntimeLease: { release: runtimeRelease, snapshot: {} },
+        preparedModelRuntimeLease: { [Symbol.asyncDispose]: runtimeRelease, snapshot: {} },
         replyDispatchRuntime: {
           config: { runtime: "A" },
           pluginGeneration: "generation-A",
@@ -98,14 +96,8 @@ describe("startAgentRunExecution Gateway ownership", () => {
 
   it("dispatches with the runtime generation frozen at admission", async () => {
     const execution = createExecution();
-    let resolveDispatched!: () => void;
-    const dispatched = new Promise<void>((resolve) => {
-      resolveDispatched = resolve;
-    });
-    let resolveCleanupObserved!: () => void;
-    const cleanupObserved = new Promise<void>((resolve) => {
-      resolveCleanupObserved = resolve;
-    });
+    const { promise: dispatched, resolve: resolveDispatched } = createDeferred();
+    const { promise: cleanupObserved, resolve: resolveCleanupObserved } = createDeferred();
     let borrowedAfterCleanup: Promise<unknown> | undefined;
     let dispatchedGeneration: unknown;
     let dispatchedSnapshot: unknown;
@@ -118,6 +110,7 @@ describe("startAgentRunExecution Gateway ownership", () => {
         return getPreparedModelRuntimeBorrowedSnapshot(generation);
       })();
       resolveDispatched();
+      return cleanupObserved;
     });
 
     const completion = startAgentRunExecution(execution.params);
@@ -139,8 +132,8 @@ describe("startAgentRunExecution Gateway ownership", () => {
     dispatch?.cleanupAbortController();
     resolveCleanupObserved();
     await expect(borrowedAfterCleanup).resolves.toBeUndefined();
-    expect(execution.runtimeRelease).toHaveBeenCalledOnce();
     await completion;
+    expect(execution.runtimeRelease).toHaveBeenCalledOnce();
   });
 
   it("releases the admitted runtime once when aborted before dispatch", async () => {
@@ -151,6 +144,19 @@ describe("startAgentRunExecution Gateway ownership", () => {
     expect(execution.abortCleanup).toHaveBeenCalledOnce();
     expect(execution.gatewayRelease).toHaveBeenCalledOnce();
     expect(execution.runtimeRelease).toHaveBeenCalledOnce();
+  });
+
+  it("joins asynchronous runtime disposal before execution finishes", async () => {
+    const execution = createExecution({ aborted: true });
+    const { promise: disposal, resolve: finishDisposal } = createDeferred();
+    execution.runtimeRelease.mockImplementation(() => disposal);
+    const finished = vi.fn();
+    const completion = startAgentRunExecution(execution.params).then(finished);
+    await vi.waitFor(() => expect(execution.runtimeRelease).toHaveBeenCalledOnce());
+    expect(finished).not.toHaveBeenCalled();
+    finishDisposal();
+    await completion;
+    expect(finished).toHaveBeenCalledOnce();
   });
 
   it("releases the admitted runtime once when its owner retires before dispatch", async () => {

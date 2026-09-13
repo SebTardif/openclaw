@@ -139,6 +139,11 @@ effective agent must pass `allowedAgentIds`; global session-store ownership is
 also enforced. Agent-prefixed keys are re-scoped to the selected agent and
 prefix-checked again.
 
+For a fixed global session store, an omitted target uses its persisted
+`agents.defaults.sessionStore.agentId` owner ahead of the runtime default.
+Explicit targets that conflict with that owner are rejected. The persisted owner
+must still pass `allowedAgentIds`.
+
 Keys resolve from the request/mapping, then `hooks.defaultSessionKey`, then a
 generated `hook:<uuid>`. A configured default must match the prefix allowlist.
 Without a default, the allowlist must admit generated `hook:` keys.
@@ -292,7 +297,7 @@ using a static `sessionKey`. Keep isolated mode unless context reuse is intended
       renewEveryMinutes: 720,
       serve: { bind: "127.0.0.1", port: 8788, path: "/" },
       tailscale: { mode: "funnel", path: "/gmail-pubsub" },
-      model: "openai/gpt-5.6-sol",
+      model: "openai/gpt-6-astra",
       thinking: "high",
     },
   },
@@ -343,7 +348,7 @@ completed email processing or delivery. Verify the restricted reader through
 reader-to-agent handoff, expose only the required tool and constrain the
 default-on [`tools.agentToAgent`](/gateway/config-tools#tools-agenttoagent)
 policy with `allow`, or set `enabled: false` when no handoff is needed; see also
-[Prompt injection](/gateway/security#prompt-injection) and
+[Prompt injection](/gateway/security/prompt-injection) and
 [per-agent sandbox and tools](/tools/multi-agent-sandbox-tools).
 
 ---

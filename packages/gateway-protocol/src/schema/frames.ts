@@ -2,6 +2,7 @@
 import type { Static } from "typebox";
 import { Type } from "typebox";
 import { closedObject } from "./closed-object.js";
+import { ControlUiPluginTabSchema, ControlUiPluginWidgetKindSchema } from "./plugins.js";
 import { GatewayClientIdSchema, GatewayClientModeSchema, NonEmptyString } from "./primitives.js";
 import { SessionVisibilitySchema } from "./sessions-sharing-values.js";
 import { SnapshotSchema, StateVersionSchema } from "./snapshot.js";
@@ -53,6 +54,20 @@ export const ConnectParamsSchema = closedObject({
   pathEnv: Type.Optional(Type.String()),
   role: Type.Optional(NonEmptyString),
   scopes: Type.Optional(Type.Array(NonEmptyString)),
+  /** Initial catalog read scope; method authorization still owns access. */
+  modelCatalog: Type.Optional(
+    Type.Union([
+      closedObject({
+        agentId: Type.Optional(NonEmptyString),
+        sessionKey: Type.Optional(NonEmptyString),
+      }),
+      closedObject({
+        agentId: Type.Optional(NonEmptyString),
+        shortId: NonEmptyString,
+        slugHint: Type.Optional(NonEmptyString),
+      }),
+    ]),
+  ),
   device: Type.Optional(
     closedObject({
       id: NonEmptyString,
@@ -98,34 +113,22 @@ export const HelloOkSchema = closedObject({
   // Public Control UI origin and mount path, independent of local SSH tunnels.
   controlUiUrl: Type.Optional(NonEmptyString),
   // Additive: plugin-declared Control UI tabs (surface "tab" descriptors).
-  controlUiTabs: Type.Optional(
-    Type.Array(
-      closedObject({
-        pluginId: NonEmptyString,
-        id: NonEmptyString,
-        label: NonEmptyString,
-        description: Type.Optional(Type.String()),
-        icon: Type.Optional(Type.String()),
-        path: Type.Optional(Type.String()),
-        placement: Type.Optional(Type.String()),
-        requiresGatewayAuth: Type.Optional(Type.Boolean()),
-        group: Type.Optional(Type.Union([Type.Literal("control"), Type.Literal("agent")])),
-        order: Type.Optional(Type.Number()),
-      }),
-    ),
-  ),
+  controlUiTabs: Type.Optional(Type.Array(ControlUiPluginTabSchema)),
   // Additive: active plugin widget kinds whose renderers ship in the trusted UI bundle.
-  controlUiWidgetKinds: Type.Optional(
-    Type.Array(
-      closedObject({
-        pluginId: NonEmptyString,
-        kind: NonEmptyString,
-        label: NonEmptyString,
-      }),
-    ),
-  ),
+  controlUiWidgetKinds: Type.Optional(Type.Array(ControlUiPluginWidgetKindSchema)),
   pluginSurfaceUrls: Type.Optional(Type.Record(NonEmptyString, NonEmptyString)),
   auth: closedObject({
+    method: Type.Optional(
+      Type.Union([
+        Type.Literal("none"),
+        Type.Literal("token"),
+        Type.Literal("password"),
+        Type.Literal("tailscale"),
+        Type.Literal("device-token"),
+        Type.Literal("bootstrap-token"),
+        Type.Literal("trusted-proxy"),
+      ]),
+    ),
     deviceToken: Type.Optional(NonEmptyString),
     recoveryMigrationAllowed: Type.Optional(Type.Literal(true)),
     recoveryScope: Type.Optional(NonEmptyString),

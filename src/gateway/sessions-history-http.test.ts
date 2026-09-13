@@ -6,6 +6,8 @@ import path from "node:path";
 import type { AssistantMessage } from "openclaw/plugin-sdk/llm";
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { makeAgentAssistantMessage } from "../agents/test-helpers/agent-message-fixtures.js";
+import { createZeroUsageFixture } from "../agents/test-helpers/usage-fixtures.js";
 import { HEARTBEAT_PROMPT } from "../auto-reply/heartbeat.js";
 import { replaceTranscriptEvents } from "../config/sessions/session-accessor.js";
 import { resolveSqliteTargetFromSessionStorePath } from "../config/sessions/session-sqlite-target.js";
@@ -13,6 +15,7 @@ import {
   appendAssistantMessageToSessionTranscript,
   appendExactAssistantMessageToSessionTranscript,
 } from "../config/sessions/transcript.js";
+import * as boundaryPath from "../infra/boundary-path.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { persistUserTurnTranscript } from "../sessions/user-turn-transcript.test-support.js";
@@ -164,29 +167,13 @@ function makeTranscriptAssistantMessage(params: {
   provider?: string;
   model?: string;
 }): AssistantMessage {
-  return {
-    role: "assistant" as const,
+  return makeAgentAssistantMessage({
     content: params.content ?? [{ type: "text", text: params.text }],
-    api: "openai-responses",
     provider: params.provider ?? "openai",
     model: params.model ?? "gpt-5.5",
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 0,
-      },
-    },
-    stopReason: "stop" as const,
+    usage: createZeroUsageFixture(),
     timestamp: Date.now(),
-  };
+  });
 }
 
 function makeDeliveryMirrorAssistantMessage(
@@ -1597,20 +1584,42 @@ describe("session history HTTP endpoints", () => {
     },
   );
 
-  test("streams session history updates over SSE", async () => {
+  test("shares transcript path checks across SSE streams and delivers session updates", async () => {
     const { storePath } = await seedSession({ text: "first message" });
 
-    await withFirstMessageHistoryStream(async (stream) => {
-      const appendedId = await appendVisibleAssistantMessage({
-        sessionKey: "agent:main:main",
-        text: "second message",
-        storePath,
-      });
-      await expectMessageEventMatch(stream, {
-        text: "second message",
-        seq: 2,
-        id: appendedId,
-      });
+    await withGatewayHarness(async (harness) => {
+      const streams: SessionHistorySseStream[] = [];
+      try {
+        for (let index = 0; index < 2; index++) {
+          const stream = await openSessionHistorySse(harness.port, "agent:main:main");
+          streams.push(stream);
+          await expectHistoryEventTexts(stream, ["first message"]);
+        }
+        const unrelatedFile = path.join(path.dirname(storePath), "unrelated-session.jsonl");
+        const resolvePath = vi.spyOn(boundaryPath, "resolveRealpathOrAbsolute");
+        try {
+          const update = { sessionFile: unrelatedFile };
+          emitSessionTranscriptUpdate(update);
+          emitSessionTranscriptUpdate(update);
+          expect(resolvePath.mock.calls.filter(([file]) => file === unrelatedFile)).toHaveLength(2);
+        } finally {
+          resolvePath.mockRestore();
+        }
+        const appendedId = await appendVisibleAssistantMessage({
+          sessionKey: "agent:main:main",
+          text: "second message",
+          storePath,
+        });
+        for (const stream of streams) {
+          await expectMessageEventMatch(stream, {
+            text: "second message",
+            seq: 2,
+            id: appendedId,
+          });
+        }
+      } finally {
+        await Promise.all(streams.map((stream) => stream.reader.cancel()));
+      }
     });
   });
 

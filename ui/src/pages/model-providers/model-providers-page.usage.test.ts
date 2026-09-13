@@ -1,12 +1,13 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import { EMPTY_MODEL_PROVIDERS_DATA } from "./load.ts";
 import {
   advanceUsageRetries,
   appendPage,
   createHarness,
-  deferred,
+  createAuthStatus,
   focusDocument,
   requestCount,
   type ModelProvidersPageTestElement,
@@ -19,6 +20,69 @@ afterEach(() => {
 });
 
 describe("ModelProvidersPage usage convergence", () => {
+  it("keeps account quotas during config saves and refreshes them from the page", async () => {
+    const { context, request, snapshot, runtimeConfig, notifyRuntimeConfig } =
+      createHarness("main");
+    snapshot.hello = {
+      type: "hello-ok",
+      protocol: 3,
+      features: { methods: ["config.get", "config.patch", "codex.accountUsage"] },
+      auth: { role: "operator", scopes: ["operator.admin"] },
+    };
+    const original = request.getMockImplementation()!;
+    let usedPercent = 10;
+    const accountRequests: unknown[] = [];
+    request.mockImplementation(async (method, params?: unknown) => {
+      if (method === "models.authStatus") {
+        return createAuthStatus([
+          {
+            profiles: [
+              { profileId: "openai:one", type: "oauth", status: "ok" },
+              { profileId: "openai:two", type: "token", status: "static" },
+              { profileId: "openai:key", type: "api_key", status: "static" },
+            ],
+          },
+          {
+            provider: "anthropic",
+            displayName: "Anthropic",
+            profiles: [{ profileId: "anthropic:one", type: "oauth", status: "ok" }],
+          },
+        ]);
+      }
+      if (method === "codex.accountUsage") {
+        accountRequests.push(params);
+        return {
+          updatedAt: 1,
+          providers: [
+            { provider: "openai", displayName: "OpenAI", windows: [{ label: "5h", usedPercent }] },
+          ],
+        };
+      }
+      return original(method);
+    });
+    const page = appendPage(context);
+    await vi.waitFor(() => expect(page.textContent).toContain("90% left"));
+    expect(accountRequests).toEqual([
+      { agentId: "main", profileId: "openai:one" },
+      { agentId: "main", profileId: "openai:two" },
+    ]);
+    expect(
+      page.querySelector('[data-profile-id="anthropic:one"] openclaw-model-account-usage'),
+    ).toBeNull();
+    expect(
+      page.querySelector('[data-profile-id="openai:key"] openclaw-model-account-usage'),
+    ).toBeNull();
+    runtimeConfig.state.configSaving = true;
+    notifyRuntimeConfig();
+    await page.updateComplete;
+    expect(page.textContent).toContain("90% left");
+    runtimeConfig.state.configSaving = false;
+    notifyRuntimeConfig();
+    usedPercent = 90;
+    page.querySelector<HTMLButtonElement>(".settings-section__actions button")?.click();
+    await vi.waitFor(() => expect(page.textContent).toContain("10% left"));
+  });
+
   it("waits for the route loader before starting provider requests, including after reconnect", async () => {
     const harness = createHarness("main");
     const page = document.createElement(
@@ -27,19 +91,19 @@ describe("ModelProvidersPage usage convergence", () => {
     page.context = harness.context;
     document.body.append(page);
     await page.updateComplete;
-    expect(harness.request).not.toHaveBeenCalled();
+    expect(harness.request.mock.calls.filter(([method]) => method !== "config.get")).toEqual([]);
 
     harness.publishPhase("offline");
     harness.publishPhase("connected");
     await page.updateComplete;
-    expect(harness.request).not.toHaveBeenCalled();
+    expect(harness.request.mock.calls.filter(([method]) => method !== "config.get")).toEqual([]);
 
     page.routeData = {
       gateway: harness.context.gateway,
       gatewaySnapshot: harness.context.gateway.snapshot,
       client: harness.context.gateway.snapshot.client,
       agentId: "main",
-      data: { ...EMPTY_MODEL_PROVIDERS_DATA, config: {}, updatedAt: Date.now() },
+      data: { ...EMPTY_MODEL_PROVIDERS_DATA, updatedAt: Date.now() },
     };
     await vi.waitFor(() => expect(page.data?.costByProvider).toEqual([]));
     expect(requestCount(harness.request, "models.authStatus")).toBe(0);
@@ -244,7 +308,7 @@ describe("ModelProvidersPage usage convergence", () => {
     await vi.waitFor(() => expect(requestCount(harness.request, "sessions.usage")).toBe(1));
 
     const releaseCoreRefresh = harness.deferNextAuthStatus();
-    const refresh = page.refresh({ force: true });
+    const refresh = page.refresh("forced");
     expect(firstUsageSignal?.aborted).toBe(true);
     expect(firstCostSignal?.aborted).toBe(true);
 

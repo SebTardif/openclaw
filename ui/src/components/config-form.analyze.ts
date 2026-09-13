@@ -67,15 +67,10 @@ const SUPPORTED_FORM_SCHEMA_KEYS = new Set([
   "anyOf",
   "oneOf",
   "allOf",
+  "not",
 ]);
-const RENDERABLE_UNION_TYPES = new Set([
-  "string",
-  "number",
-  "integer",
-  "boolean",
-  "object",
-  "array",
-]);
+const SCALAR_UNION_TYPES = new Set(["string", "number", "integer", "boolean"]);
+const RENDERABLE_UNION_TYPES = new Set([...SCALAR_UNION_TYPES, "object", "array"]);
 
 function isAnySchema(schema: JsonSchema): boolean {
   const keys = Object.keys(schema ?? {}).filter((key) => !META_KEYS.has(key));
@@ -158,7 +153,27 @@ function hasOnlySupportedConstraintKeywords(schema: JsonSchema): boolean {
 }
 
 function hasOnlySupportedFormKeywords(schema: JsonSchema): boolean {
-  return hasOnlySupportedKeywords(schema, SUPPORTED_FORM_SCHEMA_KEYS);
+  if (!hasOnlySupportedKeywords(schema, SUPPORTED_FORM_SCHEMA_KEYS)) {
+    return false;
+  }
+  if (schema.not === undefined) {
+    return true;
+  }
+  if (
+    inferredSchemaType(schema) !== "object" ||
+    !schema.not ||
+    typeof schema.not !== "object" ||
+    Array.isArray(schema.not)
+  ) {
+    return false;
+  }
+  const required = schema.not.required;
+  return (
+    Array.isArray(required) &&
+    required.length > 0 &&
+    required.every((key) => typeof key === "string") &&
+    Object.keys(schema.not).every((key) => key === "required" || META_KEYS.has(key))
+  );
 }
 
 function hasOnlySupportedKeywords(schema: JsonSchema, supported: ReadonlySet<string>): boolean {
@@ -230,12 +245,24 @@ export function analyzeConfigSchema(raw: unknown): ConfigSchemaAnalysis {
 }
 
 function normalizeSchemaNode(
-  schema: JsonSchema,
+  input: JsonSchema,
   path: Array<string | number>,
   compositionBranch = false,
   inheritedCompositionType?: string,
   inheritedCompositionAllowsNull?: boolean,
 ): ConfigSchemaAnalysis {
+  // Zod emits primitive unions as type arrays; keep their branch editor and
+  // sibling constraints on the same normalization path as anyOf schemas.
+  const schema =
+    !compositionBranch &&
+    !input.anyOf &&
+    !input.oneOf &&
+    !input.allOf &&
+    Array.isArray(input.type) &&
+    new Set(input.type.filter((type) => type !== "null")).size > 1 &&
+    input.type.every((type) => type === "null" || SCALAR_UNION_TYPES.has(type))
+      ? { ...input, type: undefined, anyOf: input.type.map((type) => ({ type })) }
+      : input;
   const unsupported = new Set<string>();
   const normalized: JsonSchema = { ...schema };
   const pathLabel = pathKey(path) || "<root>";
@@ -598,6 +625,18 @@ function normalizeUnion(
       literals.includes("false") ||
       (schema.anyOf === undefined && literals.some((literal) => typeof literal === "boolean"))
     ) {
+      // The text editor can preserve string and boolean literals, but cannot
+      // recreate numeric, structured, or null sentinels from their displayed text.
+      if (
+        remaining.every((entry) => entry.type === "string") &&
+        literals.every((literal) => typeof literal === "string" || typeof literal === "boolean") &&
+        !schemaAllowsNull(schema)
+      ) {
+        return {
+          schema: { ...schema, nullable },
+          unsupportedPaths: [],
+        };
+      }
       return null;
     }
     remaining.pop();

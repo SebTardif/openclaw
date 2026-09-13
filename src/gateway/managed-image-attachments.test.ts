@@ -6,7 +6,17 @@ import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { maxBytesForKind } from "@openclaw/media-core/constants";
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from "vitest";
 import {
   createNoisyPngBuffer as createNoisyPngFixtureBuffer,
   createSolidPngBuffer,
@@ -16,14 +26,17 @@ import { extractToolResultMediaArtifact } from "../agents/embedded-agent-tool-me
 import type { ReplyMediaAttachment } from "../auto-reply/reply-payload.js";
 import { resolveSqliteTargetFromSessionStorePath } from "../config/sessions/session-sqlite-target.js";
 import { resolveExistingAgentSessionStoreTargetsReadOnlyResult } from "../config/sessions/targets-read-availability.js";
-import { createPinnedLookup } from "../infra/net/ssrf.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import {
   completeSessionDelivery,
   enqueueSessionDelivery,
 } from "../infra/session-delivery-queue-storage.js";
 import { readImageProbeFromHeader, resizeToJpeg } from "../media/image-ops.js";
-import { setMediaStoreNetworkDepsForTest } from "../media/store.test-support.js";
+import {
+  disposeStoreRemoteFixtures,
+  withStoreRemoteFixture,
+  wrapStoreSaveRemoteMedia,
+} from "../media/store-network.test-support.js";
 import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
@@ -60,6 +73,25 @@ const resolvePlaybackTranscodeMock = vi.fn(async (): Promise<PlaybackTranscodeRe
   kind: "passthrough",
 }));
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+let storeSaveSpy: MockInstance<typeof import("../media/fetch.js").saveRemoteMedia> | undefined;
+
+beforeAll(async () => {
+  // Spy after graph evaluation: importOriginal(fetch) can pull store into its mock cycle.
+  const mediaFetch = await import("../media/fetch.js");
+  const saveRemoteMedia = mediaFetch.saveRemoteMedia;
+  storeSaveSpy = vi
+    .spyOn(mediaFetch, "saveRemoteMedia")
+    .mockImplementation(wrapStoreSaveRemoteMedia(saveRemoteMedia));
+});
+
+afterAll(() => {
+  try {
+    disposeStoreRemoteFixtures();
+  } finally {
+    storeSaveSpy?.mockRestore();
+  }
+});
 
 beforeEach(() => {
   resolvePlaybackModeForSourceMock.mockReset();
@@ -119,6 +151,7 @@ const {
   createManagedOutgoingMediaBlocks: createManagedOutgoingImageBlocksActual,
   handleManagedOutgoingMediaHttpRequest: handleManagedOutgoingImageHttpRequest,
   prepareOutgoingMediaFromReplyPayload,
+  readManagedOutgoingImageThumbnail,
   resolveManagedOutgoingMediaArtifactDownload: resolveManagedOutgoingImageArtifactDownload,
   resolveManagedImageAttachmentLimits,
 } = await import("./managed-image-attachments.js");
@@ -424,7 +457,6 @@ describe("handleManagedOutgoingImageHttpRequest", () => {
 
   afterEach(async () => {
     closeOpenClawStateDatabaseForTest();
-    setMediaStoreNetworkDepsForTest();
     await fs.rm(stateDir, { recursive: true, force: true });
   });
 
@@ -1150,7 +1182,7 @@ describe("handleManagedOutgoingImageHttpRequest", () => {
     expect(download?.title).toBe("meeting-note.mp3");
   });
 
-  it("serves a bounded thumbnail through the full-image artifact ticket", async () => {
+  it("serves the same bounded thumbnail through local reads and the full-image artifact ticket", async () => {
     const source = createSolidPngBuffer(640, 320, { r: 24, g: 64, b: 128 });
     const { attachmentId, sessionKey } = await createFixture(stateDir, { body: source });
     const canonicalPath = `/api/chat/media/outgoing/${encodeURIComponent(sessionKey)}/${attachmentId}/full`;
@@ -1172,6 +1204,24 @@ describe("handleManagedOutgoingImageHttpRequest", () => {
       stateDir,
     });
     const thumbnailUrl = download?.url.replace(/\/full(?=\?)/u, "/thumbnail") ?? "";
+    const localRequest = {
+      sessionKey,
+      artifactId: `${MANAGED_OUTGOING_IMAGE_ARTIFACT_ID_PREFIX}${attachmentId}`,
+      stateDir,
+      maxBytes: 12 * 1024 * 1024,
+      signal: new AbortController().signal,
+    };
+    const localThumbnail = await readManagedOutgoingImageThumbnail(localRequest);
+    expect(localThumbnail && readImageProbeFromHeader(localThumbnail)).toMatchObject({
+      width: 300,
+      height: 150,
+    });
+    await expect(
+      readManagedOutgoingImageThumbnail({ ...localRequest, maxBytes: 1 }),
+    ).rejects.toThrow("byte limit");
+    await expect(
+      readManagedOutgoingImageThumbnail({ ...localRequest, sessionKey: "agent:other:main" }),
+    ).resolves.toBeNull();
 
     vi.clearAllMocks();
     const { result } = await requestManagedImage({
@@ -1185,6 +1235,7 @@ describe("handleManagedOutgoingImageHttpRequest", () => {
     expect(result.headers["content-type"]).toBe("image/png");
     expect(result.headers["content-disposition"]).toContain("cat-thumbnail.png");
     expect(readImageProbeFromHeader(result.body)).toMatchObject({ width: 300, height: 150 });
+    expect(result.body).toEqual(localThumbnail);
     expect(authorizeGatewayHttpRequestOrReplyMock).not.toHaveBeenCalled();
   });
 
@@ -1408,7 +1459,6 @@ describe("createManagedOutgoingImageBlocks", () => {
 
   afterEach(async () => {
     closeOpenClawStateDatabaseForTest();
-    setMediaStoreNetworkDepsForTest();
     await fs.rm(stateDir, { recursive: true, force: true });
   });
 
@@ -1839,22 +1889,21 @@ describe("createManagedOutgoingImageBlocks", () => {
       upstream.listen(0, "127.0.0.1", resolve);
     });
     const address = upstream.address() as AddressInfo;
-    setMediaStoreNetworkDepsForTest({
-      resolvePinnedHostname: async (hostname) => ({
-        hostname,
-        addresses: ["127.0.0.1"],
-        lookup: createPinnedLookup({ hostname, addresses: ["127.0.0.1"] }),
-      }),
-    });
 
     try {
       await withEnvAsync({ OPENCLAW_STATE_DIR: stateDir }, async () => {
         const sourceUrl = `http://127.0.0.1:${address.port}/remote-cat.png?sig=secret`;
-        const blocks = await createManagedOutgoingImageBlocks({
-          stateDir,
-          sessionKey: "agent:main:main",
-          mediaUrls: [sourceUrl],
-        });
+        const matchedUrls: string[] = [];
+        const blocks = await withStoreRemoteFixture(
+          { url: sourceUrl, onMatch: (url) => matchedUrls.push(url) },
+          () =>
+            createManagedOutgoingImageBlocks({
+              stateDir,
+              sessionKey: "agent:main:main",
+              mediaUrls: [sourceUrl],
+            }),
+        );
+        expect(matchedUrls).toEqual([sourceUrl]);
 
         expect(blocks).toHaveLength(1);
         const block = requireBlock(blocks);
@@ -1875,7 +1924,6 @@ describe("createManagedOutgoingImageBlocks", () => {
         expect(await fs.readFile(originalPath)).toEqual(imageBuffer);
       });
     } finally {
-      setMediaStoreNetworkDepsForTest();
       await new Promise<void>((resolve, reject) => {
         upstream.close((error) => (error ? reject(error) : resolve()));
       });
@@ -2243,27 +2291,26 @@ describe("createManagedOutgoingImageBlocks", () => {
       server.listen(0, "127.0.0.1", resolve);
     });
     const address = server.address() as AddressInfo;
-    setMediaStoreNetworkDepsForTest({
-      resolvePinnedHostname: async (hostname) => ({
-        hostname,
-        addresses: ["127.0.0.1"],
-        lookup: createPinnedLookup({ hostname, addresses: ["127.0.0.1"] }),
-      }),
-    });
 
     try {
       await withEnvAsync({ OPENCLAW_STATE_DIR: stateDir }, async () => {
-        const blocks = await createManagedOutgoingImageBlocks({
-          sessionKey: "agent:main:main",
-          mediaUrls: [`http://127.0.0.1:${address.port}/large-image.png`],
-          stateDir,
-        });
+        const sourceUrl = `http://127.0.0.1:${address.port}/large-image.png`;
+        const matchedUrls: string[] = [];
+        const blocks = await withStoreRemoteFixture(
+          { url: sourceUrl, onMatch: (url) => matchedUrls.push(url) },
+          () =>
+            createManagedOutgoingImageBlocks({
+              sessionKey: "agent:main:main",
+              mediaUrls: [sourceUrl],
+              stateDir,
+            }),
+        );
+        expect(matchedUrls).toEqual([sourceUrl]);
 
         expect(blocks).toHaveLength(1);
         expect(requireBlock(blocks).type).toBe("image");
       });
     } finally {
-      setMediaStoreNetworkDepsForTest();
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });

@@ -1,8 +1,4 @@
 import { KeyedAsyncQueue } from "openclaw/plugin-sdk/keyed-async-queue";
-import {
-  createPluginStateKeyedStoreForTests,
-  createPluginStateSyncKeyedStoreForTests,
-} from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { withTimeout } from "openclaw/plugin-sdk/text-utility-runtime";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,8 +10,7 @@ import {
   type TelegramMentionCaseForTest,
   type TelegramMentionPolicyForTest,
 } from "./bot.create-telegram-bot.test-support.js";
-import { setTelegramRuntime } from "./runtime.js";
-import type { TelegramRuntime } from "./runtime.types.js";
+import { setTelegramPluginStateRuntimeForTests } from "./runtime-state.test-support.js";
 
 const saveRemoteMedia = vi.fn();
 const rootRead = vi.fn();
@@ -75,7 +70,7 @@ const TELEGRAM_TEST_TIMINGS = {
   mediaGroupFlushMs: 20,
   textFragmentGapMs: 30,
 } as const;
-const TEXT_FRAGMENT_COALESCE_TEST_GAP_MS = 5_000;
+const FRAGMENT_TEST_GAP_MS = 5_000;
 const TELEGRAM_TEST_TOPIC = "-100456:topic:42";
 
 async function withTelegramSpooledReplayUpdate<T>(
@@ -408,21 +403,7 @@ describe("createTelegramBot channel_post media", () => {
   });
 
   beforeEach(() => {
-    setTelegramRuntime({
-      state: {
-        openKeyedStore: ((options) =>
-          createPluginStateKeyedStoreForTests(
-            "telegram",
-            options,
-          )) as TelegramRuntime["state"]["openKeyedStore"],
-        openSyncKeyedStore: ((options) =>
-          createPluginStateSyncKeyedStoreForTests(
-            "telegram",
-            options,
-          )) as TelegramRuntime["state"]["openSyncKeyedStore"],
-      },
-      channel: {},
-    } as TelegramRuntime);
+    setTelegramPluginStateRuntimeForTests();
     triggerInternalHookMock.mockClear();
     saveRemoteMedia.mockReset();
     saveRemoteMedia.mockImplementation(
@@ -474,7 +455,7 @@ describe("createTelegramBot channel_post media", () => {
     try {
       const handler = getChannelPostHandler({
         ...TELEGRAM_TEST_TIMINGS,
-        textFragmentGapMs: TEXT_FRAGMENT_COALESCE_TEST_GAP_MS,
+        textFragmentGapMs: FRAGMENT_TEST_GAP_MS,
       });
 
       const part1 = "A".repeat(4050);
@@ -503,12 +484,13 @@ describe("createTelegramBot channel_post media", () => {
       });
 
       expect(replySpy).not.toHaveBeenCalled();
-      await flushChannelPostMediaGroup(setTimeoutSpy, 1_075, TEXT_FRAGMENT_COALESCE_TEST_GAP_MS);
-
-      expect(replySpy).toHaveBeenCalledTimes(1);
-      const payload = replyPayload() as { RawBody?: string };
-      expect(payload.RawBody).toContain(part1.slice(0, 32));
-      expect(payload.RawBody).toContain(part2.slice(0, 32));
+      const flush = resolveFlushTimerForDelay(setTimeoutSpy, FRAGMENT_TEST_GAP_MS);
+      expect(flush).toBeTypeOf("function");
+      flush?.();
+      await vi.waitFor(() => expect(replySpy).toHaveBeenCalledOnce(), { timeout: 1_075 });
+      const payload = replyPayload();
+      expect(payload.RawBody).toBe(part1 + part2);
+      expect(payload.MessageSid).toBe("302");
     } finally {
       setTimeoutSpy.mockRestore();
     }

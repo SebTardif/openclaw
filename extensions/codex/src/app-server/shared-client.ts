@@ -32,7 +32,10 @@ import {
   resolveCodexAppServerAuthProfileStore,
 } from "./auth-profile.js";
 import { resolveCodexAppServerUserHomeDir } from "./auth-start-options.js";
-import { ensureCodexAppServerClientRuntime } from "./client-runtime.js";
+import {
+  ensureCodexAppServerClientRuntime,
+  recordCodexAppServerAuthHandoff,
+} from "./client-runtime.js";
 import { CodexAppServerClient, isUnsupportedCodexAppServerVersionError } from "./client.js";
 import type { CodexAppServerStartOptions } from "./config-contracts.js";
 import {
@@ -46,6 +49,7 @@ import {
   isCodexDesktopGenerationCurrent,
   waitForCodexDesktopGeneration,
 } from "./desktop-generation.js";
+import { ownCodexInferenceClient } from "./inference-routing.js";
 import { isCodexAppServerProxyLaunch } from "./launch-args.js";
 import {
   isManagedCodexDesktopCommand,
@@ -53,6 +57,7 @@ import {
   resolveManagedCodexNativeCommand,
 } from "./managed-binary.js";
 import { acquireCodexNativeConfigFence } from "./native-config-fence.js";
+import { nativeHookRelayUnregisterQueue } from "./native-hook-relay-state.js";
 import {
   closeRetiredSharedClientEntry,
   closeRetiredSharedClientEntryIfIdle,
@@ -83,7 +88,7 @@ type CodexAppServerClientStartupOptions = {
   startOptions: CodexAppServerStartOptions;
   desktopGeneration?: CodexDesktopGeneration;
   pluginConfig?: unknown;
-  agentDir: string;
+  agentDir?: string;
   authProfileId: string | null | undefined;
   authProfileStore?: AuthProfileStore;
   runtimeArtifactMode?: "capture";
@@ -293,15 +298,13 @@ export function resolveCodexNativeConfigFenceKey(params: {
     return undefined;
   }
   const configuredHome = startOptions.env?.CODEX_HOME?.trim();
-  const agentDir =
-    params.agentDir ?? metadata?.agentDir ?? resolveDefaultAgentDir(params.config ?? {});
   const codexHome = configuredHome
     ? configuredHome
     : startOptions.homeScope === "user"
       ? resolveCodexAppServerUserHomeDir()
-      : agentDir
-        ? resolveCodexAppServerHomeDir(agentDir)
-        : undefined;
+      : resolveCodexAppServerHomeDir(
+          params.agentDir ?? metadata?.agentDir ?? resolveDefaultAgentDir(params.config ?? {}),
+        );
   return codexHome ? `codex-home:${path.resolve(codexHome)}` : undefined;
 }
 
@@ -333,7 +336,7 @@ export type CodexAppServerClientFactory = (
 ) => Promise<CodexAppServerClient>;
 
 type ResolvedCodexAppServerClientStartContext = {
-  agentDir: string;
+  agentDir?: string;
   usesNativeAuth: boolean;
   authProfileId: string | undefined;
   authProfileStore: AuthProfileStore | undefined;
@@ -357,9 +360,14 @@ function inferAuthRequirement(
 async function resolveCodexAppServerClientStartContext(
   options?: CodexAppServerClientOptions,
 ): Promise<ResolvedCodexAppServerClientStartContext> {
-  const agentDir = options?.agentDir ?? resolveDefaultAgentDir(options?.config ?? {});
   const requestedStartOptions =
-    options?.startOptions ?? resolveCodexAppServerRuntimeOptions().start;
+    options?.startOptions ??
+    resolveCodexAppServerRuntimeOptions({ pluginConfig: options?.pluginConfig }).start;
+  const agentDir =
+    options?.agentDir ??
+    (requestedStartOptions.homeScope === "user"
+      ? undefined
+      : resolveDefaultAgentDir(options?.config ?? {}));
   const desktopGeneration = shouldTrackDesktopGeneration(
     requestedStartOptions,
     options?.pluginConfig,
@@ -1143,7 +1151,7 @@ async function startInitializedCodexAppServerClient(
       });
 
       assertStartupCurrent();
-      await waitForStartup(() =>
+      const authHandoff = await waitForStartup(() =>
         applyCodexAppServerAuthProfile({
           client,
           agentDir: params.agentDir,
@@ -1156,6 +1164,16 @@ async function startInitializedCodexAppServerClient(
           ...(params.authProfileStore ? { authProfileStore: params.authProfileStore } : {}),
         }),
       );
+      if (
+        startOptions.transport === "stdio" &&
+        nativeCommandAtStart &&
+        !desktopGeneration &&
+        !isManagedCodexDesktopCommand(startOptions.command) &&
+        !isCodexAppServerProxyLaunch(startOptions.args)
+      ) {
+        ownCodexInferenceClient(client);
+      }
+      recordCodexAppServerAuthHandoff(client, authHandoff);
       if (runtimeArtifactModule && runtimeArtifact) {
         runtimeArtifactModule.bindCodexAppServerRuntimeArtifact(client, runtimeArtifact);
       }
@@ -1350,7 +1368,7 @@ export function captureCodexAppServerClientLifetime(
 function createOlderDesktopGenerationDrainWait(params: {
   generation: CodexDesktopGeneration;
   startOptions: CodexAppServerStartOptions;
-  agentDir: string;
+  agentDir?: string;
 }): { promise: Promise<void>; cancel: () => void } {
   const targetHome = resolveCodexNativeConfigFenceKey({
     startOptions: params.startOptions,
@@ -1467,6 +1485,7 @@ export async function clearSharedCodexAppServerClientAndWait(options?: {
       await Promise.allSettled(lifetime.pending);
     }
     await closing;
+    await nativeHookRelayUnregisterQueue.flush();
   } finally {
     if (state.startup === lifetime) {
       state.startup = createCodexAppServerStartupLifetime();

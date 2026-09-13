@@ -37,6 +37,15 @@ Gateways. It:
   (the same import stays available later under Settings → Import Memory)
 - remains available from the system tray when its window is closed
 
+The window controls share the dashboard's top row. Drag empty header space or a
+session title to move the window, and double-click to maximize or restore it.
+The thin strip below the top resize edge also moves the window. Minimize,
+maximize/restore, and close sit at the top right; the window edges remain
+resizable. Closing the main window leaves OpenClaw available in the system tray.
+When connecting to an older Gateway whose dashboard does not support this layout,
+the companion keeps the system title bar. Update the Gateway to enable the unified
+window controls.
+
 ### First-run setup
 
 Choose **Get started** on the welcome screen, then choose where your assistant
@@ -126,6 +135,11 @@ with a `SHA256SUMS.linux-app.txt` checksum file next to them. Download the
 or mark the AppImage executable and run it directly. The AppImage runtime
 needs FUSE 2 (`sudo apt install libfuse2`, or `libfuse2t64` on Ubuntu 24.04+);
 without it, run the AppImage with `APPIMAGE_EXTRACT_AND_RUN=1`.
+
+Regular stable publication requests Linux bundles automatically after the
+Gateway release becomes visible. Linux build, signing, and publication finish
+independently. While those bundles are pending, the app updater continues to
+offer the previous published Linux version through its original signed download.
 
 Published AMD64 AppImages are built on Ubuntu 22.04 and require glibc 2.35 or
 newer plus a `libstdc++` that provides `GLIBCXX_3.4.30`. Ubuntu 22.04 and
@@ -226,7 +240,7 @@ plain-text reply below the composer. Press `Esc` to dismiss the bar and its repl
 The CLI remains the simplest option for a headless server or VPS. Use a manual
 SSH tunnel when connecting without the Linux desktop companion:
 
-1. Install Node 26 (recommended), or another supported release: Node 22.22.3+, Node 24.15+, or Node 25.9+.
+1. Install Node 26 (recommended), or another supported release: Node 24.16+ or Node 26.1+.
 2. On npm 12 or npm 11.16+, run `npm i -g openclaw@latest --allow-scripts=openclaw`. On npm 11.15 and earlier, omit `--allow-scripts=openclaw`.
 3. `openclaw onboard --install-daemon`
 4. From your laptop: `ssh -N -L 18789:127.0.0.1:18789 <user>@<host>`
@@ -321,8 +335,8 @@ Write a unit by hand only for a custom setup. Minimal user-unit example
 Description=OpenClaw Gateway (profile: <profile>)
 After=network-online.target
 Wants=network-online.target
-StartLimitBurst=5
-StartLimitIntervalSec=60
+StartLimitBurst=10
+StartLimitIntervalSec=300
 
 [Service]
 ExecStart=/usr/local/bin/openclaw gateway --port 18789
@@ -340,6 +354,8 @@ WantedBy=default.target
 ```
 
 Hand-written units do not inherit the adaptive heap sizing that `openclaw gateway install` writes for managed Gateway services. Prefer the managed installer, or set an explicit heap limit in the custom supervisor after accounting for native-memory headroom.
+
+`TimeoutStopSec=330` covers the Gateway's five-minute cooperative drain plus teardown reserve. To inspect the current managed unit body, run `systemctl --user cat openclaw-gateway.service` (or `systemctl --user cat openclaw-gateway-<profile>.service` for a named profile).
 
 Enable it:
 

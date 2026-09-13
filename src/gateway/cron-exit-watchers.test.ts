@@ -1,6 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 import type { CronJob } from "../cron/types.js";
 import { resolveExitWatchShell } from "./cron-exit-watch-shell.js";
 import { createCronExitWatchers, type CronExitResult } from "./cron-exit-watchers.js";
@@ -32,12 +33,11 @@ function makeFakeSupervisor(opts: { deferSpawn?: boolean } = {}) {
       await spawnGate;
       counter += 1;
       const runId = `run-${counter}`;
-      let resolveWait!: (exit: { exitCode: number | null; reason: string }) => void;
-      let rejectWait!: (err: unknown) => void;
-      const waitPromise = new Promise<{ exitCode: number | null; reason: string }>((res, rej) => {
-        resolveWait = res;
-        rejectWait = rej;
-      });
+      const {
+        promise: waitPromise,
+        resolve: resolveWait,
+        reject: rejectWait,
+      } = createDeferred<{ exitCode: number | null; reason: string }>();
       // Pre-attach a no-op catch so a test-driven rejection never escapes as an
       // unhandled rejection if the run loses ownership before it awaits wait().
       waitPromise.catch(() => {});
@@ -148,10 +148,7 @@ describe("createCronExitWatchers", () => {
 
   it("rebinds live watchers but drains callbacks already owned by the previous scheduler", async () => {
     const { supervisor, runs } = makeFakeSupervisor();
-    let releasePersistence = () => {};
-    const persistenceGate = new Promise<void>((resolve) => {
-      releasePersistence = resolve;
-    });
+    const { promise: persistenceGate, resolve: releasePersistence } = createDeferred();
     const releaseCompletion = vi.fn();
     const oldPersistCompletion = vi.fn(async () => {
       await persistenceGate;

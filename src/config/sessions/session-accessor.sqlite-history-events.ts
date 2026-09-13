@@ -1,9 +1,15 @@
-import { sql } from "kysely";
 import type { TranscriptDisplayPosition } from "../../chat/transcript-display-position.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
 } from "../../infra/kysely-sync.js";
+import {
+  resolveHistoryAnchorPageRange,
+  resolveTranscriptPageEnd,
+  type TranscriptAnchorPageOptions,
+  type TranscriptRecentReadLimits,
+} from "../../sessions/transcript-anchor-page.js";
+import type { TranscriptReadWindowOptions } from "../../sessions/transcript-read-window.js";
 import { isVisibleTranscriptRecord } from "../../sessions/transcript-visible-record.js";
 import type {
   SessionTranscriptMessageAnchorPage,
@@ -11,7 +17,6 @@ import type {
 } from "./session-accessor.sqlite-active-events.js";
 import {
   getActiveTranscriptKysely,
-  readTranscriptProjectionGeneration,
   withCurrentProjectionSnapshot,
   type CurrentTranscriptProjection,
   type SessionTranscriptMessageEvent,
@@ -24,124 +29,33 @@ import type {
 } from "./session-accessor.sqlite-contract.js";
 import {
   createTranscriptRawDeltaCursor,
-  readTranscriptRawDelta,
+  readTranscriptRawDeltaFromProjection,
 } from "./session-accessor.sqlite-delta.js";
+import { positionTranscriptDisplayEvents } from "./session-accessor.sqlite-display-position.js";
 import {
-  positionTranscriptDisplayEvents,
-  readTranscriptDisplaySource,
-} from "./session-accessor.sqlite-display-position.js";
+  isVisibleHistoryNonMessageEventSql,
+  parseStoredTranscriptEvent,
+  readHistoricalHistoryAnchorPage,
+  resolveHistoricalHistoryEventById,
+} from "./session-accessor.sqlite-history-interval.js";
+import {
+  assertHistoryReadWindow,
+  captureHistoryReadWindow,
+  resolveHistoryMessageSequence,
+  resolveVisibleHistoryProjection,
+  resolveVisibleHistoryRange,
+  type VisibleHistoryBoundary,
+  type VisibleHistoryProjection,
+} from "./session-accessor.sqlite-history-projection.js";
 import {
   assertVisibleMessageRangeJson,
   hasUnindexedVisibleMessages,
   iterateVisibleMessageRange,
-  readVisibleMessageMetadata,
+  iterateVisibleMessageMetadata,
   readVisibleMessageRange,
   resolveVisibleMessagePositions,
 } from "./session-accessor.sqlite-reset-window.js";
 import { MAX_VISIBLE_MESSAGE_MAX_MESSAGES } from "./session-accessor.sqlite-visible-cursor.js";
-
-type VisibleHistoryBoundary = {
-  displayPosition: number;
-  eventId: string;
-  eventSeq: number;
-  messagePosition: number;
-  serializedBytes: number;
-};
-
-type VisibleHistoryProjection = {
-  boundaries: VisibleHistoryBoundary[];
-  displaySource?: string;
-  total: number;
-};
-
-function resolveVisibleHistoryProjection(
-  projection: CurrentTranscriptProjection,
-): VisibleHistoryProjection {
-  const displaySource = readTranscriptDisplaySource(projection);
-  if (projection.state.activeEventCount === projection.state.activeMessageCount) {
-    return { boundaries: [], displaySource, total: projection.state.activeMessageCount };
-  }
-  const visibleMessages = resolveVisibleMessagePositions(projection);
-  const db = getActiveTranscriptKysely(projection.database);
-  const rows = executeSqliteQuerySync(
-    projection.database.db,
-    db
-      .selectFrom("session_transcript_active_events as active")
-      .innerJoin("transcript_event_identities as identity", (join) =>
-        join
-          .onRef("identity.session_id", "=", "active.session_id")
-          .onRef("identity.seq", "=", "active.event_seq"),
-      )
-      .innerJoin("transcript_events as event", (join) =>
-        join
-          .onRef("event.session_id", "=", "active.session_id")
-          .onRef("event.seq", "=", "active.event_seq"),
-      )
-      .select([
-        "identity.event_id",
-        "identity.event_type",
-        "identity.seq",
-        /* kysely-allow-raw: history byte caps include each event's JSONL newline. */
-        sql<number>`OCTET_LENGTH(event.event_json) + 1`.as("serialized_bytes"),
-      ])
-      .select((eb) =>
-        eb
-          .selectFrom("session_transcript_active_events as next")
-          .select("next.message_position")
-          .whereRef("next.session_id", "=", "active.session_id")
-          .whereRef("next.active_position", ">", "active.active_position")
-          .where("next.message_position", "is not", null)
-          .orderBy("next.active_position", "asc")
-          .limit(1)
-          .as("next_message_position"),
-      )
-      .where("active.session_id", "=", projection.resolved.sessionId)
-      .where("identity.event_type", "in", ["compaction", "reset"])
-      .orderBy("active.active_position", "asc"),
-  ).rows;
-  const resetIndex = rows.findLastIndex((row) => row.event_type === "reset");
-  const visibleRows = rows.slice(Math.max(0, resetIndex));
-  const boundaries = visibleRows.map((row, index): VisibleHistoryBoundary => {
-    // Kept messages precede the latest reset; later markers share its logical window.
-    // Rebase raw positions so discarded messages cannot shift those markers.
-    const nextMessagePosition = row.next_message_position ?? projection.state.activeMessageCount;
-    const messagePosition =
-      visibleMessages.kept.length + Math.max(0, nextMessagePosition - visibleMessages.postStart);
-    return {
-      displayPosition: messagePosition + index,
-      eventId: row.event_id,
-      eventSeq: row.seq,
-      messagePosition,
-      serializedBytes: row.serialized_bytes,
-    };
-  });
-  return {
-    boundaries,
-    displaySource,
-    total: visibleMessages.total + boundaries.length,
-  };
-}
-
-function resolveVisibleHistoryRange(
-  history: VisibleHistoryProjection,
-  start: number,
-  endExclusive: number,
-) {
-  const boundedStart = Math.min(Math.max(0, start), history.total);
-  const boundedEnd = Math.min(Math.max(boundedStart, endExclusive), history.total);
-  const selectedBoundaries = history.boundaries.filter(
-    (boundary) => boundary.displayPosition >= boundedStart && boundary.displayPosition < boundedEnd,
-  );
-  const boundaries = new Map(
-    selectedBoundaries.map((boundary) => [boundary.displayPosition, boundary] as const),
-  );
-  const boundariesBefore = history.boundaries.filter(
-    (boundary) => boundary.displayPosition < boundedStart,
-  ).length;
-  const messageStart = boundedStart - boundariesBefore;
-  const messageEnd = messageStart + boundedEnd - boundedStart - selectedBoundaries.length;
-  return { boundedEnd, boundedStart, boundaries, messageEnd, messageStart };
-}
 
 function readBoundaryEvents(
   projection: CurrentTranscriptProjection,
@@ -171,10 +85,17 @@ function readBoundaryEvents(
         )
         .select(["event.seq", "event.event_json"])
         .where("active.session_id", "=", projection.resolved.sessionId)
-        .where("identity.event_type", "in", ["compaction", "reset"])
+        .where((eb) =>
+          isVisibleHistoryNonMessageEventSql(
+            eb.ref("identity.event_type"),
+            eb.ref("event.event_json"),
+            eb.ref("active.event_seq"),
+            eb.ref("event.seq"),
+          ),
+        )
         .where("identity.seq", ">=", firstSeq)
         .where("identity.seq", "<=", lastSeq),
-    ).rows.map((row) => [row.seq, JSON.parse(row.event_json) as TranscriptEvent]),
+    ).rows.map((row) => [row.seq, parseStoredTranscriptEvent(row.event_json)]),
   );
 }
 
@@ -241,67 +162,81 @@ function resolveRecentHistoryStart(
   // No result can include more than maxMessages events, so older metadata would
   // only add synchronous work before the backward scan stops.
   const metadataStart = Math.max(messageStart, messageEnd - maxMessages);
-  const messageBytes = new Map(
-    readVisibleMessageMetadata(projection, metadataStart, messageEnd).map((row) => [
-      row.logicalPosition,
-      row.serialized_bytes,
-    ]),
-  );
+  const metadata = iterateVisibleMessageMetadata(projection, metadataStart, messageEnd, "desc");
+  let nextMetadata: ReturnType<typeof metadata.next> | undefined;
   let messageIndex = messageEnd - 1;
   let selectedStart = boundedEnd;
   let selectedCount = 0;
   let bytes = 0;
-  for (
-    let displayPosition = boundedEnd - 1;
-    displayPosition >= boundedStart;
-    displayPosition -= 1
-  ) {
-    if (selectedCount >= maxMessages) {
-      break;
+  try {
+    for (
+      let displayPosition = boundedEnd - 1;
+      displayPosition >= boundedStart;
+      displayPosition -= 1
+    ) {
+      if (selectedCount >= maxMessages) {
+        break;
+      }
+      const boundary = boundaries.get(displayPosition);
+      let serializedBytes = boundary?.serializedBytes;
+      if (!boundary) {
+        nextMetadata ??= metadata.next();
+        if (!nextMetadata.done && nextMetadata.value.logicalPosition === messageIndex) {
+          serializedBytes = nextMetadata.value.serialized_bytes;
+          nextMetadata = undefined;
+        }
+        messageIndex -= 1;
+      }
+      if (serializedBytes === undefined) {
+        continue;
+      }
+      if ((!allowOversizedFirst || selectedCount > 0) && bytes + serializedBytes > maxBytes) {
+        break;
+      }
+      selectedStart = displayPosition;
+      selectedCount += 1;
+      bytes += serializedBytes;
     }
-    const boundary = boundaries.get(displayPosition);
-    const logicalPosition = boundary ? undefined : messageIndex--;
-    const serializedBytes =
-      boundary?.serializedBytes ??
-      (logicalPosition === undefined ? undefined : messageBytes.get(logicalPosition));
-    if (serializedBytes === undefined) {
-      continue;
-    }
-    if ((!allowOversizedFirst || selectedCount > 0) && bytes + serializedBytes > maxBytes) {
-      break;
-    }
-    selectedStart = displayPosition;
-    selectedCount += 1;
-    bytes += serializedBytes;
+  } finally {
+    metadata.return?.();
   }
   return selectedStart;
 }
+
+type SessionTranscriptMessageById = SessionTranscriptMessageEvent & { serializedBytes?: number };
+export type SessionTranscriptMessageByIdOptions =
+  | { currentOnly?: false; maxBytes?: never }
+  | { currentOnly: true; maxBytes: number };
 
 function readVisibleMessageById(
   projection: CurrentTranscriptProjection,
   eventId: string,
   history: VisibleHistoryProjection,
-): SessionTranscriptMessageEvent | undefined {
+  maxBytes?: number,
+): SessionTranscriptMessageById | undefined {
   const db = getActiveTranscriptKysely(projection.database);
-  const row = executeSqliteQueryTakeFirstSync(
-    projection.database.db,
-    db
-      .selectFrom("transcript_event_identities as identity")
-      .innerJoin("session_transcript_active_events as active", (join) =>
-        join
-          .onRef("active.session_id", "=", "identity.session_id")
-          .onRef("active.event_seq", "=", "identity.seq"),
-      )
-      .innerJoin("transcript_events as event", (join) =>
-        join
-          .onRef("event.session_id", "=", "active.session_id")
-          .onRef("event.seq", "=", "active.event_seq"),
-      )
-      .select(["active.event_seq", "active.message_position", "event.event_json"])
-      .where("identity.session_id", "=", projection.resolved.sessionId)
-      .where("identity.event_id", "=", eventId)
-      .where("active.message_position", "is not", null),
-  );
+  let query = db
+    .selectFrom("transcript_event_identities as identity")
+    .innerJoin("session_transcript_active_events as active", (join) =>
+      join
+        .onRef("active.session_id", "=", "identity.session_id")
+        .onRef("active.event_seq", "=", "identity.seq"),
+    )
+    .innerJoin("transcript_events as event", (join) =>
+      join
+        .onRef("event.session_id", "=", "active.session_id")
+        .onRef("event.seq", "=", "active.event_seq"),
+    )
+    .select(["active.event_seq", "active.message_position", "event.event_json"])
+    .where("identity.session_id", "=", projection.resolved.sessionId)
+    .where("identity.event_id", "=", eventId)
+    .where("active.message_position", "is not", null);
+  if (maxBytes !== undefined) {
+    query = query.where((eb) =>
+      eb(eb.fn<number>("octet_length", ["event.event_json"]), "<=", maxBytes),
+    );
+  }
+  const row = executeSqliteQueryTakeFirstSync(projection.database.db, query);
   if (!row || row.message_position === null) {
     return undefined;
   }
@@ -313,43 +248,37 @@ function readVisibleMessageById(
   return seq === undefined
     ? undefined
     : {
-        event: JSON.parse(row.event_json) as TranscriptEvent,
+        event: parseStoredTranscriptEvent(row.event_json),
         eventSeq: row.event_seq,
         seq,
+        ...(maxBytes !== undefined
+          ? { serializedBytes: Buffer.byteLength(row.event_json, "utf8") }
+          : {}),
       };
-}
-
-function resolveHistoryMessageSequence(
-  visible: ReturnType<typeof resolveVisibleMessagePositions>,
-  history: VisibleHistoryProjection,
-  messagePosition: number,
-): number | undefined {
-  const logicalPosition =
-    messagePosition >= visible.postStart
-      ? visible.kept.length + messagePosition - visible.postStart
-      : visible.kept.indexOf(messagePosition);
-  if (logicalPosition < 0) {
-    return undefined;
-  }
-  const precedingBoundaries = history.boundaries.filter(
-    (candidate) => candidate.messagePosition <= logicalPosition,
-  ).length;
-  return logicalPosition + 1 + precedingBoundaries;
 }
 
 function resolveHistoryEventById(
   projection: CurrentTranscriptProjection,
   eventId: string,
   history = resolveVisibleHistoryProjection(projection),
-): SessionTranscriptMessageEvent | undefined {
+  maxBytes?: number,
+): SessionTranscriptMessageById | undefined {
   const boundary = history.boundaries.find((candidate) => candidate.eventId === eventId);
   if (boundary) {
+    if (maxBytes !== undefined && boundary.serializedBytes > maxBytes) {
+      return undefined;
+    }
     const event = readBoundaryEvents(projection, [boundary]).get(boundary.eventSeq);
     return event
-      ? { event, eventSeq: boundary.eventSeq, seq: boundary.displayPosition + 1 }
+      ? {
+          event,
+          eventSeq: boundary.eventSeq,
+          seq: boundary.displayPosition + 1,
+          ...(maxBytes !== undefined ? { serializedBytes: boundary.serializedBytes } : {}),
+        }
       : undefined;
   }
-  return readVisibleMessageById(projection, eventId, history);
+  return readVisibleMessageById(projection, eventId, history, maxBytes);
 }
 
 type SessionTranscriptRawDeltaPage = Extract<SessionTranscriptRawDeltaResult, { kind: "page" }>;
@@ -373,11 +302,12 @@ export function readTranscriptDisplayDelta(
 ): SessionTranscriptDisplayDeltaResult {
   const readLimits = { ...limits };
   return withCurrentProjectionSnapshot(scope, (projection) => {
-    // The nested raw read shares this deferred transaction; cursor progress and
-    // display placement must describe the same active branch and generation.
-    const result = readTranscriptRawDelta(scope, readLimits);
+    const result = readTranscriptRawDeltaFromProjection(projection, readLimits);
     if (result.kind !== "page") {
       return result;
+    }
+    if (result.events.length === 0) {
+      return { ...result, activeLeafEntryId: projection.state.leafEventId };
     }
     const history = resolveVisibleHistoryProjection(projection);
     const visible = resolveVisibleMessagePositions(projection);
@@ -403,6 +333,13 @@ export function readTranscriptDisplayDelta(
               : resolveHistoryMessageSequence(visible, history, row.message_position),
           ]),
     );
+    if (firstSeq !== undefined && lastSeq !== undefined) {
+      for (const boundary of history.boundaries) {
+        if (boundary.eventSeq >= firstSeq && boundary.eventSeq <= lastSeq) {
+          sequences.set(boundary.eventSeq, boundary.displayPosition + 1);
+        }
+      }
+    }
     const events = positionTranscriptDisplayEvents(
       projection,
       history.displaySource,
@@ -424,106 +361,140 @@ export function readSessionTranscriptHistoryEvents(
   });
 }
 
-export function readRecentSessionTranscriptHistoryEvents(
-  scope: SessionTranscriptReadScope,
-  options: { maxBytes: number; maxLines: number; maxMessages: number },
+function readRecentHistoryInSnapshot(
+  projection: CurrentTranscriptProjection,
+  history: VisibleHistoryProjection,
+  options: TranscriptRecentReadLimits & TranscriptReadWindowOptions,
 ): SessionTranscriptMessageEventPage {
-  return withCurrentProjectionSnapshot(scope, (projection) => {
-    const history = resolveVisibleHistoryProjection(projection);
-    const generation = readTranscriptProjectionGeneration(projection);
-    const deltaCursor = generation
-      ? createTranscriptRawDeltaCursor({
-          agentId: projection.resolved.agentId,
-          generation,
-          lastSeq: projection.state.indexedSeq,
-          sessionId: projection.resolved.sessionId,
-        })
-      : undefined;
-    const maxMessages = Math.min(
-      MAX_VISIBLE_MESSAGE_MAX_MESSAGES,
-      Math.max(0, Math.floor(Number.isFinite(options.maxMessages) ? options.maxMessages : 0)),
-    );
-    const maxLines = Math.max(
-      0,
-      Math.floor(Number.isFinite(options.maxLines) ? options.maxLines : 0),
-    );
-    if (maxMessages === 0 || maxLines === 0) {
-      return {
-        activeLeafEntryId: projection.state.leafEventId,
-        ...(deltaCursor ? { deltaCursor } : {}),
-        events: [],
-        displaySource: history.displaySource,
-        totalMessages: history.total,
-      };
-    }
-    const maxBytes = Math.max(
-      1024,
-      Math.floor(Number.isFinite(options.maxBytes) ? options.maxBytes : 8 * 1024 * 1024),
-    );
-    const selectedStart = resolveRecentHistoryStart(
-      projection,
-      Math.max(0, history.total - maxLines),
-      history.total,
-      history,
-      maxBytes,
-      maxMessages,
-    );
+  assertHistoryReadWindow(projection, history, options.expectedReadWindow);
+  const generation = projection.generation;
+  const deltaCursor = generation
+    ? createTranscriptRawDeltaCursor({
+        agentId: projection.resolved.agentId,
+        generation,
+        lastSeq: projection.state.indexedSeq,
+        sessionId: projection.resolved.sessionId,
+      })
+    : undefined;
+  const maxMessages = Math.min(
+    MAX_VISIBLE_MESSAGE_MAX_MESSAGES,
+    Math.max(0, Math.floor(Number.isFinite(options.maxMessages) ? options.maxMessages : 0)),
+  );
+  const maxLines = Math.max(
+    0,
+    Math.floor(Number.isFinite(options.maxLines) ? options.maxLines : 0),
+  );
+  if (maxMessages === 0 || maxLines === 0) {
     return {
       activeLeafEntryId: projection.state.leafEventId,
       ...(deltaCursor ? { deltaCursor } : {}),
-      events: readVisibleHistoryRange(projection, selectedStart, history.total, history),
+      events: [],
       displaySource: history.displaySource,
       totalMessages: history.total,
+      ...(options.captureReadWindow ? { readWindow: captureHistoryReadWindow(history, []) } : {}),
     };
-  });
+  }
+  const maxBytes = Math.max(
+    1024,
+    Math.floor(Number.isFinite(options.maxBytes) ? options.maxBytes : 8 * 1024 * 1024),
+  );
+  const selectedStart = resolveRecentHistoryStart(
+    projection,
+    Math.max(0, history.total - maxLines),
+    history.total,
+    history,
+    maxBytes,
+    maxMessages,
+  );
+  const events = readVisibleHistoryRange(projection, selectedStart, history.total, history);
+  return {
+    activeLeafEntryId: projection.state.leafEventId,
+    ...(deltaCursor ? { deltaCursor } : {}),
+    events,
+    displaySource: history.displaySource,
+    totalMessages: history.total,
+    ...(options.captureReadWindow ? { readWindow: captureHistoryReadWindow(history, events) } : {}),
+  };
+}
+
+export function readRecentSessionTranscriptHistoryEvents(
+  scope: SessionTranscriptReadScope,
+  options: TranscriptRecentReadLimits & TranscriptReadWindowOptions,
+): SessionTranscriptMessageEventPage {
+  return withCurrentProjectionSnapshot(scope, (projection) =>
+    readRecentHistoryInSnapshot(projection, resolveVisibleHistoryProjection(projection), options),
+  );
 }
 
 export function readSessionTranscriptHistoryEventPage(
   scope: SessionTranscriptReadScope,
-  options: { maxMessages: number; offset: number; maxBytes?: number },
+  options: {
+    maxMessages: number;
+    offset: number;
+    beforeSeq?: number;
+    maxBytes?: number;
+    readOnly?: boolean;
+    recentAtHead?: TranscriptRecentReadLimits;
+  } & TranscriptReadWindowOptions,
 ): SessionTranscriptMessageEventPage {
-  return withCurrentProjectionSnapshot(scope, (projection) => {
-    const history = resolveVisibleHistoryProjection(projection);
-    const offset = Math.min(
-      Math.max(0, Math.floor(Number.isFinite(options.offset) ? options.offset : 0)),
-      history.total,
-    );
-    const maxMessages = Math.max(
-      0,
-      Math.floor(Number.isFinite(options.maxMessages) ? options.maxMessages : 0),
-    );
-    const endExclusive = Math.max(0, history.total - offset);
-    const requestedStart = Math.max(0, endExclusive - maxMessages);
-    const boundedStart =
-      options.maxBytes === undefined
-        ? requestedStart
-        : resolveRecentHistoryStart(
-            projection,
-            requestedStart,
-            endExclusive,
-            history,
-            Math.max(
-              1024,
-              Math.floor(Number.isFinite(options.maxBytes) ? options.maxBytes : 1024 * 1024),
-            ),
-            maxMessages,
-            false,
-          );
-    // A single oversized event must not defeat the hard limit or trap pagination.
-    // Skip its source position explicitly; callers disclose the omission to readers.
-    const omittedOversized = maxMessages > 0 && endExclusive > 0 && boundedStart === endExclusive;
-    const consumedStart = omittedOversized ? endExclusive - 1 : boundedStart;
-    return {
-      activeLeafEntryId: projection.state.leafEventId,
-      events: readVisibleHistoryRange(projection, boundedStart, endExclusive, history),
-      displaySource: history.displaySource,
-      totalMessages: history.total,
-      ...(options.maxBytes !== undefined && maxMessages > 0 && consumedStart > 0
-        ? { olderOffset: history.total - consumedStart }
-        : {}),
-      ...(omittedOversized ? { omittedOversized: true } : {}),
-    };
-  });
+  return withCurrentProjectionSnapshot(
+    scope,
+    (projection) => {
+      const history = resolveVisibleHistoryProjection(projection);
+      const endExclusive = resolveTranscriptPageEnd(history.total, options);
+      if (options.recentAtHead && endExclusive === history.total) {
+        return readRecentHistoryInSnapshot(projection, history, {
+          ...options.recentAtHead,
+          captureReadWindow: options.captureReadWindow,
+          expectedReadWindow: options.expectedReadWindow,
+        });
+      }
+      assertHistoryReadWindow(projection, history, options.expectedReadWindow);
+      const maxMessages = Math.max(
+        0,
+        Math.floor(Number.isFinite(options.maxMessages) ? options.maxMessages : 0),
+      );
+      const requestedStart = Math.max(0, endExclusive - maxMessages);
+      const boundedStart =
+        options.maxBytes === undefined
+          ? requestedStart
+          : resolveRecentHistoryStart(
+              projection,
+              requestedStart,
+              endExclusive,
+              history,
+              Math.max(
+                1024,
+                Math.floor(Number.isFinite(options.maxBytes) ? options.maxBytes : 1024 * 1024),
+              ),
+              maxMessages,
+              false,
+            );
+      // A single oversized event must not defeat the hard limit or trap pagination.
+      // Skip its source position explicitly; callers disclose the omission to readers.
+      const omittedOversized = maxMessages > 0 && endExclusive > 0 && boundedStart === endExclusive;
+      const consumedStart = omittedOversized ? endExclusive - 1 : boundedStart;
+      const events = readVisibleHistoryRange(projection, boundedStart, endExclusive, history);
+      return {
+        activeLeafEntryId: projection.state.leafEventId,
+        events,
+        displaySource: history.displaySource,
+        totalMessages: history.total,
+        ...(options.maxBytes !== undefined && maxMessages > 0 && consumedStart > 0
+          ? {
+              olderOffset:
+                resolveTranscriptPageEnd(history.total, { beforeSeq: options.beforeSeq }) -
+                consumedStart,
+            }
+          : {}),
+        ...(omittedOversized ? { omittedOversized: true } : {}),
+        ...(options.captureReadWindow
+          ? { readWindow: captureHistoryReadWindow(history, events) }
+          : {}),
+      };
+    },
+    options,
+  );
 }
 
 export function readSessionTranscriptHistoryEventCount(scope: SessionTranscriptReadScope): number {
@@ -536,13 +507,22 @@ export function readSessionTranscriptHistoryEventCount(scope: SessionTranscriptR
 export function readSessionTranscriptHistoryEventById(
   scope: SessionTranscriptReadScope,
   eventId: string,
-): SessionTranscriptMessageEvent | undefined {
+  options: SessionTranscriptMessageByIdOptions = {},
+): SessionTranscriptMessageById | undefined {
   return withCurrentProjectionSnapshot(scope, (projection) => {
     const history = resolveVisibleHistoryProjection(projection);
-    const event = resolveHistoryEventById(projection, eventId, history);
-    return event
-      ? positionTranscriptDisplayEvents(projection, history.displaySource, [event])[0]
-      : undefined;
+    const event: SessionTranscriptMessageById | undefined =
+      resolveHistoryEventById(projection, eventId, history, options.maxBytes) ??
+      (options.currentOnly ? undefined : resolveHistoricalHistoryEventById(projection, eventId));
+    if (!event) {
+      return undefined;
+    }
+    const positioned = positionTranscriptDisplayEvents(projection, history.displaySource, [
+      event,
+    ])[0];
+    return positioned && event.serializedBytes !== undefined
+      ? { ...positioned, serializedBytes: event.serializedBytes }
+      : positioned;
   });
 }
 
@@ -598,37 +578,33 @@ export function readSessionTranscriptHistoryEventLookup(
 
 export function readSessionTranscriptHistoryAnchorPage(
   scope: SessionTranscriptReadScope,
-  options: { maxMessages: number; messageId: string },
+  options: TranscriptAnchorPageOptions,
 ): SessionTranscriptMessageAnchorPage {
   return withCurrentProjectionSnapshot(scope, (projection) => {
     const history = resolveVisibleHistoryProjection(projection);
+    assertHistoryReadWindow(projection, history, options.expectedReadWindow);
     const anchor = resolveHistoryEventById(projection, options.messageId, history);
     if (!anchor) {
-      return {
-        events: [],
-        found: false,
-        hasOverreadContext: false,
-        offset: 0,
-        displaySource: history.displaySource,
-        totalMessages: history.total,
-      };
+      // Explicit anchors reopen the closed reset interval that still contains the
+      // active-path row. Unanchored history and current-display lookup stay
+      // latest-reset-relative; missing or off-path IDs stay not-found.
+      return (
+        readHistoricalHistoryAnchorPage(projection, history.displaySource, options) ?? {
+          events: [],
+          found: false,
+          hasOverreadContext: false,
+          offset: 0,
+          displaySource: history.displaySource,
+          totalMessages: history.total,
+        }
+      );
     }
-    const pageSize = Math.max(
-      1,
-      Math.floor(Number.isFinite(options.maxMessages) ? options.maxMessages : 1),
-    );
-    const anchorPosition = anchor.seq - 1;
-    const newerMessages = Math.floor(pageSize / 2);
-    const olderMessages = pageSize - newerMessages - 1;
-    const latestStart = Math.max(0, history.total - pageSize);
-    const start = Math.min(Math.max(0, anchorPosition - olderMessages), latestStart);
-    const endExclusive = Math.min(history.total, start + pageSize);
-    const readStart = Math.max(0, start - 1);
+    const range = resolveHistoryAnchorPageRange(history.total, anchor.seq - 1, options);
     return {
-      events: readVisibleHistoryRange(projection, readStart, endExclusive, history),
+      events: readVisibleHistoryRange(projection, range.readStart, range.endExclusive, history),
       found: true,
-      hasOverreadContext: readStart < start,
-      offset: history.total - endExclusive,
+      hasOverreadContext: range.hasOverreadContext,
+      offset: range.offset,
       displaySource: history.displaySource,
       totalMessages: history.total,
     };

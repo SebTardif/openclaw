@@ -6,7 +6,6 @@ import {
   type SessionTranscriptCorpusEntry,
 } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 import {
-  MEMORY_INDEX_FTS_TABLE,
   runWithConcurrency,
   type MemorySource,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
@@ -30,55 +29,51 @@ import type {
   MemorySyncProgressState,
 } from "./manager-sync-base.js";
 
-const FTS_TABLE = MEMORY_INDEX_FTS_TABLE;
-const SOURCE_SYNC_YIELD_EVERY = 10;
+const SOURCE_SYNC_YIELD_INTERVAL_MS = 12;
 const SOURCE_WIDE_SESSION_INDEX_FLUSH_FILES = 128;
 const log = createSubsystemLogger("memory");
 
 function createSourceSyncYield(total: number): () => Promise<void> {
   let completed = 0;
+  let workStartedAt = performance.now();
+  let pendingYield: Promise<void> | undefined;
   return async () => {
     completed += 1;
-    if (completed < total && completed % SOURCE_SYNC_YIELD_EVERY === 0) {
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
+    if (
+      !pendingYield &&
+      completed < total &&
+      performance.now() - workStartedAt >= SOURCE_SYNC_YIELD_INTERVAL_MS
+    ) {
+      // Every worker joins the same pause so another worker cannot keep
+      // admitting synchronous work while the event loop is waiting to run.
+      pendingYield = new Promise<void>((resolve) => {
+        setImmediate(() => {
+          workStartedAt = performance.now();
+          pendingYield = undefined;
+          resolve();
+        });
       });
+    }
+    if (pendingYield) {
+      await pendingYield;
     }
   };
 }
 
 export abstract class MemoryManagerSourceSyncOps extends MemoryManagerSessionSyncOps {
-  protected clearIndexedFileData(pathname: string, source: MemorySource): void {
-    this.deleteVectorRowsForSource(pathname, source);
-    if (this.fts.enabled && this.fts.available) {
-      try {
-        // Lexical search is model-agnostic; remove every model for this source.
-        this.db
-          .prepare(`DELETE FROM ${FTS_TABLE} WHERE path = ? AND source = ?`)
-          .run(pathname, source);
-      } catch {}
-    }
-    this.db
-      .prepare("DELETE FROM memory_index_chunks WHERE path = ? AND source = ?")
-      .run(pathname, source);
-  }
-
   protected async deleteIndexedFile(
     pathname: string,
     source: MemorySource,
     expectedHash = resolveMemorySourceExistingHash({ db: this.db, path: pathname, source }),
   ): Promise<void> {
-    await runSqliteImmediateTransaction(this.db, async () => () => {
-      if (
-        resolveMemorySourceExistingHash({ db: this.db, path: pathname, source }) !== expectedHash
-      ) {
-        return;
-      }
-      this.clearIndexedFileData(pathname, source);
-      this.db
-        .prepare("DELETE FROM memory_index_sources WHERE path = ? AND source = ?")
-        .run(pathname, source);
-    });
+    await runSqliteImmediateTransaction(
+      this.db,
+      async () => () => {
+        this.database.sourceIndex.deleteIfCurrent({ path: pathname, source, expectedHash });
+      },
+      undefined,
+      (write) => this.withDatabaseWrite(write),
+    );
   }
 
   private async deleteStaleSourceFiles(
@@ -309,6 +304,8 @@ export abstract class MemoryManagerSourceSyncOps extends MemoryManagerSessionSyn
                 entry.path,
                 entry.hash,
               ).changes === 1,
+            undefined,
+            (write) => this.withDatabaseWrite(write),
           ))
         ) {
           throw new MemoryIndexRevisionConflictError(

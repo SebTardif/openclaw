@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 350377,
-  "reason": "Current main b6a4d0dad430 measures 350377 B startup gzip in Linux CI after integrated UI changes (+812 B, 0.23%); pristine-main and candidate builds measured 350363 B and 350380 B, within the existing 64 B variance allowance. Fixed 358400 B cap and existing growth allowance retained.",
-  "updatedAt": "2026-09-04"
+  "startupJsGzipBytes": 355740,
+  "reason": "Current main measures 355740 B gzip after integrated UI changes; main CI fails the previous 355719 B enforcement limit. The spacing-only candidate measures 355769 B with identical raw startup JavaScript bytes, within the existing 64 B build-variance allowance of main. The 358400 B cap and existing 512 B growth and 64 B variance allowances remain unchanged.",
+  "updatedAt": "2026-09-13"
 }

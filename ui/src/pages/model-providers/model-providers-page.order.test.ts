@@ -5,6 +5,7 @@ import type {
   ModelsAuthLogoutParams,
   ModelsAuthOrderSetParams,
 } from "../../../../packages/gateway-protocol/src/schema/agents-models-skills.js";
+import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import type { ModelAuthStatusProfile } from "../../api/types.ts";
 import {
   getRenderedModalDialog,
@@ -17,7 +18,7 @@ import {
   appendPage,
   createAuthStatus,
   createHarness,
-  deferred,
+  waitForProviders,
   requestCount,
 } from "./model-providers-page.test-support.ts";
 
@@ -27,6 +28,31 @@ afterEach(() => {
 });
 
 describe("ModelProvidersPage profile actions", () => {
+  it("keeps a committed logout refresh warning in the visible success message", async () => {
+    const shell = document.body.appendChild(document.createElement("div"));
+    shell.className = "shell";
+    const toast = shell.appendChild(document.createElement("openclaw-toast-host"));
+    const { context, request } = createHarness("main");
+    const page = appendPage(context);
+    await waitForProviders(page);
+    const original = request.getMockImplementation()!;
+    request.mockImplementation(async (method) =>
+      method === "models.authLogout"
+        ? {
+            provider: "openai",
+            removedProfiles: ["openai:one"],
+            abortedRunIds: [],
+            warning: "Restart the Gateway to apply removal.",
+          }
+        : original(method),
+    );
+    await page.profileActions.logout("openai", { provider: "openai", profileIds: ["openai:one"] });
+    await waitForFast(() =>
+      expect(toast.textContent).toContain("Restart the Gateway to apply removal."),
+    );
+    expect(toast.textContent).toContain("Logged out.");
+  });
+
   it.each([
     { name: "reorder", profileIds: ["openai:two", "openai:one"] },
     { name: "Reset", profileIds: null },
@@ -37,6 +63,7 @@ describe("ModelProvidersPage profile actions", () => {
     const toast = shell.appendChild(document.createElement("openclaw-toast-host"));
     const { context, request, snapshot } = createHarness("main");
     snapshot.hello = {
+      ...snapshot.hello,
       type: "hello-ok",
       protocol: 3,
       auth: { role: "operator", scopes: ["operator.admin"] },
@@ -87,7 +114,7 @@ describe("ModelProvidersPage profile actions", () => {
   it("keeps the latest queued order through paused and resumed configuration work", async () => {
     const { context, notifyRuntimeConfig, request, runtimeConfig } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     const originalRequest = request.getMockImplementation()!;
     const firstSave = deferred<unknown>();
     request.mockImplementation(async (method: string, params?: unknown) => {
@@ -127,6 +154,7 @@ describe("ModelProvidersPage profile actions", () => {
   it("discards a detached page's queued order before a replacement page saves", async () => {
     const { context, request, snapshot } = createHarness("main");
     snapshot.hello = {
+      ...snapshot.hello,
       type: "hello-ok",
       protocol: 3,
       auth: { role: "operator", scopes: ["operator.admin"] },
@@ -171,6 +199,7 @@ describe("ModelProvidersPage profile actions", () => {
       );
     };
     const oldPage = appendPage(context);
+    await waitForProviders(oldPage);
     await waitForFast(() => expect(rows(oldPage)).toHaveLength(3));
     moveFirstAccount(oldPage, "down");
     await oldPage.updateComplete;
@@ -181,6 +210,7 @@ describe("ModelProvidersPage profile actions", () => {
 
     oldPage.remove();
     const replacementPage = appendPage(context);
+    await waitForProviders(replacementPage);
     await waitForFast(() =>
       expect(rows(replacementPage)).toEqual(["openai:two", "openai:one", "openai:three"]),
     );
@@ -203,10 +233,9 @@ describe("ModelProvidersPage profile actions", () => {
   it("keeps a saved auth-owner order on every alias route", async () => {
     const { context, request } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     page.data = {
       ...EMPTY_MODEL_PROVIDERS_DATA,
-      config: {},
       authStatus: createAuthStatus([
         ...["claude-cli", "anthropic"].map((provider) => ({
           provider,
@@ -244,7 +273,7 @@ describe("ModelProvidersPage profile actions", () => {
   it("keeps a saved profile order when an older refresh finishes afterward", async () => {
     const { context, request } = createHarness("main");
     const page = appendPage(context);
-    await waitForFast(() => expect(page.data?.config).toEqual({}));
+    await waitForProviders(page);
     const originalRequest = request.getMockImplementation()!;
     const staleStatus = deferred<unknown>();
     const authStatus = createAuthStatus([
@@ -264,7 +293,6 @@ describe("ModelProvidersPage profile actions", () => {
     };
     page.data = {
       ...EMPTY_MODEL_PROVIDERS_DATA,
-      config: {},
       authStatus,
       updatedAt: 1,
     };
@@ -282,7 +310,7 @@ describe("ModelProvidersPage profile actions", () => {
       return originalRequest(method);
     });
 
-    const refreshing = page.refresh({ force: true });
+    const refreshing = page.refresh("forced");
     await vi.waitFor(() => expect(requestCount(request, "models.authStatus")).toBe(1));
     page.profileActions.setOrder("openai", "openai", ["openai:two", "openai:one"]);
     await vi.waitFor(() => expect(requestCount(request, "models.authOrderSet")).toBe(1));
@@ -301,12 +329,13 @@ describe("ModelProvidersPage profile actions", () => {
     const { agentSelection, context, notifySelection, publishPhase, request, snapshot } =
       createHarness("writer");
     snapshot.hello = {
+      ...snapshot.hello,
       type: "hello-ok",
       protocol: 3,
       auth: { role: "operator", scopes: ["operator.admin"] },
     };
     const originalRequest = request.getMockImplementation()!;
-    const logout = deferred<void>();
+    const logout = deferred();
     let failLogout = true;
     let profiles: ModelAuthStatusProfile[] = [
       {
@@ -355,6 +384,7 @@ describe("ModelProvidersPage profile actions", () => {
       const openConfirmation = async () => {
         // Separate user clicks so the previous confirmation can settle.
         await nextFrame();
+        await waitForProviders(page);
         await waitForFast(() =>
           expect(page.querySelectorAll(".model-providers__profile")).toHaveLength(2),
         );

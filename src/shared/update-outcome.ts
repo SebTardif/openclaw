@@ -1,9 +1,29 @@
+export const UPDATE_ACTIVATION_TIMEOUT_REASON = "update-activation-timeout";
+
+export function formatUpdateActivationTimeoutGuidance(
+  command: (value: string) => string = (value) => value,
+): string {
+  return `Inspect \`${command("openclaw update status")}\` and \`${command("openclaw doctor")}\`. Wait for the owning updater and its child processes to stop before running \`${command("openclaw update repair")}\`. The timeout does not make rollback or removal of retained update state safe.`;
+}
+
+export const UPDATE_INSTALL_SKIP_GUIDANCE: Readonly<Record<string, string>> = {
+  "container-image-install":
+    "Pull or build the target Docker/container image, then redeploy it with the same state/config mounts. No package changes or Gateway restart were attempted.",
+  "unmanaged-package-install":
+    "No npm, pnpm, or Bun global owner was detected. Reinstall using the original method; use Yarn for Yarn global installs. No package changes or Gateway restart were attempted.",
+  "package-update-requires-cli":
+    "Run `openclaw update` through this install's npm, pnpm, or Bun global launcher. No package changes or Gateway restart were attempted.",
+};
+
 export const SKIPPED_UPDATE_OUTCOMES: Readonly<Record<string, "pending" | "noop">> = {
   "managed-service-handoff-started": "pending",
   "restart-health-pending": "pending",
   "already-current": "noop",
   "managed-service-handoff-already-running": "noop",
   "managed-service-handoff-cancelled": "noop",
+  "container-image-install": "noop",
+  "unmanaged-package-install": "noop",
+  "package-update-requires-cli": "noop",
 };
 
 /** A skipped update can be a handoff, an intentional no-op, or a failed attempt. */

@@ -69,6 +69,8 @@ export type VoiceRealtimeAgentTurnParams = {
   message: string;
   toolsAllow?: string[];
   userId: string;
+  isCurrent: () => boolean;
+  signal?: AbortSignal;
 };
 
 export type VoiceRealtimeSpeakerTurn = {
@@ -82,16 +84,26 @@ export type VoiceRealtimeSession = {
     userId: string,
     recordingInput?: DiscordRealtimeRecordingInput,
   ) => VoiceRealtimeSpeakerTurn;
-  close: () => void;
+  close: () => void | Promise<void>;
   connect: () => Promise<void>;
-  handleBargeIn: (reason?: string) => void;
-  isBargeInEnabled: () => boolean;
+  canReceiveDuringPlayback: () => boolean;
 };
 
 type VoiceRealtimeLifecycle =
   | { status: "inactive"; generation: number }
   | { status: "starting"; generation: number; instance: VoiceRealtimeSession }
   | { status: "active"; generation: number; instance: VoiceRealtimeSession }
+  | { status: "stopped"; generation: number; reason: string };
+
+export type VoiceGuildLifecycle =
+  | { status: "inactive"; generation: number }
+  | {
+      status: "starting";
+      generation: number;
+      cancelled: boolean;
+      instance: { guildId: string; channelId: string; captureOnly: boolean };
+    }
+  | { status: "active"; generation: number; instance: VoiceSessionEntry }
   | { status: "stopped"; generation: number; reason: string };
 
 export type VoiceSessionEntry = {
@@ -120,7 +132,7 @@ export type VoiceSessionEntry = {
   realtimeLifecycle: VoiceRealtimeLifecycle;
   transcripts?: DiscordVoiceTranscriptCapture;
   receiveRecovery: VoiceReceiveRecoveryState;
-  stop: (reason?: string) => void;
+  stop: (reason?: string) => void | Promise<void>;
 };
 
 export function logVoiceVerbose(message: string): void {

@@ -1,6 +1,5 @@
 // User turn persistence tests cover the shared transcript writer.
 import fs from "node:fs";
-import path from "node:path";
 import {
   initializeGlobalHookRunner,
   resetGlobalHookRunner,
@@ -10,11 +9,24 @@ import { castAgentMessage } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { runAgentHarnessBeforeMessageWriteHook } from "../agents/harness/hook-helpers.js";
-import { formatSqliteSessionFileMarker } from "../config/sessions/legacy-sqlite-marker.js";
-import { loadTranscriptEvents, replaceSessionEntry } from "../config/sessions/session-accessor.js";
+import { loadSessionEntry, replaceSessionEntry } from "../config/sessions/session-accessor.js";
+import { resolveSessionTranscriptDatabasePath } from "../config/sessions/session-accessor.transcript-target.js";
+import { resolveSessionColdArchivePath } from "../config/sessions/session-cold-storage-codec.js";
+import { readSessionColdTranscript } from "../config/sessions/session-cold-storage-state.js";
+import { runSessionColdStorageMaintenance } from "../config/sessions/session-cold-storage.js";
+import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import type { DB } from "../state/openclaw-agent-db.generated.js";
+import {
+  openOpenClawAgentDatabase,
+  runOpenClawAgentWriteTransaction,
+} from "../state/openclaw-agent-db.js";
 import { createUserTurnTranscriptRecorder } from "./user-turn-transcript.js";
 import { buildChannelUserTurnSender } from "./user-turn-transcript.metadata.js";
-import { persistUserTurnTranscript } from "./user-turn-transcript.test-support.js";
+import {
+  createSqliteTranscriptTarget,
+  persistUserTurnTranscript,
+  readTranscriptMessages,
+} from "./user-turn-transcript.test-support.js";
 import type { UserTurnOriginalInputCommit } from "./user-turn-transcript.types.js";
 
 describe("persistUserTurnTranscript", () => {
@@ -24,50 +36,77 @@ describe("persistUserTurnTranscript", () => {
     resetGlobalHookRunner();
   });
 
-  function createSqliteTranscriptTarget(params: {
-    dir: string;
-    sessionId?: string;
-    sessionKey?: string;
-  }) {
-    const sessionId = params.sessionId ?? "session-1";
-    const sessionKey = params.sessionKey ?? "agent:main:main";
-    const storePath = path.join(params.dir, "agents", "main", "sessions", "sessions.json");
-    fs.mkdirSync(path.dirname(storePath), { recursive: true });
-    const sqliteMarker = formatSqliteSessionFileMarker({
-      agentId: "main",
-      sessionId,
-      storePath,
-    });
-    return {
-      agentId: "main",
-      cwd: params.dir,
-      sessionEntry: undefined,
-      sessionId,
-      sessionKey,
-      storePath,
-      sqliteMarker,
-    };
-  }
-
-  async function readTranscriptMessages(params: {
-    sessionId: string;
-    sessionKey: string;
-    storePath: string;
-  }): Promise<Array<Record<string, unknown>>> {
-    return (
-      await loadTranscriptEvents({
+  it.each(["available", "missing"] as const)(
+    "resumes a cold current transcript only when its archive is %s",
+    async (archiveState) => {
+      const target = createSqliteTranscriptTarget({ dir: tempDirs.make("user-turn-cold-resume-") });
+      await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+      await persistUserTurnTranscript({
+        ...target,
+        input: { text: "Original history", timestamp: 1 },
+        updateMode: "none",
+      });
+      const database = openOpenClawAgentDatabase({
         agentId: "main",
-        sessionId: params.sessionId,
-        sessionKey: params.sessionKey,
-        storePath: params.storePath,
-      })
-    )
-      .map((entry) => (entry as { message?: unknown }).message)
-      .filter(
-        (message): message is Record<string, unknown> =>
-          typeof message === "object" && message !== null,
+        path: resolveSessionTranscriptDatabasePath(target),
+      });
+      await replaceSessionEntry(target, {
+        ...loadSessionEntry(target),
+        updatedAt: 1,
+        sessionId: target.sessionId,
+        lastActivityAt: 1,
+        lastInteractionAt: 1,
+      });
+      runOpenClawAgentWriteTransaction(
+        ({ db }) => {
+          executeSqliteQuerySync(
+            db,
+            getNodeSqliteKysely<DB>(db)
+              .updateTable("session_windows")
+              .set({ updated_at: 1, transcript_updated_at: 1 })
+              .where("session_id", "=", target.sessionId),
+          );
+        },
+        { agentId: "main", path: database.path },
       );
-  }
+      const original = database.db.prepare("SELECT * FROM transcript_events ORDER BY seq").all();
+      const owner = database.db.prepare("SELECT current_session_id FROM session_nodes").get();
+      expect(
+        await runSessionColdStorageMaintenance({
+          config: {
+            agents: { list: [{ id: target.agentId }] },
+            session: {
+              store: target.storePath,
+              maintenance: { coldStorage: { enabled: true, afterDays: 30 } },
+            },
+          },
+        }),
+      ).toMatchObject({ archivedTranscripts: 1, externalizedTranscripts: 0 });
+      const descriptor = readSessionColdTranscript(database.db, target.sessionId)!;
+      if (archiveState === "missing") {
+        fs.unlinkSync(resolveSessionColdArchivePath(database.path, descriptor.archive_name));
+      }
+      const recorder = createUserTurnTranscriptRecorder({
+        target,
+        input: { text: "Continue this conversation", timestamp: Date.now() },
+        updateMode: "none",
+      });
+      if (archiveState === "missing") {
+        await expect(recorder.persistApproved()).rejects.toThrow(/missing|unreadable/);
+        expect(database.db.prepare("SELECT * FROM transcript_events").all()).toEqual([]);
+        expect(readSessionColdTranscript(database.db, target.sessionId)).toEqual(descriptor);
+      } else {
+        await expect(recorder.persistApproved()).resolves.toMatchObject({ appended: true });
+        const resumed = database.db.prepare("SELECT * FROM transcript_events ORDER BY seq").all();
+        expect(resumed.slice(0, original.length)).toEqual(original);
+        expect(resumed).toHaveLength(original.length + 1);
+        expect(readSessionColdTranscript(database.db, target.sessionId)).toBeUndefined();
+      }
+      expect(database.db.prepare("SELECT current_session_id FROM session_nodes").get()).toEqual(
+        owner,
+      );
+    },
+  );
 
   it("appends a structured user turn through the shared transcript writer", async () => {
     const dir = tempDirs.make("openclaw-user-turn-append-");

@@ -37,6 +37,7 @@ const GROUP_HINTS = [
   ["session", "Session", 90],
   ["cron", "Automations", 100],
   ["worktreeRoot", "Worktree Root", 105],
+  ["worktreeAcceleration", "Worktree Acceleration", 106],
   ["hooks", "Hooks", 110],
   ["ui", "UI", 120],
   ["browser", "Browser", 130],
@@ -92,12 +93,15 @@ const SECTION_DOCS_URLS = {
   cloudWorkers: "https://docs.openclaw.ai/gateway/cloud-workers",
   desktop: "https://docs.openclaw.ai/gateway/configuration",
   worktreeRoot: "https://docs.openclaw.ai/concepts/managed-worktrees",
+  worktreeAcceleration: "https://docs.openclaw.ai/concepts/managed-worktrees",
   proxy: "https://docs.openclaw.ai/security/network-proxy",
   transcripts: "https://docs.openclaw.ai/plugins/meeting-plugins",
   surfaces: "https://docs.openclaw.ai/concepts/messages",
 } as const satisfies Record<string, string>;
 
 const FIELD_PLACEHOLDERS: Record<string, string> = {
+  "gateway.cliAgents.enabled": "Default (enabled)",
+  "tools.loopDetection.enabled": "Default (post-compaction protection only)",
   "gateway.publicOrigin": "https://gateway.example.com",
   "gateway.remote.url": "ws://host:18789",
   "gateway.remote.tlsFingerprint": "sha256:ab12cd34…",

@@ -1,4 +1,5 @@
 // Runs post-plugin convergence checks without retaining pre-update plugin modules.
+import os from "node:os";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   UPDATE_DEFER_CONFIGURED_PLUGIN_INSTALL_REPAIR_ENV,
@@ -9,10 +10,26 @@ import { readConfigFileSnapshot } from "../../config/config.js";
 import { resolveStateDir } from "../../config/paths.js";
 import type { ConfigFileSnapshot } from "../../config/types.openclaw.js";
 import { resolveGatewayInstallEntrypoint } from "../../daemon/gateway-entrypoint.js";
+import { resolveAggregateSqliteInspectionTimeoutMs } from "../../infra/sqlite-readonly-worker.js";
+import { collectStateDatabasePaths } from "../../infra/update-candidate-state.js";
+import { readUpdateStateDatabaseSizes } from "../../infra/update-candidate-state.sizes.js";
+import { hasDeferredUpdateModelRetirement } from "../../infra/update-deferred-model-retirement.js";
+import {
+  consumeUpdatePostInstallDoctorResult,
+  createUpdatePostInstallDoctorResultPath,
+  UPDATE_POST_INSTALL_DOCTOR_ADVISORY_EXIT_CODE,
+  UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV,
+  UpdateDoctorError,
+  type UpdatePostInstallDoctorResult,
+} from "../../infra/update-doctor-result.js";
+import {
+  createUpdateFailureFact,
+  type UpdateFailureFact,
+} from "../../infra/update-failure-facts.js";
 import { buildUpdateDoctorEnv } from "../../infra/update-runner-doctor.js";
 import { redactSupportString } from "../../logging/diagnostic-support-redaction.js";
 import { formatCommandOutput } from "../../process/command-error.js";
-import { runExec } from "../../process/exec.js";
+import { isPlainCommandExitFailure, runExec } from "../../process/exec.js";
 import { defaultRuntime } from "../../runtime.js";
 import { truncateUtf8Prefix, truncateUtf8Suffix } from "../../utils/utf8-truncate.js";
 import { resolveNodeRunner } from "./shared.js";
@@ -26,6 +43,7 @@ import {
   disableUpdatedPackageCompileCacheEnv,
   stripGatewayServiceMarkerEnv,
 } from "./update-command-service-env.js";
+import { captureUpdateFinalizationDoctorOutput } from "./update-finalization-output.js";
 
 type UpdateDoctorPhase = "pre-plugin" | "post-plugin";
 
@@ -70,11 +88,13 @@ async function withNormalConfigValidation<T>(run: () => Promise<T>): Promise<T> 
 function createPostPluginDoctorExecutionFailure(
   pluginUpdate: PostCorePluginUpdateResult,
   reason: string,
+  failureFacts?: UpdateFailureFact[],
 ): PostCorePluginUpdateResult {
   return {
     ...pluginUpdate,
     status: "error",
     reason: POST_PLUGIN_DOCTOR_EXECUTION_FAILED_REASON,
+    ...(failureFacts?.length ? { failureFacts } : {}),
     warnings: [
       ...(pluginUpdate.warnings ?? []),
       {
@@ -92,9 +112,10 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
   yes: boolean;
   json: boolean;
   workspaceSuggestions?: boolean;
-  timeoutMs: number;
+  timeoutMs?: number;
   nodeRunner?: string;
   entryPath?: string;
+  onWarnings?: (warnings: string[]) => void;
 }): Promise<void> {
   const entryPath = params.entryPath ?? (await resolveGatewayInstallEntrypoint(params.root));
   if (!entryPath) {
@@ -110,6 +131,8 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
   ];
   const baseEnv = stripGatewayServiceMarkerEnv(disableUpdatedPackageCompileCacheEnv(process.env));
   delete baseEnv[UPDATE_POST_CORE_CONVERGENCE_ENV];
+  const doctorResultPath = createUpdatePostInstallDoctorResultPath();
+  let doctorResult: UpdatePostInstallDoctorResult | null = null;
   let result: { stdout?: unknown; stderr?: unknown } | undefined;
   try {
     result = await runExec(params.nodeRunner ?? resolveNodeRunner(), args, {
@@ -117,8 +140,10 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
       timeoutMs: params.timeoutMs,
       maxBuffer: 4 * 1024 * 1024,
       logOutput: false,
+      onOutputChunk: captureUpdateFinalizationDoctorOutput(params.phase),
       baseEnv,
       env: {
+        [UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV]: doctorResultPath,
         // The outer updater owns service refresh and activation after every
         // migration finishes; a fresh Doctor must not resume its parked service.
         ...buildUpdateDoctorEnv({
@@ -130,10 +155,34 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
       },
     });
   } catch (error) {
+    doctorResult = await consumeUpdatePostInstallDoctorResult(doctorResultPath);
     if (isRecord(error)) {
       result = error;
+      // Enabling the existing result channel gives deferred plugin repair its
+      // advisory exit code. Convergence below still owns that repair.
+      if (
+        error.exitCode === UPDATE_POST_INSTALL_DOCTOR_ADVISORY_EXIT_CODE &&
+        isPlainCommandExitFailure({ ...error, failed: error.failed === true }) &&
+        doctorResult?.status === "advisory"
+      ) {
+        return;
+      }
     }
     const redaction = { env: process.env, stateDir: resolveStateDir() };
+    const failureFacts = doctorResult?.failureFacts?.length
+      ? doctorResult.failureFacts
+      : [
+          createUpdateFailureFact({
+            check: "doctor",
+            code: "doctor-failed",
+            message:
+              typeof result?.stderr === "string" && result.stderr.trim()
+                ? result.stderr
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
+          }),
+        ];
     const details = (["stderr", "stdout"] as const).flatMap((stream) => {
       const output = result?.[stream];
       if (typeof output !== "string" || !output.trim()) {
@@ -153,12 +202,22 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
       return excerpt ? [`${stream}: ${excerpt}`] : [];
     });
     if (details.length > 0) {
-      throw new Error(`Updated ${params.phase} Doctor failed:\n${details.join("\n")}`, {
-        cause: error,
-      });
+      throw new UpdateDoctorError(
+        `Updated ${params.phase} Doctor failed:\n${details.join("\n")}`,
+        failureFacts,
+        { cause: error },
+      );
     }
-    throw error;
+    throw new UpdateDoctorError(
+      error instanceof Error ? error.message : String(error),
+      failureFacts,
+      { cause: error },
+    );
   } finally {
+    doctorResult ??= await consumeUpdatePostInstallDoctorResult(doctorResultPath);
+    if (doctorResult?.warnings?.length) {
+      params.onWarnings?.(doctorResult.warnings);
+    }
     // Clack writes directly to the child's stdout. Preserve diagnostics on either
     // exit path without letting them share the parent's JSON result stream.
     if (typeof result?.stdout === "string" && result.stdout.trim()) {
@@ -195,93 +254,88 @@ async function validatePostPluginConfigInFreshProcess(params: {
   }
 }
 
-async function completePostPluginInFreshProcess(params: {
-  root: string;
-  pluginUpdate: PostCorePluginUpdateResult;
-  yes: boolean;
-  json: boolean;
-  timeoutMs: number;
-  nodeRunner?: string;
-  beforeDoctor?: () => Promise<void>;
-  freshDoctorRequired: boolean;
-}): Promise<{ pluginUpdate: PostCorePluginUpdateResult; configValid: boolean }> {
-  let entryPath: string | undefined;
-  try {
-    entryPath = await resolveGatewayInstallEntrypoint(params.root);
-  } catch (err) {
-    return {
-      pluginUpdate: createPostPluginDoctorExecutionFailure(params.pluginUpdate, String(err)),
-      configValid: false,
-    };
-  }
-  if (!entryPath) {
-    return {
-      pluginUpdate: createPostPluginDoctorExecutionFailure(
-        params.pluginUpdate,
-        "Updated OpenClaw entrypoint not found for post-plugin doctor",
-      ),
-      configValid: false,
-    };
-  }
-  let pluginUpdate = params.pluginUpdate;
-  try {
-    if (params.freshDoctorRequired) {
-      await params.beforeDoctor?.();
-      await runUpdateFinalizationDoctorInFreshProcess({
-        ...params,
-        entryPath,
-        phase: "post-plugin",
-      });
-    }
-  } catch (err) {
-    pluginUpdate = createPostPluginDoctorExecutionFailure(params.pluginUpdate, String(err));
-  }
-  const configValid = await validatePostPluginConfigInFreshProcess({ ...params, entryPath });
-  if (configValid) {
-    pluginUpdate = await applyPostPluginUpdateReadiness({
-      root: params.root,
-      entryPath,
-      pluginUpdate,
-      timeoutMs: params.timeoutMs,
-      ...(params.nodeRunner ? { nodeRunner: params.nodeRunner } : {}),
-    });
-  }
-  return { pluginUpdate, configValid };
-}
-
 export async function completePostCorePluginUpdate(params: {
   root: string;
   pluginUpdate: PostCorePluginUpdateResult;
   freshDoctorRequired: boolean;
   yes: boolean;
   json: boolean;
-  timeoutMs: number;
+  timeoutMs?: number;
   nodeRunner?: string;
   beforeDoctor?: () => Promise<void>;
+  onWarnings?: (warnings: string[]) => void;
 }): Promise<{
   pluginUpdate: PostCorePluginUpdateResult;
   configSnapshot: ConfigFileSnapshot;
 }> {
   let pluginUpdate = params.pluginUpdate;
+  let entryPath: string | undefined;
   let freshConfigValid: boolean | undefined;
   if (pluginUpdate.status !== "error") {
-    // The current process can still hold the pre-update plugin and schema. Reload the updated
-    // migration owner before trusting strict validation or restarting the gateway.
-    const freshResult = await completePostPluginInFreshProcess({
-      root: params.root,
-      pluginUpdate,
-      yes: params.yes,
-      json: params.json,
-      timeoutMs: params.timeoutMs,
-      beforeDoctor: params.beforeDoctor,
-      freshDoctorRequired: params.freshDoctorRequired,
-      ...(params.nodeRunner ? { nodeRunner: params.nodeRunner } : {}),
-    });
-    pluginUpdate = freshResult.pluginUpdate;
-    freshConfigValid = freshResult.configValid;
+    try {
+      entryPath = await resolveGatewayInstallEntrypoint(params.root);
+      if (!entryPath) {
+        throw new Error("Updated OpenClaw entrypoint not found for post-plugin doctor");
+      }
+      if (params.freshDoctorRequired || hasDeferredUpdateModelRetirement()) {
+        await params.beforeDoctor?.();
+        await runUpdateFinalizationDoctorInFreshProcess({
+          ...params,
+          entryPath,
+          phase: "post-plugin",
+        });
+      }
+    } catch (err) {
+      pluginUpdate = createPostPluginDoctorExecutionFailure(
+        params.pluginUpdate,
+        String(err),
+        err instanceof UpdateDoctorError ? err.failureFacts : undefined,
+      );
+      freshConfigValid = false;
+    }
   }
 
-  const configSnapshot = await withNormalConfigValidation(() => readConfigFileSnapshot());
+  // Only the target runtime may write state after a version switch: observing
+  // config here could migrate its database back to the parent's newer schema.
+  const configSnapshot = await withNormalConfigValidation(() =>
+    readConfigFileSnapshot({ observe: false }),
+  );
+  if (entryPath) {
+    let checkTimeoutMs = params.timeoutMs;
+    if (checkTimeoutMs === undefined) {
+      // Doctor can grow shared and agent stores. Measure once after its writes settle.
+      const env = { ...process.env };
+      const databases = await collectStateDatabasePaths(
+        { stateDir: resolveStateDir(env), config: configSnapshot.sourceConfig, env },
+        { includeUnconfiguredAgents: false },
+      );
+      checkTimeoutMs = resolveAggregateSqliteInspectionTimeoutMs(
+        "post-plugin checks",
+        await readUpdateStateDatabaseSizes(
+          Array.from(databases.values(), (database) => database.spellings[0]),
+          { nodeRunner: process.execPath, sourceEnv: env, stagingRoot: os.tmpdir() },
+        ),
+      );
+    }
+    // No authored file is a valid unconfigured install, not an invalid config.
+    // Existing files still need the target schema; every install needs readiness.
+    freshConfigValid =
+      (!configSnapshot.exists && configSnapshot.valid) ||
+      (await validatePostPluginConfigInFreshProcess({
+        ...params,
+        entryPath,
+        timeoutMs: checkTimeoutMs,
+      }));
+    if (freshConfigValid) {
+      pluginUpdate = await applyPostPluginUpdateReadiness({
+        root: params.root,
+        entryPath,
+        pluginUpdate,
+        timeoutMs: checkTimeoutMs,
+        ...(params.nodeRunner ? { nodeRunner: params.nodeRunner } : {}),
+      });
+    }
+  }
   // Strict validity belongs to the target runtime even when no plugin changed.
   // The parent may retain the previous schema; its snapshot is best-effort context.
   pluginUpdate = applyPostPluginConfigValidation(

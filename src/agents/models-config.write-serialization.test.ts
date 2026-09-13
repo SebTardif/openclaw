@@ -5,6 +5,10 @@ import { DatabaseSync } from "node:sqlite";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveInstalledPluginIndexPolicyHash } from "../plugins/installed-plugin-index-policy.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
+import {
+  resolveModelCostConfig,
+  resolveModelCostConfigFingerprint,
+} from "../utils/usage-format.js";
 import { resolveDefaultAgentDir } from "./agent-scope.js";
 import {
   CUSTOM_PROXY_MODELS_CONFIG,
@@ -59,6 +63,7 @@ installModelsConfigTestHooks();
 let ensureOpenClawModelsJson: typeof import("./models-config.js").ensureOpenClawModelsJson;
 let planOpenClawModelsJsonSource: typeof import("./models-config.js").planOpenClawModelsJsonSource;
 let clearPluginMetadataLifecycleCaches: typeof import("../plugins/plugin-metadata-lifecycle.js").clearPluginMetadataLifecycleCaches;
+let makeEmptyPluginMetadataOwners: typeof import("../plugins/current-plugin-metadata.test-support.js").makeEmptyPluginMetadataOwners;
 let setCurrentPluginMetadataSnapshot: typeof import("../plugins/current-plugin-metadata.test-support.js").setCurrentPluginMetadataSnapshot;
 
 function createPluginMetadataSnapshot(workspaceDir: string): PluginMetadataSnapshot {
@@ -86,17 +91,8 @@ function createPluginMetadataSnapshot(workspaceDir: string): PluginMetadataSnaps
     diagnostics: [],
     byPluginId: new Map(),
     normalizePluginId: (pluginId) => pluginId,
-    owners: {
-      channels: new Map(),
-      channelConfigs: new Map(),
-      providers: new Map(),
-      modelCatalogProviders: new Map(),
-      cliBackends: new Map(),
-      setupProviders: new Map(),
-      commandAliases: new Map(),
-      contracts: new Map(),
-      modelIdNormalizationPolicies: new Map(),
-    },
+    declaredProviderOwners: new Map(),
+    owners: makeEmptyPluginMetadataOwners(),
     metrics: {
       registrySnapshotMs: 0,
       manifestRegistryMs: 0,
@@ -170,7 +166,7 @@ beforeAll(async () => {
   ({ ensureOpenClawModelsJson, planOpenClawModelsJsonSource } = await import("./models-config.js"));
   ({ clearPluginMetadataLifecycleCaches } =
     await import("../plugins/plugin-metadata-lifecycle.js"));
-  ({ setCurrentPluginMetadataSnapshot } =
+  ({ makeEmptyPluginMetadataOwners, setCurrentPluginMetadataSnapshot } =
     await import("../plugins/current-plugin-metadata.test-support.js"));
 });
 
@@ -200,6 +196,58 @@ beforeEach(() => {
 });
 
 describe("models-config write serialization", () => {
+  it("refreshes cached usage prices after publishing an agent's models.json", async () => {
+    await withModelsTempHome(async (home) => {
+      const configFor = (input: number) => ({
+        models: {
+          providers: {
+            fixture: {
+              baseUrl: "https://fixture.invalid/v1",
+              models: [
+                {
+                  id: "priced",
+                  name: "Priced",
+                  reasoning: false,
+                  input: ["text" as const],
+                  cost: { input, output: 2, cacheRead: 0, cacheWrite: 0 },
+                  contextWindow: 8192,
+                  maxTokens: 4096,
+                },
+              ],
+            },
+          },
+        },
+      });
+      const firstDir = path.join(home, "first");
+      const secondDir = path.join(home, "second");
+      const config = configFor(1);
+      const options = { pluginMetadataSnapshot: createPluginMetadataSnapshot(home) };
+      const price = (agentDir: string) =>
+        resolveModelCostConfig({
+          config,
+          agentDir,
+          provider: "fixture",
+          model: "priced",
+          allowPluginNormalization: false,
+        })?.input;
+      await ensureOpenClawModelsJson(config, firstDir, options);
+      await ensureOpenClawModelsJson(configFor(5), secondDir, options);
+      expect([price(firstDir), price(secondDir)]).toEqual([1, 5]);
+      const firstFingerprint = resolveModelCostConfigFingerprint(config, firstDir);
+      const secondFingerprint = resolveModelCostConfigFingerprint(config, secondDir);
+
+      const updated = await ensureOpenClawModelsJson(configFor(9), firstDir, options);
+
+      expect(updated).toEqual({ agentDir: firstDir, wrote: true });
+      expect(await readGeneratedModelsJson(firstDir)).toEqual({
+        providers: configFor(9).models.providers,
+      });
+      expect([price(firstDir), price(secondDir)]).toEqual([9, 5]);
+      expect(resolveModelCostConfigFingerprint(config, firstDir)).not.toBe(firstFingerprint);
+      expect(resolveModelCostConfigFingerprint(config, secondDir)).toBe(secondFingerprint);
+    });
+  });
+
   it("materializes an authoritative plugin catalog replacement without mutating state", async () => {
     await withModelsTempHome(async (home) => {
       const agentDir = path.join(home, "agent");
@@ -293,8 +341,23 @@ describe("models-config write serialization", () => {
     });
   });
 
-  it("writes implicit models.json into the configured default agent dir", async () => {
+  it("writes implicit models.json privately into the configured default agent dir", async () => {
     await withModelsTempHome(async (home) => {
+      let modeAfterWrite: number | undefined;
+      writePrivateStoreTextWriteMock.mockImplementationOnce(
+        async (params: { filePath: string; rootDir: string; content: string | Uint8Array }) => {
+          if (!actualPrivateFileStore) {
+            throw new Error("private file store mock not initialized");
+          }
+          await actualPrivateFileStore(params.rootDir).writeText(
+            path.basename(params.filePath),
+            params.content,
+          );
+          if (process.platform !== "win32") {
+            modeAfterWrite = (await fs.stat(params.filePath)).mode & 0o777;
+          }
+        },
+      );
       const cfg = {
         agents: {
           list: [{ id: "main" }, { id: "ops", default: true }],
@@ -303,8 +366,15 @@ describe("models-config write serialization", () => {
 
       const result = await ensureOpenClawModelsJson(cfg);
 
+      expect(writePrivateStoreTextWriteMock).toHaveBeenCalledOnce();
       expect(result.agentDir).toBe(path.join(home, ".openclaw", "agents", "ops", "agent"));
-      await expect(fs.access(path.join(result.agentDir, "models.json"))).resolves.toBeUndefined();
+      const modelsPath = path.join(result.agentDir, "models.json");
+      await expect(fs.access(modelsPath)).resolves.toBeUndefined();
+      if (process.platform !== "win32") {
+        // The captured mode proves privacy before the writer's follow-up chmod.
+        expect(modeAfterWrite).toBe(0o600);
+        expect((await fs.stat(modelsPath)).mode & 0o777).toBe(0o600);
+      }
       await expectMissingPath(
         fs.access(path.join(home, ".openclaw", "agents", "main", "agent", "models.json")),
       );
@@ -593,14 +663,53 @@ describe("models-config write serialization", () => {
     });
   });
 
-  it("keeps the ready cache warm after models.json is written", async () => {
+  it("keeps the ready cache warm while repairing models.json permissions", async () => {
     await withModelsTempHome(async () => {
-      await ensureOpenClawModelsJson(CUSTOM_PROXY_MODELS_CONFIG);
+      const first = await ensureOpenClawModelsJson(CUSTOM_PROXY_MODELS_CONFIG);
+      const modelsPath = path.join(first.agentDir, "models.json");
+      const contents = await fs.readFile(modelsPath, "utf8");
+      if (process.platform !== "win32") {
+        await fs.chmod(modelsPath, 0o644);
+      }
       await ensureOpenClawModelsJson(CUSTOM_PROXY_MODELS_CONFIG);
 
       expect(planOpenClawModelsJsonMock).toHaveBeenCalledTimes(1);
+      expect(writePrivateStoreTextWriteMock).toHaveBeenCalledOnce();
+      expect(await fs.readFile(modelsPath, "utf8")).toBe(contents);
+      if (process.platform !== "win32") {
+        expect((await fs.stat(modelsPath)).mode & 0o777).toBe(0o600);
+      }
     });
   });
+
+  it.each(["noop", "write"] as const)(
+    "repairs models.json permissions without rewriting an unchanged %s plan",
+    async (action) => {
+      await withModelsTempHome(async (home) => {
+        const agentDir = path.join(home, "agent");
+        const modelsPath = path.join(agentDir, "models.json");
+        const contents = '{"providers":{}}\n';
+        await fs.mkdir(agentDir, { recursive: true });
+        await fs.writeFile(modelsPath, contents, { mode: 0o600 });
+        if (process.platform !== "win32") {
+          await fs.chmod(modelsPath, 0o644);
+        }
+        planOpenClawModelsJsonMock.mockResolvedValue(
+          action === "noop" ? { action } : { action, contents },
+        );
+
+        const result = await ensureOpenClawModelsJson({}, agentDir);
+
+        expect(result.wrote).toBe(false);
+        expect(planOpenClawModelsJsonMock).toHaveBeenCalledOnce();
+        expect(writePrivateStoreTextWriteMock).not.toHaveBeenCalled();
+        expect(await fs.readFile(modelsPath, "utf8")).toBe(contents);
+        if (process.platform !== "win32") {
+          expect((await fs.stat(modelsPath)).mode & 0o777).toBe(0o600);
+        }
+      });
+    },
+  );
 
   it("invalidates the ready cache when models.json changes externally", async () => {
     await withModelsTempHome(async () => {

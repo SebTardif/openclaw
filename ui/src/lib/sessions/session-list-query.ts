@@ -1,52 +1,135 @@
-import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
+import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import type { SessionsListResult } from "../../api/types.ts";
+import type { createSessionEventRefreshCoordinator } from "./event-refresh-coordinator.ts";
 import type {
   SessionGateway,
   SessionListOptions,
   SessionListScope,
+  SessionListSnapshot,
   SessionRefreshOptions,
 } from "./session-capability.ts";
+import {
+  normalizeAgentId,
+  areUiSessionKeysEquivalent,
+  parseAgentSessionKey,
+} from "./session-key.ts";
 import {
   buildSessionListParams,
   DEFAULT_SESSION_LIST_QUERY,
   normalizeManagedSessionListQuery,
 } from "./session-requests.ts";
+import { parseSessionChangedEvent } from "./session-row-reconcile.ts";
 
-export type PublishedSession = {
-  row: GatewaySessionRow;
-  result: SessionsListResult;
-  agentId?: string | null;
-};
+export function isForegroundReplacement(options: SessionRefreshOptions): boolean {
+  return options.append !== true && options.backgroundHydrate !== true;
+}
 
-// Primary rows own shared presentation when both primary and managed queries hold a session.
-export function findPublishedSession(
-  state: { result: SessionsListResult | null; agentId?: string | null },
-  managedLists: Iterable<{
-    snapshot: { result: SessionsListResult | null };
-    scope: SessionListScope;
-  }>,
-  matches: (row: GatewaySessionRow, agentId?: string | null) => boolean,
-): PublishedSession | undefined {
-  const primaryResult = state.result;
-  const primary = primaryResult?.sessions.find((row) => matches(row, state.agentId));
-  if (primary && primaryResult) {
-    return { row: primary, result: primaryResult, agentId: state.agentId };
-  }
-  for (const entry of managedLists) {
-    const result = entry.snapshot.result;
-    const row = result?.sessions.find((candidate) => matches(candidate, entry.scope.agentId));
-    if (row && result) {
-      return { row, result, agentId: entry.scope.agentId };
+export function sessionListAgentMatcher(agentId?: string | null) {
+  const normalized = agentId ? normalizeAgentId(agentId) : null;
+  return (queryAgentId?: string) =>
+    !normalized || !queryAgentId?.trim() || normalizeAgentId(queryAgentId) === normalized;
+}
+
+/** Capture membership before event reconciliation can remove or move a known child. */
+export function sessionListEventMatcher(payload: unknown) {
+  const parsed = parseSessionChangedEvent(payload);
+  const info = parsed?.[0];
+  const event = parsed?.[1] ?? asOptionalRecord(payload);
+  const source = parsed?.[2];
+  const agentId =
+    info?.agentId ??
+    parseAgentSessionKey(info?.key)?.agentId ??
+    (typeof event?.agentId === "string" ? event.agentId : undefined);
+  const matchesAgent = sessionListAgentMatcher(agentId);
+  const owners = [
+    source?.controlOwnerSessionKey,
+    source?.spawnedBy,
+    source?.parentSessionKey,
+    event?.parentSessionKey,
+  ];
+  return (entry: ManagedSessionList): boolean => {
+    const parent = entry.scope.spawnedBy;
+    if (parent && info && areUiSessionKeysEquivalent(info.key, parent)) {
+      return true;
     }
-  }
-  return undefined;
+    if (!matchesAgent(sessionListQueryAgentId(entry.query))) {
+      return false;
+    }
+    if (!parent || !info) {
+      return true;
+    }
+    if (
+      entry.snapshot.result?.sessions.some((row) =>
+        areUiSessionKeysEquivalent(row.key, info.key),
+      ) ||
+      owners.some((owner) => typeof owner === "string" && areUiSessionKeysEquivalent(owner, parent))
+    ) {
+      return true;
+    }
+    // An incomplete window cannot rule out a former child beyond its loaded page,
+    // even when a move event names its new parent explicitly.
+    const result = entry.snapshot.result;
+    return (
+      !result ||
+      result.hasMore === true ||
+      (result.totalCount ?? result.sessions.length) > result.sessions.length
+    );
+  };
 }
 
 export type QueuedSessionRefresh = {
   options: SessionRefreshOptions;
+  intent: "explicit" | "automatic" | (() => string | null);
+  bootstrap?: boolean;
+  isErrorCurrent?: () => boolean;
   completions: Array<{
     options: SessionRefreshOptions;
     complete: (refresh: Promise<SessionsListResult | null> | null) => void;
   }>;
+};
+
+export function coalesceSessionRefresh(
+  current: QueuedSessionRefresh | null,
+  next: QueuedSessionRefresh,
+): QueuedSessionRefresh {
+  if (!current) {
+    return next;
+  }
+  // Explicit intent remains authoritative over automatic hydration and weaker queries.
+  if (
+    (next.intent !== "automatic" || current.intent === "automatic") &&
+    (isForegroundReplacement(next.options) || !isForegroundReplacement(current.options))
+  ) {
+    current.options = next.options;
+    current.intent = next.intent;
+    current.bootstrap = next.bootstrap;
+    current.isErrorCurrent = next.isErrorCurrent;
+  }
+  current.completions.push(...next.completions);
+  return current;
+}
+
+export type ManagedSessionListRefresh = {
+  append: boolean;
+  offset?: number;
+  invalidated?: true;
+  background?: true;
+};
+
+export type ObservedSessionList = {
+  scope: SessionListScope;
+  connectionEpoch: number | null;
+  snapshot: SessionListSnapshot;
+  listeners: Set<(snapshot: SessionListSnapshot) => void>;
+};
+
+export type ManagedSessionList = ObservedSessionList & {
+  key: string;
+  query: ReturnType<typeof normalizeManagedSessionListQuery>;
+  retainedLimit: number;
+  coordinator: ReturnType<typeof createSessionEventRefreshCoordinator>;
+  pending: Promise<void> | null;
+  queued: ManagedSessionListRefresh | null;
 };
 
 export function isPrimarySessionListQuery(options: SessionListScope): boolean {

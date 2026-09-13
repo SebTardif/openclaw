@@ -4,9 +4,12 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, it } from "vitest";
 import { spawnOwnedVitestProcess } from "../../scripts/lib/vitest-process.mts";
+import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
+import { resolveNativeFixtureShortPath } from "./native-boundary-fixture.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const testNodeExecPath = resolveTestNodeExecPath();
 const tsxPreload = pathToFileURL(createRequire(import.meta.url).resolve("tsx/esm")).href;
 
 it.each(["hermetic", "live-aware", "tooling"] as const)(
@@ -39,7 +42,7 @@ console.log(JSON.stringify({ namespace, output: result.stdout, cached: fs.exists
       ESBUILD_WORKER_THREADS: "0",
     };
     const { child, completion } = spawnOwnedVitestProcess({
-      command: process.execPath,
+      command: testNodeExecPath,
       args: ["--input-type=module", "-e", script],
       homeMode,
       options: { env, stdio: ["ignore", "pipe", "pipe"] },
@@ -62,5 +65,42 @@ console.log(JSON.stringify({ namespace, output: result.stdout, cached: fs.exists
     expect(path.dirname(observed.namespace)).toBe(root);
     expect(env.TSX_DISABLE_CACHE).toBe("1");
     expect(fs.existsSync(observed.namespace)).toBe(process.platform === "win32");
+  },
+);
+
+it.skipIf(process.platform !== "win32")(
+  "publishes long temp paths to owned Windows children",
+  async ({ skip }) => {
+    const root = tempDirs.make("oc-vt-short-name-");
+    const shortRoot = resolveNativeFixtureShortPath(root);
+    if (!shortRoot) {
+      skip();
+      return;
+    }
+    const { child, completion } = spawnOwnedVitestProcess({
+      command: testNodeExecPath,
+      args: [
+        "-e",
+        "console.log(JSON.stringify([process.env.TMPDIR, process.env.TMP, process.env.TEMP]))",
+      ],
+      homeMode: "tooling",
+      options: {
+        env: { ...process.env, TMPDIR: shortRoot, TMP: shortRoot, TEMP: shortRoot },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    });
+    let output = "";
+    let errorOutput = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      output += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      errorOutput += chunk.toString();
+    });
+    expect((await completion).code, errorOutput).toBe(0);
+    const [tmpdir, tmp, temp] = JSON.parse(output);
+    expect(tmpdir).toBe(fs.realpathSync.native(tmpdir));
+    expect(path.dirname(tmpdir)).toBe(fs.realpathSync.native(root));
+    expect([tmp, temp]).toEqual([tmpdir, tmpdir]);
   },
 );

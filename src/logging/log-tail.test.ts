@@ -24,6 +24,7 @@ const operationalMetadataFailures = metadataBoundaries.flatMap((boundary) =>
 );
 
 const resolvedRedaction = { mode: "tools" as const, patterns: [/custom-secret-[a-z]+/g] };
+type RedactOptions = Parameters<typeof import("./redact.js").redactSensitiveLines>[1];
 type PositionalRead = (
   buffer: Buffer,
   offset: number,
@@ -32,10 +33,15 @@ type PositionalRead = (
 ) => Promise<{ bytesRead: number; buffer: Buffer }>;
 
 const { redactSensitiveLinesMock, resolveRedactOptionsMock } = vi.hoisted(() => ({
-  redactSensitiveLinesMock: vi.fn((lines: string[], options?: unknown) =>
-    options === resolvedRedaction
-      ? lines.map((line) => line.replace("custom-secret-abcdefghijklmnopqrstuvwxyz", "custom…wxyz"))
-      : lines,
+  redactSensitiveLinesMock: vi.fn(
+    (lines: string[], options?: RedactOptions, selectedLines?: readonly boolean[]) =>
+      lines
+        .filter((_, index) => selectedLines === undefined || selectedLines[index])
+        .map((line) =>
+          options?.patterns.some((pattern) => pattern.source === "custom-secret-[a-z]+")
+            ? line.replace("custom-secret-abcdefghijklmnopqrstuvwxyz", "custom…wxyz")
+            : line,
+        ),
   ),
   resolveRedactOptionsMock: vi.fn(() => resolvedRedaction),
 }));
@@ -44,8 +50,11 @@ vi.mock("./redact.js", async () => {
   const actual = await vi.importActual<typeof import("./redact.js")>("./redact.js");
   return {
     ...actual,
-    redactSensitiveLines: (lines: string[], options?: unknown) =>
-      redactSensitiveLinesMock(lines, options),
+    redactSensitiveLines: (
+      lines: string[],
+      options?: RedactOptions,
+      selectedLines?: readonly boolean[],
+    ) => redactSensitiveLinesMock(lines, options, selectedLines),
     resolveRedactOptions: () => resolveRedactOptionsMock(),
   };
 });
@@ -94,6 +103,7 @@ describe("readConfiguredLogTail", () => {
     expect(redactSensitiveLinesMock).toHaveBeenCalledWith(
       ["custom-secret-abcdefghijklmnopqrstuvwxyz", "second line"],
       resolvedRedaction,
+      [true, true],
     );
     expect(result.lines).toEqual(["custom…wxyz", "second line"]);
   });
@@ -186,6 +196,38 @@ describe("readConfiguredLogTail", () => {
     expect(fileShrink).toMatchObject({ reset: true });
     expect(fileShrink.skippedBytes).toBeUndefined();
   });
+
+  it.each(["missing", "empty"])(
+    "resets a positive cursor when its file becomes %s",
+    async (state) => {
+      const { readConfiguredLogTail } = await import("./log-tail.js");
+      const file = path.join(tempDirs.make("openclaw-log-tail-"), "configured.log");
+      await fs.writeFile(file, "retired record\n");
+      setLoggerOverride({ file });
+      const initial = await readConfiguredLogTail();
+
+      if (state === "missing") {
+        await fs.unlink(file);
+      } else {
+        await fs.writeFile(file, "");
+      }
+      const cleared = await readConfiguredLogTail({ cursor: initial.cursor });
+      expect.soft(cleared).toMatchObject({ cursor: 0, size: 0, lines: [], reset: true });
+      for (const cursor of [undefined, 0]) {
+        expect(await readConfiguredLogTail({ cursor })).toMatchObject({
+          cursor: 0,
+          lines: [],
+          reset: false,
+        });
+      }
+
+      await fs.writeFile(file, "replacement record\n");
+      expect(await readConfiguredLogTail({ cursor: cleared.cursor })).toMatchObject({
+        lines: ["replacement record"],
+        reset: false,
+      });
+    },
+  );
 
   it("keeps the first line when the byte window starts exactly after a newline", async () => {
     const { readConfiguredLogTail } = await import("./log-tail.js");

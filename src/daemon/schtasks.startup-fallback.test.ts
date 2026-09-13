@@ -13,6 +13,7 @@ import {
 import { decodeWindowsLauncherScript } from "../infra/windows-launcher-encoding.js";
 import "./test-helpers/schtasks-base-mocks.js";
 import type { GatewayServiceRuntime } from "./service-runtime.js";
+import { withGatewayServiceUpdateAuthority } from "./service-update-authority.js";
 
 vi.mock("../infra/windows-encoding.js", async () => {
   const actual = await vi.importActual<typeof import("../infra/windows-encoding.js")>(
@@ -662,6 +663,20 @@ describe("Windows startup fallback", () => {
     });
   });
 
+  it("refuses update-owned Startup fallback before publishing a login item or detached launcher", async () => {
+    await withWindowsEnv("openclaw-win-update-startup-", async ({ env }) => {
+      addMissingTaskInstallResponses([{ code: 5, stdout: "", stderr: "ERROR: Access is denied." }]);
+      await expect(
+        withGatewayServiceUpdateAuthority(
+          () => {},
+          () => installGatewayScheduledTask(env),
+        ),
+      ).rejects.toThrow("startup fallback is unsupported");
+      await expect(fs.stat(resolveStartupEntryPath(env))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(spawn).not.toHaveBeenCalled();
+    });
+  });
+
   it("falls back to a Startup-folder launcher when schtasks create is denied", async () => {
     await withWindowsEnv("openclaw-win-startup-", async ({ env }) => {
       addMissingTaskInstallResponses([{ code: 5, stdout: "", stderr: "ERROR: Access is denied." }]);
@@ -705,7 +720,7 @@ describe("Windows startup fallback", () => {
       expect(startupScript).toContain("WScript.Shell");
       expect(startupScript).toContain("gateway.cmd");
       expect(startupScript).toContain(
-        `WScript.Quit CreateObject("WScript.Shell").Run("""${result.scriptPath}""", 0, True)`,
+        `WScript.Quit shell.Run("""${result.scriptPath}""", 0, True)`,
       );
       expectStartupFallbackSpawn();
     });
@@ -2343,6 +2358,50 @@ describe("Windows startup fallback", () => {
       expectStartupFallbackSpawn();
     });
   });
+
+  it.each(["termination", "activation"] as const)(
+    "refuses Startup fallback restart after losing continuation authority before %s",
+    async (stage) => {
+      await withWindowsEnv("openclaw-win-startup-", async ({ env }) => {
+        addStartupFallbackMissingResponses();
+        await writeGatewayScript(env);
+        await writeStartupFallbackEntry(env);
+        let current = true;
+        inspectPortUsageMock.mockImplementation(async () => {
+          current = false;
+          return {
+            port: 18789,
+            status: stage === "termination" ? "busy" : "free",
+            listeners:
+              stage === "termination"
+                ? [
+                    {
+                      pid: 5151,
+                      commandLine: 'node "C:\\openclaw\\dist\\index.js" gateway --port 18789',
+                    },
+                  ]
+                : [],
+            hints: [],
+          };
+        });
+
+        await expect(
+          restartScheduledTask({
+            env,
+            stdout: new PassThrough(),
+            assertCurrent: () => {
+              if (!current) {
+                throw new Error("repair continuation retired");
+              }
+            },
+          }),
+        ).rejects.toThrow("repair continuation retired");
+
+        expect(killProcessTreeMock).not.toHaveBeenCalled();
+        expect(spawn).not.toHaveBeenCalled();
+      });
+    },
+  );
 
   it("audits Startup fallback termination when relaunch fails", async () => {
     useListenerBackedFallbackOwnership();

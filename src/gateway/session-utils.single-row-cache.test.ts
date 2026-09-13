@@ -8,6 +8,7 @@ import type { OpenClawConfig } from "../config/config.js";
 import { resolveSessionStorePathCore, type SessionEntry } from "../config/sessions.js";
 import { resolveInternalSessionEffectsIdentity } from "../config/sessions/internal-session-key.js";
 import {
+  deleteSessionEntryLifecycle,
   loadExactSessionEntryReadOnly,
   replaceSessionEntry,
   updateSessionEntry,
@@ -46,24 +47,10 @@ const subagentRegistryReadMock = vi.hoisted(() => {
   return {
     buildSubagentSessionListReadIndex,
     countActiveDescendantRuns: vi.fn(() => 0),
-    getSessionDisplaySubagentRunByChildSessionKey: vi.fn(
-      (childSessionKey: string) => runsByChildSessionKey.get(childSessionKey) ?? null,
-    ),
     getSubagentSessionRuntimeMs: vi.fn(() => undefined),
     getSubagentSessionStartedAt: vi.fn(() => undefined),
     isSubagentRunLive: vi.fn(() => false),
     isSubagentRunQueued: vi.fn(() => false),
-    listSubagentRunsForController: vi.fn((controllerSessionKey: string) =>
-      [...runsByChildSessionKey.values()].filter((entry) => {
-        const controller =
-          typeof entry.controllerSessionKey === "string"
-            ? entry.controllerSessionKey
-            : typeof entry.requesterSessionKey === "string"
-              ? entry.requesterSessionKey
-              : undefined;
-        return controller === controllerSessionKey;
-      }),
-    ),
     resolveSubagentSessionStatus: vi.fn(() => undefined),
     setSubagentRunsForTest: (runs: Record<string, unknown>[]) => {
       runsByChildSessionKey = new Map(
@@ -210,7 +197,6 @@ function expectChildMovedToNewParent(fixture: MovingChildFixture, now: number): 
   expect(loadGatewaySessionRow(fixture.newParent, { now: now + 50 })?.childSessions).toEqual([
     fixture.child,
   ]);
-  expect(subagentRegistryReadMock.buildSubagentSessionListReadIndex).not.toHaveBeenCalled();
 }
 
 describe("single gateway session row child projections", () => {
@@ -348,12 +334,19 @@ describe("single gateway session row child projections", () => {
     await withSingleRowCacheStore(
       "openclaw-single-row-missing-store-",
       "/tmp/openclaw-single-row-missing-store",
-      async () => {
+      async ({ now }) => {
         const databasePath = resolveOpenClawAgentSqlitePath({ agentId: MAIN_AGENT_ID });
-        expect(loadSessionEntry("main", { clone: false }).entry).toBeUndefined();
+        const missing = loadSessionEntry("main", { clone: false });
+        expect(missing.entry).toBeUndefined();
         expect(existsSync(databasePath)).toBe(false);
         expect(loadSessionEntry("main").entry).toBeUndefined();
         expect(existsSync(databasePath)).toBe(true);
+        expect(
+          buildGatewaySessionInfo({ ...missing, key: missing.canonicalKey, now }),
+        ).toMatchObject({
+          pinned: false,
+          pinnedAt: undefined,
+        });
       },
     );
   });
@@ -364,7 +357,19 @@ describe("single gateway session row child projections", () => {
       "/tmp/openclaw-single-row-cache",
       async ({ now, storePath }) => {
         const store: Record<string, SessionEntry> = {
-          "agent:main:subagent:parent-a": parentSession("parent-a", now),
+          "agent:main:subagent:parent-a": {
+            ...parentSession("parent-a", now),
+            skillsSnapshot: { prompt: "parent saved skill prompt", skills: [] },
+            systemPromptReport: {
+              source: "run",
+              generatedAt: now,
+              systemPrompt: { chars: 1, projectContextChars: 0, nonProjectContextChars: 1 },
+              injectedWorkspaceFiles: [],
+              skills: { promptChars: 0, entries: [] },
+              tools: { listChars: 0, schemaChars: 0, entries: [] },
+            },
+            toolOverrides: { mcpToolsDeny: { synthetic: ["blocked"] } },
+          },
           "agent:main:subagent:child-a": {
             ...runningChildSession("child-a", "agent:main:subagent:parent-a", now),
             skillsSnapshot: { prompt: "child saved skill prompt", skills: [] },
@@ -401,11 +406,47 @@ describe("single gateway session row child projections", () => {
             expect(
               entriesSpy.mock.calls.filter(([value]) => value === loaded.store).length,
             ).toBeLessThanOrEqual(1);
+            const parse = vi.spyOn(JSON, "parse");
+            try {
+              const lifecycle = loadGatewaySessionLifecycleSnapshot(
+                "agent:main:subagent:parent-a",
+                { now },
+              );
+              expect(lifecycle.row).toEqual(row);
+              expect(
+                parse.mock.calls.some(
+                  ([value]) =>
+                    value.includes("saved skill prompt") || value.includes('"systemPromptReport"'),
+                ),
+              ).toBe(false);
+              const denied = lifecycle.row?.toolOverrides?.mcpToolsDeny?.synthetic;
+              if (!denied) {
+                throw new Error("expected lifecycle tool overrides");
+              }
+              denied.push("response-only");
+              expect(
+                loadGatewaySessionLifecycleSnapshot("agent:main:subagent:parent-a", { now }).row,
+              ).toEqual(row);
+            } finally {
+              parse.mockRestore();
+            }
           } finally {
             entriesSpy.mockRestore();
           }
         }
-        expect(subagentRegistryReadMock.buildSubagentSessionListReadIndex).not.toHaveBeenCalled();
+        await updateSessionEntry({ sessionKey: "agent:main:subagent:parent-a", storePath }, () => ({
+          label: "fresh lifecycle label",
+          updatedAt: now + 1,
+        }));
+        await updateSessionEntry({ sessionKey: "agent:main:subagent:child-a", storePath }, () => ({
+          parentSessionKey: "agent:main:subagent:parent-b",
+          updatedAt: now + 1,
+        }));
+        const fresh = loadGatewaySessionLifecycleSnapshot("agent:main:subagent:parent-a", { now });
+        expect(fresh.row?.label).toBe("fresh lifecycle label");
+        expect(fresh.row?.childSessions).toBeUndefined();
+        expect(rowA?.label).toBeUndefined();
+        expect(rowA?.childSessions).toEqual(["agent:main:subagent:child-a"]);
       },
     );
   });
@@ -466,6 +507,39 @@ describe("single gateway session row child projections", () => {
     );
   });
 
+  test.each(["main", "worker"])(
+    "removes deleted runtime-only children from exact rows (%s)",
+    async (agentId) => {
+      await withSingleRowCacheStore(
+        "openclaw-canonical-child-",
+        "/tmp/openclaw-canonical-child",
+        async ({ now, storePath }) => {
+          const parentKey = "agent:main:parent";
+          const childKey = `agent:${agentId}:subagent:child`;
+          const childStorePath = resolveSessionStorePathCore(undefined, { agentId });
+          await seedSessionEntries(storePath, { [parentKey]: parentSession("parent", now) });
+          await replaceSessionEntry(
+            { agentId, storePath: childStorePath, sessionKey: childKey },
+            {
+              sessionId: "child",
+              updatedAt: now,
+            },
+          );
+          setSubagentControllerRun(childKey, parentKey, now);
+          expect(loadGatewaySessionRow(parentKey, { now })?.childSessions).toEqual([childKey]);
+
+          await deleteSessionEntryLifecycle({
+            agentId,
+            storePath: childStorePath,
+            archiveTranscript: false,
+            target: { canonicalKey: childKey, storeKeys: [childKey] },
+          });
+          expect(loadGatewaySessionRow(parentKey, { now })?.childSessions).toBeUndefined();
+        },
+      );
+    },
+  );
+
   test("builds shared subagent metadata context for single-row session lists", async () => {
     await withSingleRowCacheStore(
       "openclaw-single-row-list-context-",
@@ -496,9 +570,6 @@ describe("single gateway session row child projections", () => {
 
         expect(asyncListed.sessions).toHaveLength(1);
         expect(subagentRegistryReadMock.buildSubagentSessionListReadIndex).toHaveBeenCalledTimes(1);
-        expect(
-          subagentRegistryReadMock.getSessionDisplaySubagentRunByChildSessionKey,
-        ).not.toHaveBeenCalled();
       },
     );
   });

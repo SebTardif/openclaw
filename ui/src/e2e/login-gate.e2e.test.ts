@@ -103,15 +103,15 @@ suite.define(() => {
     }
   });
 
-  it("blocks non-chat page actions visibly while reconnecting", async () => {
+  it("blocks server settings actions visibly while reconnecting", async () => {
     const context = await suite.browser.newContext({ viewport: { height: 900, width: 1280 } });
     const page = await context.newPage();
     const gateway = await installMockGateway(page);
 
     try {
-      await page.goto(new URL("settings/connection", suite.server.baseUrl).href);
+      await page.goto(new URL("settings/talk", suite.server.baseUrl).href);
       await page.locator("openclaw-app-shell").waitFor();
-      await page.locator("openclaw-connection-page .content-header").waitFor();
+      await page.locator("openclaw-config-page .content-header").waitFor();
       await gateway.deferNext("connect");
       await gateway.closeLatest(1012, "test reconnect");
 
@@ -131,7 +131,7 @@ suite.define(() => {
         const navRect = document.querySelector(".shell-nav")?.getBoundingClientRect();
         const mainRect = document.querySelector("#control-ui-main")?.getBoundingClientRect();
         const headerRect = document
-          .querySelector("openclaw-connection-page .content-header")
+          .querySelector("openclaw-config-page .content-header")
           ?.getBoundingClientRect();
         return {
           headerTop: headerRect?.top,
@@ -213,7 +213,7 @@ suite.define(() => {
   });
 
   it.each([
-    { name: "tablet", width: 1024 },
+    { name: "tablet", width: 900 },
     { name: "phone", width: 390 },
   ])("spans the $name settings viewport while reconnecting", async ({ width }) => {
     const context = await suite.browser.newContext({ viewport: { height: 900, width } });
@@ -221,7 +221,7 @@ suite.define(() => {
     const gateway = await installMockGateway(page);
 
     try {
-      await page.goto(new URL("settings/connection", suite.server.baseUrl).href);
+      await page.goto(new URL("settings/talk", suite.server.baseUrl).href);
       await page.locator("openclaw-app-shell").waitFor();
       await gateway.deferNext("connect");
       await gateway.closeLatest(1012, "test reconnect");
@@ -245,7 +245,7 @@ suite.define(() => {
         details: { code: ConnectErrorDetailCodes.AUTH_TOKEN_MISSING },
       },
       expectedKind: "auth-required",
-      expectedTitle: "Token needed",
+      expectedTitle: "This Gateway expects its token",
     },
     {
       name: "missing identity header",
@@ -359,6 +359,53 @@ suite.define(() => {
         label: `login-guidance-${fixture.name}`,
       });
       throw error;
+    } finally {
+      await closeContext(context);
+    }
+  });
+
+  it("retries pending pairing and enters the app after approval without clicks", async () => {
+    const context = await suite.browser.newContext({ viewport: { height: 900, width: 1280 } });
+    const page = await context.newPage();
+    const gateway = await installMockGateway(page, { deferredMethods: ["connect"] });
+    const pairingError = {
+      code: "NOT_PAIRED",
+      message: "pairing required (requestId: req-pending)",
+      details: {
+        code: ConnectErrorDetailCodes.PAIRING_REQUIRED,
+        recommendedNextStep: "wait_then_retry",
+        retryable: true,
+        pauseReconnect: false,
+      },
+    };
+
+    try {
+      await page.goto(suite.server.baseUrl);
+      await gateway.waitForRequest("connect");
+      await gateway.deferNext("connect");
+      await gateway.rejectDeferred("connect", pairingError);
+      const failure = page.locator('.login-gate__failure[data-kind="pairing-required"]');
+      await failure.waitFor();
+      await gateway.waitForRequest("connect", { after: 1 });
+      await page.screenshot({
+        path: path.join(RECOVERY_ARTIFACT_DIR, "pairing-wait.png"),
+        fullPage: true,
+      });
+      expect(await failure.textContent()).toContain(
+        "Waiting for approval… this page connects on its own once the request is approved.",
+      );
+      expect(
+        await failure.getByRole("button", { name: "Check now", exact: true }).isEnabled(),
+      ).toBe(true);
+      expect(await page.locator("openclaw-app-shell").count()).toBe(0);
+
+      await gateway.deferNext("connect");
+      await gateway.rejectDeferred("connect", pairingError);
+      await gateway.waitForRequest("connect", { after: 2 });
+      expect(await failure.isVisible()).toBe(true);
+      await gateway.resolveDeferred("connect");
+      await page.locator("openclaw-app-shell").waitFor();
+      expect(await page.locator("openclaw-login-gate").count()).toBe(0);
     } finally {
       await closeContext(context);
     }
