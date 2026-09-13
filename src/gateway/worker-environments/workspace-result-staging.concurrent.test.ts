@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,10 +7,18 @@ import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import * as commandRuntime from "../../process/exec.js";
 import {
+  MAX_RECONCILIATION_FILE_BYTES,
+  serializeWorkerWorkspaceManifest,
+  type WorkerWorkspaceManifest,
+  type WorkerWorkspaceManifestEntry,
+} from "./workspace-manifest.js";
+import * as workspaceReconcileFs from "./workspace-reconcile-fs.js";
+import {
   deleteStagedWorkerWorkspaceResult,
   hasWorkerWorkspaceResultRef,
   preparedWorkerWorkspaceResultRef,
   workerWorkspaceResultRef,
+  workerWorkspaceResultStaging,
 } from "./workspace-result-staging.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -105,5 +114,50 @@ describe("worker workspace result Git ownership", () => {
       await Promise.allSettled(operations);
       spy.mockRestore();
     }
+  });
+});
+
+describe("worker workspace result staging cap", () => {
+  it("rejects a file that grows past the reconciliation cap after the hash match", async () => {
+    const { stageWorkerWorkspaceResult } = workerWorkspaceResultStaging;
+    const root = tempDirs.make("workspace-staged-oversize-reread-");
+    const local = path.join(root, "local");
+    const payload = path.join(root, "payload");
+    await initializeRepository(local);
+    await fs.mkdir(payload);
+    await fs.writeFile(path.join(payload, "result.txt"), "worker\n");
+    const entries: WorkerWorkspaceManifestEntry[] = [];
+    for (const name of (await fs.readdir(payload)).toSorted()) {
+      const content = await fs.readFile(path.join(payload, name));
+      entries.push({
+        path: name,
+        type: "file",
+        mode: 0o644,
+        size: content.length,
+        sha256: createHash("sha256").update(content).digest("hex"),
+      });
+    }
+    const encode = (manifest: WorkerWorkspaceManifest) => {
+      const raw = serializeWorkerWorkspaceManifest(manifest);
+      return { raw, ref: `sha256:${createHash("sha256").update(raw).digest("hex")}` };
+    };
+    const base = encode({ version: 1, baseCommit: null, entries: [], directories: [] });
+    const current = encode({ version: 1, baseCommit: null, entries, directories: [] });
+    vi.spyOn(workspaceReconcileFs, "absoluteEntryMatches").mockImplementation(async (absolute) => {
+      await fs.truncate(absolute, MAX_RECONCILIATION_FILE_BYTES + 1);
+      return true;
+    });
+
+    await expect(
+      stageWorkerWorkspaceResult({
+        root: local,
+        stagingRoot: payload,
+        stagedResultRef: workerWorkspaceResultRef("claim-oversize-reread"),
+        baseManifestRef: base.ref,
+        currentManifestRef: current.ref,
+        baseManifestRaw: base.raw,
+        currentManifestRaw: current.raw,
+      }),
+    ).rejects.toThrow("exceeds its byte limit");
   });
 });

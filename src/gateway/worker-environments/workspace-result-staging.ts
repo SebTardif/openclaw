@@ -43,6 +43,7 @@ import {
   parseChangedWorkspaceResult,
   readStagedWorkerWorkspaceEntry,
 } from "./workspace-result-inventory.runtime.js";
+import { readCappedStagedFile } from "./workspace-staged-file-read.js";
 
 const WORKER_RESULT_CLAIM_ID_PATTERN = /^[A-Za-z0-9-]+$/u;
 const workspaceLog = createSubsystemLogger("gateway/worker-workspace");
@@ -218,7 +219,7 @@ async function stageWorkerWorkspaceResult(params: {
       throw new Error(`Cloud workspace staged payload is invalid: ${entry.path}`);
     }
     const content =
-      entry.type === "symlink" ? Buffer.from(entry.target) : await fs.readFile(source);
+      entry.type === "symlink" ? Buffer.from(entry.target) : await readCappedStagedFile(source);
     if (
       entry.type === "file" &&
       (content.byteLength !== entry.size ||
