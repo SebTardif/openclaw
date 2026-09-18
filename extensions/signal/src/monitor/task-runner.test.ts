@@ -102,18 +102,14 @@ describe("waitForSignalMonitorTeardown", () => {
 
   it("returns when ingress stop never settles", async () => {
     vi.useFakeTimers();
-    const runtime = {
-      log: vi.fn(),
-      error: vi.fn(),
-      exit: vi.fn(),
-    } satisfies RuntimeEnv;
+    const { runtime, runner } = createHarness();
 
     let resolved = false;
     const teardown = waitForSignalMonitorTeardown({
       runtime,
       stopIngress: () => new Promise(() => {}),
       stopDaemon: async () => {},
-      waitForIdle: async () => {},
+      waitForIdle: (extras) => runner.waitForIdle(extras),
     }).then(() => {
       resolved = true;
     });
@@ -121,7 +117,84 @@ describe("waitForSignalMonitorTeardown", () => {
     expect(resolved).toBe(true);
     await expect(teardown).resolves.toBeUndefined();
     expect(runtime.error).toHaveBeenCalledWith(
-      expect.stringContaining("leftover ingress or reply work"),
+      expect.stringContaining(`${WAIT_FOR_IDLE_TIMEOUT_MS}ms`),
+    );
+  });
+
+  it("does not return while daemon stop is still unresolved", async () => {
+    vi.useFakeTimers();
+    const { runtime, runner } = createHarness();
+    const daemon = deferredTask();
+    let returned = false;
+    const teardown = waitForSignalMonitorTeardown({
+      runtime,
+      stopDaemon: () => daemon.promise,
+      waitForIdle: (extras) => runner.waitForIdle(extras),
+    }).then(() => {
+      returned = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(WAIT_FOR_IDLE_TIMEOUT_MS);
+    await Promise.resolve();
+    expect(returned).toBe(false);
+    expect(runtime.error).not.toHaveBeenCalled();
+
+    daemon.resolve();
+    await expect(teardown).resolves.toBeUndefined();
+    expect(returned).toBe(true);
+  });
+
+  it("resets the teardown deadline when receive work still makes progress", async () => {
+    vi.useFakeTimers();
+    const { runtime, runner } = createHarness();
+    const first = deferredTask();
+    const second = deferredTask();
+    void runner.runTask(() => first.promise);
+    void runner.runTask(() => second.promise);
+
+    let returned = false;
+    const teardown = waitForSignalMonitorTeardown({
+      runtime,
+      stopDaemon: async () => {},
+      waitForIdle: (extras) => runner.waitForIdle(extras),
+    }).then(() => {
+      returned = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(WAIT_FOR_IDLE_TIMEOUT_MS - 5_000);
+    first.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(returned).toBe(false);
+    expect(runtime.error).not.toHaveBeenCalled();
+
+    second.resolve();
+    await expect(teardown).resolves.toBeUndefined();
+    expect(runtime.error).not.toHaveBeenCalled();
+  });
+
+  it("does not stop the daemon until receive-work drain finishes or times out", async () => {
+    vi.useFakeTimers();
+    const { runtime, runner } = createHarness();
+    let daemonStopped = false;
+    const teardown = waitForSignalMonitorTeardown({
+      runtime,
+      stopIngress: () => new Promise(() => {}),
+      stopDaemon: async () => {
+        daemonStopped = true;
+      },
+      waitForIdle: (extras) => runner.waitForIdle(extras),
+    });
+
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(WAIT_FOR_IDLE_TIMEOUT_MS - 1);
+    expect(daemonStopped).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(teardown).resolves.toBeUndefined();
+    expect(daemonStopped).toBe(true);
+    expect(runtime.error).toHaveBeenCalledWith(
+      expect.stringContaining(`${WAIT_FOR_IDLE_TIMEOUT_MS}ms`),
     );
   });
 });

@@ -3,15 +3,19 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   config,
+  createMockSignalDaemonHandle,
+  createSignalToolResultConfig,
   getSignalToolResultIngressQueue,
   getSignalToolResultTestMocks,
   installSignalToolResultTestHooks,
+  setSignalToolResultTestConfig,
 } from "./monitor.tool-result.test-harness.js";
 
 installSignalToolResultTestHooks();
 const { monitorSignalProvider } = await import("./monitor.js");
 
-const { replyMock, sendMock, signalRpcRequestMock, streamMock } = getSignalToolResultTestMocks();
+const { replyMock, sendMock, signalRpcRequestMock, spawnSignalDaemonMock, streamMock } =
+  getSignalToolResultTestMocks();
 
 const WAIT_FOR_IDLE_TIMEOUT_MS = 30_000;
 
@@ -155,5 +159,52 @@ describe("monitorSignalProvider hung-receive shutdown", () => {
     expect(claimedAfterReturn.map((claim) => claim.id)).toEqual(
       claimedBeforeStop.map((claim) => claim.id),
     );
+  });
+
+  it("does not complete while managed daemon stop is still unresolved", async () => {
+    setSignalToolResultTestConfig(createSignalToolResultConfig());
+    const abortController = new AbortController();
+    const runtime = createMonitorRuntime();
+    let resolveDaemonStop: (() => void) | undefined;
+    spawnSignalDaemonMock.mockReturnValue(
+      createMockSignalDaemonHandle({
+        stop: vi.fn(
+          () =>
+            new Promise<void>((resolve) => {
+              resolveDaemonStop = resolve;
+            }),
+        ),
+      }),
+    );
+    streamMock.mockImplementation(async () => {
+      abortController.abort(new Error("monitor stopped"));
+    });
+
+    const monitorPromise = monitorSignalProvider({
+      autoStart: true,
+      baseUrl: "http://127.0.0.1:8080",
+      abortSignal: abortController.signal,
+      config: config as OpenClawConfig,
+      runtime,
+    });
+    await vi.waitFor(() => expect(resolveDaemonStop).toBeDefined());
+
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(WAIT_FOR_IDLE_TIMEOUT_MS);
+    let returned = false;
+    const returnedPromise = monitorPromise.then(() => {
+      returned = true;
+    });
+    await Promise.resolve();
+    expect(returned).toBe(false);
+    expect(runtime.error).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+    if (!resolveDaemonStop) {
+      throw new Error("expected managed daemon stop to start");
+    }
+    resolveDaemonStop();
+    await returnedPromise;
+    expect(returned).toBe(true);
   });
 });

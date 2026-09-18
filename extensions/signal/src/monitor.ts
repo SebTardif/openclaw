@@ -609,14 +609,14 @@ export async function monitorSignalProvider(opts: MonitorSignalOpts = {}): Promi
     }
     throw err;
   } finally {
-    // Ingress stop waits for active deliveries. Race it with the idle window so a hung
-    // attachment or handler cannot hide waitForIdle. Leftover work keeps running.
+    // Bound receive/reply drain first. Then wait for observed daemon exit so a
+    // stuck signal-cli cannot report the channel complete.
     const shuttingDownIngress = ingressMonitor;
     await waitForSignalMonitorTeardown({
       runtime,
       stopIngress: shuttingDownIngress ? () => shuttingDownIngress.stop() : undefined,
       stopDaemon: () => daemonLifecycle.stop(),
-      waitForIdle: () => monitorTaskRunner.waitForIdle(),
+      waitForIdle: (extras) => monitorTaskRunner.waitForIdle(extras),
     });
     opts.abortSignal?.removeEventListener("abort", onAbort);
   }
