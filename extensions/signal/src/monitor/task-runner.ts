@@ -1,7 +1,7 @@
 // Signal plugin module implements monitor task runner behavior.
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 
-export const SIGNAL_MONITOR_IDLE_TIMEOUT_MS = 30_000;
+const SIGNAL_MONITOR_IDLE_TIMEOUT_MS = 30_000;
 
 function createIdleTimeoutPromise(timeoutMs: number): {
   promise: Promise<"timeout">;
