@@ -61,7 +61,10 @@ import type {
   SignalReactionMessage,
   SignalReactionTarget,
 } from "./monitor/event-handler.types.js";
-import { createSignalMonitorTaskRunner } from "./monitor/task-runner.js";
+import {
+  createSignalMonitorTaskRunner,
+  waitForSignalMonitorTeardown,
+} from "./monitor/task-runner.js";
 import { createSignalNativeReplyIdPlan } from "./native-reply.js";
 import { materializeSignalPresentationFallback } from "./presentation-fallback.js";
 import { registerSignalReactionTargetsForDeliveredPayload } from "./reaction-targets.js";
@@ -606,10 +609,15 @@ export async function monitorSignalProvider(opts: MonitorSignalOpts = {}): Promi
     }
     throw err;
   } finally {
-    await ingressMonitor?.stop();
-    // Daemon attachment finishes before monitor tasks start. Keep teardown open until both the
-    // child has exited and already-started reply work has drained.
-    await Promise.all([daemonLifecycle.stop(), monitorTaskRunner.waitForIdle()]);
+    // Ingress stop waits for active deliveries. Race it with the idle window so a hung
+    // attachment or handler cannot hide waitForIdle. Leftover work keeps running.
+    const shuttingDownIngress = ingressMonitor;
+    await waitForSignalMonitorTeardown({
+      runtime,
+      stopIngress: shuttingDownIngress ? () => shuttingDownIngress.stop() : undefined,
+      stopDaemon: () => daemonLifecycle.stop(),
+      waitForIdle: () => monitorTaskRunner.waitForIdle(),
+    });
     opts.abortSignal?.removeEventListener("abort", onAbort);
   }
 }

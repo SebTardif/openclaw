@@ -1,7 +1,7 @@
 // Signal tests cover monitor task-runner idle drain behavior.
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSignalMonitorTaskRunner } from "./task-runner.js";
+import { createSignalMonitorTaskRunner, waitForSignalMonitorTeardown } from "./task-runner.js";
 
 function deferredTask() {
   let resolve: (() => void) | undefined;
@@ -92,5 +92,36 @@ describe("createSignalMonitorTaskRunner waitForIdle", () => {
     second.resolve();
     await expect(idle).resolves.toBeUndefined();
     expect(runtime.error).not.toHaveBeenCalled();
+  });
+});
+
+describe("waitForSignalMonitorTeardown", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns when ingress stop never settles", async () => {
+    vi.useFakeTimers();
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+      exit: vi.fn(),
+    } satisfies RuntimeEnv;
+
+    let resolved = false;
+    const teardown = waitForSignalMonitorTeardown({
+      runtime,
+      stopIngress: () => new Promise(() => {}),
+      stopDaemon: async () => {},
+      waitForIdle: async () => {},
+    }).then(() => {
+      resolved = true;
+    });
+    await vi.advanceTimersByTimeAsync(WAIT_FOR_IDLE_TIMEOUT_MS);
+    expect(resolved).toBe(true);
+    await expect(teardown).resolves.toBeUndefined();
+    expect(runtime.error).toHaveBeenCalledWith(
+      expect.stringContaining("leftover ingress or reply work"),
+    );
   });
 });

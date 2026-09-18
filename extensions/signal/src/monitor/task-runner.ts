@@ -1,7 +1,7 @@
 // Signal plugin module implements monitor task runner behavior.
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 
-const DEFAULT_WAIT_FOR_IDLE_TIMEOUT_MS = 30_000;
+export const SIGNAL_MONITOR_IDLE_TIMEOUT_MS = 30_000;
 
 function createIdleTimeoutPromise(timeoutMs: number): {
   promise: Promise<"timeout">;
@@ -39,7 +39,7 @@ export function createSignalMonitorTaskRunner(runtime: RuntimeEnv) {
       // Idle window, not wall-clock: keep waiting while tasks settle; return if none complete.
       while (inFlight.size > 0) {
         const snapshot = Array.from(inFlight);
-        const timeout = createIdleTimeoutPromise(DEFAULT_WAIT_FOR_IDLE_TIMEOUT_MS);
+        const timeout = createIdleTimeoutPromise(SIGNAL_MONITOR_IDLE_TIMEOUT_MS);
         const outcome = await Promise.race<"timeout" | "settled">([
           timeout.promise,
           ...snapshot.map((task) =>
@@ -53,11 +53,39 @@ export function createSignalMonitorTaskRunner(runtime: RuntimeEnv) {
         if (outcome === "timeout") {
           const remaining = inFlight.size;
           runtime.error?.(
-            `signal waitForIdle made no progress within ${DEFAULT_WAIT_FOR_IDLE_TIMEOUT_MS}ms; continuing teardown with ${remaining} task(s) still in flight`,
+            `signal waitForIdle made no progress within ${SIGNAL_MONITOR_IDLE_TIMEOUT_MS}ms; continuing teardown with ${remaining} task(s) still in flight`,
           );
           return;
         }
       }
     },
   };
+}
+
+export async function waitForSignalMonitorTeardown(params: {
+  runtime: RuntimeEnv;
+  stopIngress?: () => Promise<void>;
+  stopDaemon: () => Promise<void>;
+  waitForIdle: () => Promise<void>;
+  timeoutMs?: number;
+}): Promise<void> {
+  const timeoutMs = params.timeoutMs ?? SIGNAL_MONITOR_IDLE_TIMEOUT_MS;
+  const timeout = createIdleTimeoutPromise(timeoutMs);
+  try {
+    const outcome = await Promise.race<"done" | "timeout">([
+      Promise.all([
+        params.stopIngress?.() ?? Promise.resolve(),
+        params.stopDaemon(),
+        params.waitForIdle(),
+      ]).then(() => "done" as const),
+      timeout.promise,
+    ]);
+    if (outcome === "timeout") {
+      params.runtime.error?.(
+        `signal monitor teardown made no progress within ${timeoutMs}ms; continuing with leftover ingress or reply work`,
+      );
+    }
+  } finally {
+    timeout.clear();
+  }
 }
