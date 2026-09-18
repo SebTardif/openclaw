@@ -21,6 +21,7 @@ import { createFeishuClient } from "./client.js";
 import {
   claimUnprocessedFeishuMessage,
   finalizeFeishuMessageProcessing,
+  forgetProcessedFeishuMessage,
   type FeishuMessageProcessingClaim,
 } from "./dedup.js";
 import { sendCardFeishu, sendMessageFeishu } from "./send.js";
@@ -68,6 +69,24 @@ function cardActionReplayKey(token: string): string {
   return `card-action:${token.trim()}`;
 }
 
+type DecodedFeishuCardAction = ReturnType<typeof decodeFeishuCardAction>;
+
+// Command callbacks already persist via handleFeishuMessage using
+// card-action-${token}. Only direct card/notice effects need this key.
+function shouldPersistDirectCardAction(decoded: DecodedFeishuCardAction): boolean {
+  if (decoded.kind === "invalid") {
+    return true;
+  }
+  if (decoded.kind !== "structured") {
+    return false;
+  }
+  const { envelope } = decoded;
+  if (envelope.a === FEISHU_APPROVAL_CONFIRM_ACTION || envelope.k === "quick") {
+    return false;
+  }
+  return true;
+}
+
 type PersistentCardActionClaim =
   | { kind: "none" }
   | { kind: "duplicate" }
@@ -111,6 +130,22 @@ async function persistCompletedCardActionToken(params: {
     processingClaim: params.persistClaim.handle,
     log: params.log,
   });
+}
+
+async function releasePersistentCardActionToken(params: {
+  token: string;
+  accountId: string;
+  persistClaim: PersistentCardActionClaim;
+  log: (...args: unknown[]) => void;
+}): Promise<void> {
+  if (params.persistClaim.kind !== "claimed") {
+    return;
+  }
+  await forgetProcessedFeishuMessage(
+    cardActionReplayKey(params.token),
+    params.accountId,
+    params.log,
+  );
 }
 
 function beginFeishuCardActionToken(params: {
@@ -400,20 +435,34 @@ export async function handleFeishuCardAction(params: {
     log(`feishu[${account.accountId}]: skipping duplicate card action token`);
     return;
   }
-  const persistClaim = await claimPersistentCardActionToken({
-    token: event.token,
-    accountId: account.accountId,
-    now,
-    log,
-  });
+  const persistClaim = shouldPersistDirectCardAction(decoded)
+    ? await claimPersistentCardActionToken({
+        token: event.token,
+        accountId: account.accountId,
+        now,
+        log,
+      })
+    : { kind: "none" as const };
   if (persistClaim.kind === "duplicate") {
     completeFeishuCardAction(event.token, account.accountId, now);
     log(`feishu[${account.accountId}]: skipping duplicate card action token`);
     return;
   }
-  const finish = async () => {
+  const finishMemory = () => {
     completeFeishuCardAction(event.token, account.accountId);
+  };
+  const finishSuccess = async () => {
+    finishMemory();
     await persistCompletedCardActionToken({
+      token: event.token,
+      accountId: account.accountId,
+      persistClaim,
+      log,
+    });
+  };
+  const finishFailure = async () => {
+    finishMemory();
+    await releasePersistentCardActionToken({
       token: event.token,
       accountId: account.accountId,
       persistClaim,
@@ -432,7 +481,7 @@ export async function handleFeishuCardAction(params: {
         reason: decoded.reason,
         accountId,
       });
-      await finish();
+      await finishSuccess();
       return;
     }
 
@@ -451,7 +500,7 @@ export async function handleFeishuCardAction(params: {
             reason: "malformed",
             accountId,
           });
-          await finish();
+          await finishSuccess();
           return;
         }
         const prompt =
@@ -466,7 +515,7 @@ export async function handleFeishuCardAction(params: {
             reason: "malformed",
             accountId,
           });
-          await finish();
+          await finishSuccess();
           return;
         }
         await sendCardFeishu({
@@ -489,7 +538,7 @@ export async function handleFeishuCardAction(params: {
           }),
           accountId,
         });
-        await finish();
+        await finishSuccess();
         return;
       }
 
@@ -500,7 +549,7 @@ export async function handleFeishuCardAction(params: {
           text: "Cancelled.",
           accountId,
         });
-        await finish();
+        await finishSuccess();
         return;
       }
 
@@ -513,7 +562,7 @@ export async function handleFeishuCardAction(params: {
             reason: "malformed",
             accountId,
           });
-          await finish();
+          await finishSuccess();
           return;
         }
         await dispatchSyntheticCommand({
@@ -527,7 +576,7 @@ export async function handleFeishuCardAction(params: {
           accountId,
           chatType: envelope.c?.t,
         });
-        await finish();
+        await finishSuccess();
         return;
       }
 
@@ -537,7 +586,7 @@ export async function handleFeishuCardAction(params: {
         reason: "malformed",
         accountId,
       });
-      await finish();
+      await finishSuccess();
       return;
     }
 
@@ -557,9 +606,9 @@ export async function handleFeishuCardAction(params: {
       channelRuntime: params.channelRuntime,
       accountId,
     });
-    await finish();
+    await finishSuccess();
   } catch (err) {
-    await finish();
+    await finishFailure();
     throw err;
   }
 }

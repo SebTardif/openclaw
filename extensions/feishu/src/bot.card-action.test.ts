@@ -20,6 +20,7 @@ import {
   FEISHU_APPROVAL_REQUEST_ACTION,
 } from "./card-ux-approval.js";
 import { feishuDedupeState } from "./dedup-state.js";
+import { hasProcessedFeishuMessage } from "./dedup.js";
 
 // Mock account resolution
 vi.mock("./accounts.js", () => ({
@@ -183,6 +184,17 @@ describe("Feishu Card Action Handler", () => {
       mockCallArg(sendCardFeishuMock, callIndex, "sendCardFeishu"),
       "sendCardFeishu args",
     );
+  }
+
+  function createCancelActionEvent(token: string): FeishuCardActionEvent {
+    return createCardActionEvent({
+      token,
+      actionValue: createFeishuCardInteractionEnvelope({
+        k: "button",
+        a: FEISHU_APPROVAL_CANCEL_ACTION,
+        c: { u: "u123", h: "chat1", t: "group", e: Date.now() + 60_000 },
+      }),
+    });
   }
 
   it("handles card action with text payload", async () => {
@@ -610,20 +622,61 @@ describe("Feishu Card Action Handler", () => {
     expect(handleFeishuMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a replayed callback token after process restart", async () => {
-    const event = createStructuredQuickActionEvent({
-      token: "tok-restart-persist",
-      action: "feishu.quick_actions.help",
-      command: "/help",
-    });
+  it("rejects a replayed cancel notice after process restart", async () => {
+    const event = createCancelActionEvent("tok-restart-persist");
 
     await handleFeishuCardAction({ cfg, event, runtime });
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+    await expect(
+      hasProcessedFeishuMessage("card-action:tok-restart-persist", "mock-account"),
+    ).resolves.toBe(true);
+
     processedCardActions.clear();
     feishuDedupeState.reset();
 
     await handleFeishuCardAction({ cfg, event, runtime });
 
-    expect(handleFeishuMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+    expect(handleFeishuMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not write a second durable claim for command callbacks", async () => {
+    const event = createStructuredQuickActionEvent({
+      token: "tok-command-no-second-claim",
+      action: "feishu.quick_actions.help",
+      command: "/help",
+    });
+
+    await handleFeishuCardAction({ cfg, event, runtime });
+    await expect(
+      hasProcessedFeishuMessage("card-action:tok-command-no-second-claim", "mock-account"),
+    ).resolves.toBe(false);
+
+    processedCardActions.clear();
+    feishuDedupeState.reset();
+
+    await handleFeishuCardAction({ cfg, event, runtime });
+
+    expect(handleFeishuMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not persist a failed direct send across restart", async () => {
+    const event = createCancelActionEvent("tok-failed-direct");
+    sendMessageFeishuMock.mockRejectedValueOnce(new Error("send failed"));
+
+    await expect(handleFeishuCardAction({ cfg, event, runtime })).rejects.toThrow("send failed");
+    await expect(
+      hasProcessedFeishuMessage("card-action:tok-failed-direct", "mock-account"),
+    ).resolves.toBe(false);
+
+    processedCardActions.clear();
+    feishuDedupeState.reset();
+    sendMessageFeishuMock.mockResolvedValueOnce(undefined);
+
+    await handleFeishuCardAction({ cfg, event, runtime });
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(2);
+    expect(sendMessageCall(1).text).toBe("Cancelled.");
   });
 
   it("does not log raw duplicate callback tokens", async () => {
