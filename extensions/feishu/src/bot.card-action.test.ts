@@ -679,6 +679,24 @@ describe("Feishu Card Action Handler", () => {
     expect(sendMessageCall(1).text).toBe("Cancelled.");
   });
 
+  it("releases a failed direct-send claim so same-process retry can proceed", async () => {
+    const event = createCancelActionEvent("tok-failed-release");
+    sendMessageFeishuMock.mockRejectedValueOnce(new Error("send failed"));
+
+    await expect(handleFeishuCardAction({ cfg, event, runtime })).rejects.toThrow("send failed");
+    await expect(
+      hasProcessedFeishuMessage("card-action:tok-failed-release", "mock-account"),
+    ).resolves.toBe(false);
+
+    processedCardActions.clear();
+    sendMessageFeishuMock.mockResolvedValueOnce(undefined);
+
+    await handleFeishuCardAction({ cfg, event, runtime });
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(2);
+    expect(sendMessageCall(1).text).toBe("Cancelled.");
+  });
+
   it("does not log raw duplicate callback tokens", async () => {
     const log = vi.fn();
     const callbackToken = "test-token-placeholder";

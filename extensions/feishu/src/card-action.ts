@@ -21,7 +21,6 @@ import { createFeishuClient } from "./client.js";
 import {
   claimUnprocessedFeishuMessage,
   finalizeFeishuMessageProcessing,
-  forgetProcessedFeishuMessage,
   type FeishuMessageProcessingClaim,
 } from "./dedup.js";
 import { sendCardFeishu, sendMessageFeishu } from "./send.js";
@@ -132,20 +131,14 @@ async function persistCompletedCardActionToken(params: {
   });
 }
 
-async function releasePersistentCardActionToken(params: {
-  token: string;
-  accountId: string;
+function releasePersistentCardActionToken(params: {
   persistClaim: PersistentCardActionClaim;
-  log: (...args: unknown[]) => void;
-}): Promise<void> {
+  error?: unknown;
+}): void {
   if (params.persistClaim.kind !== "claimed") {
     return;
   }
-  await forgetProcessedFeishuMessage(
-    cardActionReplayKey(params.token),
-    params.accountId,
-    params.log,
-  );
+  params.persistClaim.handle.release(params.error === undefined ? {} : { error: params.error });
 }
 
 function beginFeishuCardActionToken(params: {
@@ -460,14 +453,9 @@ export async function handleFeishuCardAction(params: {
       log,
     });
   };
-  const finishFailure = async () => {
+  const finishFailure = (error?: unknown) => {
     finishMemory();
-    await releasePersistentCardActionToken({
-      token: event.token,
-      accountId: account.accountId,
-      persistClaim,
-      log,
-    });
+    releasePersistentCardActionToken({ persistClaim, error });
   };
 
   try {
@@ -608,7 +596,7 @@ export async function handleFeishuCardAction(params: {
     });
     await finishSuccess();
   } catch (err) {
-    await finishFailure();
+    finishFailure(err);
     throw err;
   }
 }
