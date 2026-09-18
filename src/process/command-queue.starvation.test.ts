@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { enqueueCommandInLane, setCommandLaneConcurrency } from "./command-queue.js";
+import { pickNextAmongHeads } from "./command-queue.priority.js";
 import { resetCommandQueueStateForTest } from "./command-queue.test-support.js";
 import { CommandLane, STARVATION_PROMOTION_MS } from "./lanes.js";
 
@@ -137,5 +138,32 @@ describe("command queue starvation promotion", () => {
     release();
     await Promise.all([agedBg, freshNormal]);
     expect(calls).toEqual(["aged-bg", "fresh-normal"]);
+  });
+});
+
+describe("pickNextAmongHeads sequence ties", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("prefers global sequence when wall clocks go backward", () => {
+    const older = { id: "a", priority: 0, enqueuedAt: 1_000, sequence: 1 };
+    const newer = { id: "b", priority: 0, enqueuedAt: 100, sequence: 2 };
+    expect(pickNextAmongHeads([newer, older])?.id).toBe("a");
+    expect(pickNextAmongHeads([older, newer])?.id).toBe("a");
+  });
+
+  it("prefers global sequence when aged background ties fresh normal", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(50_000);
+    const agedBackground = {
+      id: "aged-bg",
+      priority: -1,
+      enqueuedAt: 50_000 - STARVATION_PROMOTION_MS - 1,
+      sequence: 1,
+    };
+    const freshNormal = { id: "fresh-normal", priority: 0, enqueuedAt: 1, sequence: 2 };
+    expect(pickNextAmongHeads([freshNormal, agedBackground])?.id).toBe("aged-bg");
+    expect(pickNextAmongHeads([agedBackground, freshNormal])?.id).toBe("aged-bg");
   });
 });

@@ -348,6 +348,37 @@ describe("command lane capacity groups", () => {
     await queuedHooks[1];
   });
 
+  test("equal-priority group heads keep global sequence after clock rollback", async () => {
+    vi.useFakeTimers();
+    try {
+      setCommandLaneGroup(GROUP, { budget: 1, members: [CRON, HOOK] });
+      setCommandLaneConcurrency(CRON, 1);
+      setCommandLaneConcurrency(HOOK, 1);
+
+      const blockerGate = createDeferred();
+      const blocker = enqueueCommandInLane(HOOK, async () => await blockerGate.promise);
+
+      const olderGate = createDeferred();
+      const older = enqueueCommandInLane(CRON, async () => await olderGate.promise);
+      vi.setSystemTime(Date.now() - 60_000);
+      const newerGate = createDeferred();
+      const newer = enqueueCommandInLane(HOOK, async () => await newerGate.promise);
+
+      blockerGate.resolve();
+      await blocker;
+
+      expect(getCommandLaneSnapshot(CRON)).toMatchObject({ activeCount: 1, queuedCount: 0 });
+      expect(getCommandLaneSnapshot(HOOK)).toMatchObject({ activeCount: 0, queuedCount: 1 });
+
+      olderGate.resolve();
+      await older;
+      newerGate.resolve();
+      await newer;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test("resetAllLanes refills a group by queue order rather than lane order", async () => {
     setCommandLaneGroup(GROUP, { budget: 1, members: [HOOK, CRON] });
 

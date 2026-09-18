@@ -25,7 +25,21 @@ export function effectivePriority(entry: QueueHead): number {
 }
 
 /**
- * Highest effective priority wins. Ties break by enqueue time, then sequence.
+ * True when `candidate` should drain before `current`.
+ * Equal effective priorities keep global enqueue sequence so a clock
+ * rollback cannot invert FIFO.
+ */
+export function isPreferredQueueHead(candidate: QueueHead, current: QueueHead): boolean {
+  const candidatePri = effectivePriority(candidate);
+  const currentPri = effectivePriority(current);
+  if (candidatePri !== currentPri) {
+    return candidatePri > currentPri;
+  }
+  return candidate.sequence < current.sequence;
+}
+
+/**
+ * Highest effective priority wins. Ties break by global sequence.
  * Used to choose among ring heads without scanning or moving ring membership.
  */
 export function pickNextAmongHeads<T extends QueueHead>(heads: readonly T[]): T | undefined {
@@ -34,21 +48,13 @@ export function pickNextAmongHeads<T extends QueueHead>(heads: readonly T[]): T 
     return undefined;
   }
   let best = first;
-  let bestPri = effectivePriority(first);
   for (let i = 1; i < heads.length; i++) {
     const candidate = heads[i];
     if (!candidate) {
       continue;
     }
-    const pri = effectivePriority(candidate);
-    if (
-      pri > bestPri ||
-      (pri === bestPri &&
-        (candidate.enqueuedAt < best.enqueuedAt ||
-          (candidate.enqueuedAt === best.enqueuedAt && candidate.sequence < best.sequence)))
-    ) {
+    if (isPreferredQueueHead(candidate, best)) {
       best = candidate;
-      bestPri = pri;
     }
   }
   return best;

@@ -3,7 +3,7 @@ import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 // lanes, with per-member reservations. Split out of command-queue.ts to keep
 // that file within its size budget; the queue supplies its own `drainLane` so
 // this module never has to import the queue runtime.
-import { effectivePriority } from "./command-queue.priority.js";
+import { effectivePriority, isPreferredQueueHead } from "./command-queue.priority.js";
 import {
   getQueueState,
   normalizeLane,
@@ -227,19 +227,16 @@ function resolveNextGroupLane(group: LaneGroupState): string | undefined {
     if (resolveGroupBlockReason(group, lane, capacity) !== null) {
       continue;
     }
-    const priority = effectivePriority(head);
     if (
       !selected ||
-      priority > selected.priority ||
-      (priority === selected.priority &&
-        (head.enqueuedAt < selected.enqueuedAt ||
-          (head.enqueuedAt === selected.enqueuedAt &&
-            (head.sequence < selected.sequence ||
-              (head.sequence === selected.sequence && lane < selected.lane)))))
+      isPreferredQueueHead(head, selected) ||
+      (head.sequence === selected.sequence &&
+        effectivePriority(head) === effectivePriority(selected) &&
+        lane < selected.lane)
     ) {
       selected = {
         lane,
-        priority,
+        priority: head.priority,
         enqueuedAt: head.enqueuedAt,
         sequence: head.sequence,
       };
