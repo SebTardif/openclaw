@@ -11,7 +11,10 @@ import {
 } from "../../process/gateway-work-admission.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import type { WizardPrompter } from "../../wizard/prompts.js";
-import { createWizardSessionTracker } from "../server-wizard-sessions.js";
+import {
+  createWizardSessionTracker,
+  UNCOLLECTED_TERMINAL_RETENTION_MS,
+} from "../server-wizard-sessions.js";
 
 const setupTargetLock = vi.hoisted(() => ({
   beforeRelease: undefined as Promise<void> | undefined,
@@ -333,6 +336,110 @@ describe("wizard.start idle TTL", () => {
       await vi.advanceTimersByTimeAsync(WIZARD_START_IDLE_TTL_MS);
       expect(stillAlive.getStatus()).toBe("cancelled");
       await whenAdmittedWizardSessionSettled(stillAlive);
+
+      const replacementRespond = vi.fn();
+      await expectDefined(
+        wizardHandlers["wizard.start"],
+        "wizard.start test invariant",
+      )({
+        params: { mode: "local" },
+        respond: replacementRespond,
+        context,
+      } as never);
+      expect(replacementRespond.mock.calls[0]?.[1]).toMatchObject({ status: "running" });
+    } finally {
+      await cancelWizardSessions(tracker.wizardSessions);
+      vi.useRealTimers();
+    }
+  });
+
+  it("retires an unattended expired session after settlement", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const tracker = createWizardSessionTracker();
+    const waitOnPrompt = async (_opts: unknown, _runtime: RuntimeEnv, prompter: WizardPrompter) => {
+      await prompter.text({ message: "Name" });
+    };
+    const context = {
+      ...tracker,
+      wizardRunner: waitOnPrompt,
+    };
+
+    try {
+      const startRespond = vi.fn();
+      await expectDefined(
+        wizardHandlers["wizard.start"],
+        "wizard.start test invariant",
+      )({
+        params: { mode: "local" },
+        respond: startRespond,
+        context,
+      } as never);
+      const started = startRespond.mock.calls[0]?.[1] as { sessionId: string };
+      expect(tracker.wizardSessions.has(started.sessionId)).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(WIZARD_START_IDLE_TTL_MS);
+      const abandoned = expectDefined(
+        tracker.wizardSessions.get(started.sessionId),
+        "abandoned wizard session",
+      );
+      expect(abandoned.getStatus()).toBe("cancelled");
+      await whenAdmittedWizardSessionSettled(abandoned);
+      expect(tracker.wizardSessions.has(started.sessionId)).toBe(true);
+
+      const statusRespond = vi.fn();
+      await expectDefined(
+        wizardHandlers["wizard.status"],
+        "wizard.status test invariant",
+      )({
+        params: { sessionId: started.sessionId },
+        respond: statusRespond,
+        context,
+      } as never);
+      expect(statusRespond).toHaveBeenCalledWith(
+        true,
+        expect.objectContaining({ status: "cancelled" }),
+        undefined,
+      );
+      expect(tracker.wizardSessions.has(started.sessionId)).toBe(false);
+    } finally {
+      await cancelWizardSessions(tracker.wizardSessions);
+      vi.useRealTimers();
+    }
+  });
+
+  it("purges an uncollected expired session after the retention window", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const tracker = createWizardSessionTracker();
+    const waitOnPrompt = async (_opts: unknown, _runtime: RuntimeEnv, prompter: WizardPrompter) => {
+      await prompter.text({ message: "Name" });
+    };
+    const context = {
+      ...tracker,
+      wizardRunner: waitOnPrompt,
+    };
+
+    try {
+      const startRespond = vi.fn();
+      await expectDefined(
+        wizardHandlers["wizard.start"],
+        "wizard.start test invariant",
+      )({
+        params: { mode: "local" },
+        respond: startRespond,
+        context,
+      } as never);
+      const started = startRespond.mock.calls[0]?.[1] as { sessionId: string };
+
+      await vi.advanceTimersByTimeAsync(WIZARD_START_IDLE_TTL_MS);
+      const abandoned = expectDefined(
+        tracker.wizardSessions.get(started.sessionId),
+        "abandoned wizard session",
+      );
+      await whenAdmittedWizardSessionSettled(abandoned);
+      expect(tracker.wizardSessions.has(started.sessionId)).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(UNCOLLECTED_TERMINAL_RETENTION_MS);
+      expect(tracker.wizardSessions.has(started.sessionId)).toBe(false);
 
       const replacementRespond = vi.fn();
       await expectDefined(

@@ -474,7 +474,7 @@ describe("WizardSession", () => {
           await prompter.text({ message: "Name" });
           await prompter.text({ message: "Email" });
         },
-        { timeoutMs: 1_000 },
+        { timeoutMs: 1_000, renewIdleOnActivity: true },
       );
 
       const first = await session.next();
@@ -489,6 +489,31 @@ describe("WizardSession", () => {
       expect(session.getStatus()).toBe("running");
 
       await vi.advanceTimersByTimeAsync(1_000);
+      expect(session.getStatus()).toBe("cancelled");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("timeoutMs without idle renewal stays a fixed deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = new WizardSession(
+        async (prompter) => {
+          await prompter.text({ message: "Name" });
+          await prompter.text({ message: "Email" });
+        },
+        { timeoutMs: 1_000 },
+      );
+
+      const first = await session.next();
+      expect(first.step?.type).toBe("text");
+      await vi.advanceTimersByTimeAsync(800);
+      expect(session.getStatus()).toBe("running");
+      await session.answer(first.step?.id ?? "", "Ada");
+      await session.next();
+
+      await vi.advanceTimersByTimeAsync(200);
       expect(session.getStatus()).toBe("cancelled");
     } finally {
       vi.useRealTimers();

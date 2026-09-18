@@ -258,7 +258,8 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
 export class WizardSession {
   private readonly abortController = new AbortController();
   private expiryTimer: ReturnType<typeof setTimeout> | undefined;
-  private readonly idleTimeoutMs: number | undefined;
+  private readonly timeoutMs: number | undefined;
+  private readonly renewIdleOnActivity: boolean;
   private readonly runnerPromise: Promise<void>;
   private currentStep: WizardStep | null = null;
   private progressSteps: WizardStep[] = [];
@@ -292,19 +293,20 @@ export class WizardSession {
       signal: AbortSignal,
       session: WizardSession,
     ) => Promise<void>,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; renewIdleOnActivity?: boolean },
   ) {
     const prompter = createWizardSessionPrompter(this);
-    this.idleTimeoutMs = options?.timeoutMs;
-    this.armIdleExpiry();
+    this.timeoutMs = options?.timeoutMs;
+    this.renewIdleOnActivity = options?.renewIdleOnActivity === true;
+    this.armExpiry();
     this.runnerPromise = this.run(prompter);
   }
 
-  // Idle TTL, not wall-clock from start: client next/answer keep a live
-  // hosted wizard alive. A one-shot constructor timer would cancel an
-  // active Control UI session after 25 minutes.
-  private armIdleExpiry() {
-    if (this.idleTimeoutMs === undefined || this.status !== "running") {
+  // timeoutMs is a fixed deadline unless hosted wizard.start opts into
+  // idle renewal. Structured activation, provider auth, prepare, and
+  // models.authLogin keep their original one-shot budgets.
+  private armExpiry() {
+    if (this.timeoutMs === undefined || this.status !== "running") {
       return;
     }
     if (this.expiryTimer) {
@@ -313,8 +315,14 @@ export class WizardSession {
     this.expiryTimer = setTimeout(() => {
       this.expiryPending = true;
       this.cancel();
-    }, this.idleTimeoutMs);
+    }, this.timeoutMs);
     this.expiryTimer.unref?.();
+  }
+
+  private refreshIdleExpiry() {
+    if (this.renewIdleOnActivity) {
+      this.armExpiry();
+    }
   }
 
   private clearIdleExpiry() {
@@ -330,7 +338,7 @@ export class WizardSession {
     if (this.status !== "running") {
       return this.terminalResult();
     }
-    this.armIdleExpiry();
+    this.refreshIdleExpiry();
     const progressStep = this.progressSteps.shift();
     if (progressStep) {
       this.rememberDeliveredProgressStep(progressStep.id);
@@ -404,12 +412,12 @@ export class WizardSession {
       // clients still acknowledge every rendered step, so accept that stale
       // acknowledgement while newer clients poll without an answer.
       if (this.deliveredProgressStepIds.delete(stepId)) {
-        this.armIdleExpiry();
+        this.refreshIdleExpiry();
         return undefined;
       }
       throw new Error("wizard: no pending step");
     }
-    this.armIdleExpiry();
+    this.refreshIdleExpiry();
     const normalizedValue = pending.text ? normalizeTextAnswer(value) : value;
     if (pending.text && normalizedValue === undefined) {
       return "wizard: text answer must be a scalar value";
