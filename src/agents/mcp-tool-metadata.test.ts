@@ -210,6 +210,45 @@ describe("createMcpJsonSchemaValidator patternProperties preflight", () => {
     ).toThrow(/unsafe patternProperties pattern rejected/);
   });
 
+  it("accepts disjoint multi-character groups on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    const validate = factory.getValidator<{ abcd?: string }>({
+      $schema: DRAFT,
+      type: "object",
+      patternProperties: {
+        "^(ab)+(cd)+$": { type: "string" },
+      },
+      additionalProperties: true,
+    });
+    expect(validate({ abcd: "ok" }).valid).toBe(true);
+  });
+
+  it("rejects hex-escape alternatives that share a decoded prefix on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^(\\x61|aa)+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("rejects non-ASCII whitespace overlap on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^(\\s|[\\u00a0][\\u00a0])+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
   it("rejects semantically overlapping adjacent patternProperties on the MCP entrypoint", () => {
     const factory = createMcpJsonSchemaValidator();
     expect(() =>

@@ -114,6 +114,27 @@ describe("safe regex", () => {
     );
   });
 
+  it("accepts disjoint multi-character JSON Schema groups", () => {
+    const compiled = compileJsonSchemaPatternRegexDetailed("^(ab)+(cd)+$");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("abcd")).toBe(true);
+    expect(compiled.regex?.test("ababcd")).toBe(true);
+    expect(compiled.regex?.test("ab")).toBe(false);
+    expect(compiled.regex?.test("cd")).toBe(false);
+  });
+
+  it("rejects hex-escape alternatives that share a decoded prefix", () => {
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\x61|aa)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects JSON Schema alternatives that overlap on non-ASCII whitespace", () => {
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\s|[\\u00a0][\\u00a0])+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
   it("rejects nested-repetition JSON Schema patterns", () => {
     expect(compileJsonSchemaPatternRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
   });

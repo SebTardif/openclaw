@@ -2,7 +2,8 @@
 
 const DIGITS = "0123456789";
 const WORD = `${DIGITS}ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_`;
-const WHITESPACE = " \t\n\r\f\v";
+const WHITESPACE =
+  "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
 
 type AtomLanguage =
   | { kind: "any" }
@@ -34,6 +35,46 @@ function parseHexChar(hex: string): string | null {
     return null;
   }
   return String.fromCodePoint(code);
+}
+
+function isUnicodePropertyName(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*(?:=[A-Za-z0-9_-]+)?$/.test(value);
+}
+
+export function readCompleteEscapeAtom(
+  source: string,
+  index: number,
+): { end: number; sig: string } {
+  if (source[index] !== "\\") {
+    return { end: index + 1, sig: source[index] ?? "" };
+  }
+  const next = source[index + 1];
+  if (next === undefined) {
+    return { end: index + 1, sig: "\\" };
+  }
+  if (next === "p" || next === "P") {
+    if (source[index + 2] === "{") {
+      const close = source.indexOf("}", index + 3);
+      if (close !== -1 && isUnicodePropertyName(source.slice(index + 3, close))) {
+        return { end: close + 1, sig: source.slice(index, close + 1) };
+      }
+    }
+  }
+  if (next === "u" && source[index + 2] === "{") {
+    const close = source.indexOf("}", index + 3);
+    if (close !== -1 && parseHexChar(source.slice(index + 3, close))) {
+      return { end: close + 1, sig: source.slice(index, close + 1) };
+    }
+  }
+  const unicodeHex = source.slice(index + 2, index + 6);
+  if (next === "u" && unicodeHex.length === 4 && parseHexChar(unicodeHex)) {
+    return { end: index + 6, sig: source.slice(index, index + 6) };
+  }
+  const hex = source.slice(index + 2, index + 4);
+  if (next === "x" && hex.length === 2 && parseHexChar(hex)) {
+    return { end: index + 4, sig: source.slice(index, index + 4) };
+  }
+  return { end: index + 2, sig: source.slice(index, index + 2) };
 }
 
 function escapeLanguage(sig: string, foldCase: boolean): AtomLanguage {
@@ -211,12 +252,12 @@ function atomLanguage(sig: string, foldCase: boolean): AtomLanguage {
     return classLanguage(atom, foldCase);
   }
   if (atom.startsWith("\\")) {
-    return escapeLanguage(atom, foldCase);
+    return escapeLanguage(readCompleteEscapeAtom(atom, 0).sig, foldCase);
   }
   if (atom.length === 1) {
     return singleton(atom, foldCase);
   }
-  return { kind: "any" };
+  return singleton(atom[0] ?? "", foldCase);
 }
 
 function languagesOverlap(left: AtomLanguage, right: AtomLanguage): boolean {

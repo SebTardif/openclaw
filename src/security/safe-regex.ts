@@ -1,7 +1,11 @@
 // Performs lightweight safe-regex checks for user-supplied patterns.
 import { expectDefined } from "@openclaw/normalization-core";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
-import { atomsCanMatchSamePrefix, firstAtomsOverlap } from "./safe-regex-atoms.js";
+import {
+  atomsCanMatchSamePrefix,
+  firstAtomsOverlap,
+  readCompleteEscapeAtom,
+} from "./safe-regex-atoms.js";
 
 type QuantifierRead = {
   consumed: number;
@@ -174,12 +178,9 @@ function tokenizePattern(source: string): PatternToken[] {
     const ch = source[i];
 
     if (ch === "\\") {
-      const next = source[i + 1];
-      const sig = next === undefined ? "\\" : source.slice(i, i + 2);
-      if (next !== undefined) {
-        i += 1;
-      }
-      tokens.push({ kind: "simple-token", sig });
+      const atom = readCompleteEscapeAtom(source, i);
+      tokens.push({ kind: "simple-token", sig: atom.sig });
+      i = atom.end - 1;
       continue;
     }
 
@@ -412,37 +413,6 @@ export function compileSafeRegex(source: string, flags = ""): RegExp | null {
   return compileSafeRegexDetailed(source, flags).regex;
 }
 
-function readEscapeAtom(source: string, index: number): { end: number; sig: string } {
-  if (source[index] !== "\\") {
-    return { end: index + 1, sig: source[index] ?? "" };
-  }
-  const next = source[index + 1];
-  if (next === "p" || next === "P") {
-    if (source[index + 2] === "{") {
-      const close = source.indexOf("}", index + 3);
-      if (close !== -1) {
-        return { end: close + 1, sig: source.slice(index, close + 1) };
-      }
-    }
-  }
-  if (next === "u" && source[index + 2] === "{") {
-    const close = source.indexOf("}", index + 3);
-    if (close !== -1) {
-      return { end: close + 1, sig: source.slice(index, close + 1) };
-    }
-  }
-  if (next === "u" && index + 5 < source.length) {
-    return { end: index + 6, sig: source.slice(index, index + 6) };
-  }
-  if (next === "x" && index + 3 < source.length) {
-    return { end: index + 4, sig: source.slice(index, index + 4) };
-  }
-  if (next !== undefined) {
-    return { end: index + 2, sig: source.slice(index, index + 2) };
-  }
-  return { end: index + 1, sig: "\\" };
-}
-
 function readClassAtom(source: string, index: number): { end: number; sig: string } {
   let i = index + 1;
   if (source[i] === "^") {
@@ -513,7 +483,7 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
     let sig = ch ?? "";
     let zeroWidth = false;
     if (ch === "\\") {
-      const atom = readEscapeAtom(source, i);
+      const atom = readCompleteEscapeAtom(source, i);
       end = atom.end;
       sig = atom.sig;
     } else if (ch === "[") {
