@@ -754,6 +754,60 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     expect(result.ababcabc.mode).toBeUndefined();
   });
 
+  it("skips word-boundary overlapping alternatives", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(a\\Bb|abab)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { abab: {} }) as {
+      abab: { mode?: string };
+    };
+    expect(result.abab.mode).toBeUndefined();
+  });
+
+  it("skips leftover-octal overlapping alternatives", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(\\1414c|a4ca4c)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { a4ca4c: {} }) as {
+      a4ca4c: { mode?: string };
+    };
+    expect(result.a4ca4c.mode).toBeUndefined();
+  });
+
+  it("skips inline case-flag overlapping alternatives", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^((?i:a)|AA)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { AA: {} }) as {
+      AA: { mode?: string };
+    };
+    expect(result.AA.mode).toBeUndefined();
+  });
+
   it("applies defaults through disjoint octal alternatives", () => {
     const schema = {
       type: "object",

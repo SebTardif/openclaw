@@ -1,5 +1,5 @@
 // Compares regex atom languages for schema-pattern ReDoS screening.
-import { classifyNumericEscape } from "./safe-regex-numeric.js";
+import { classifyNumericEscape, readNumericEscapeAtom } from "./safe-regex-numeric.js";
 
 const DIGITS = "0123456789";
 const WORD = `${DIGITS}ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_`;
@@ -49,7 +49,7 @@ export function isUnicodeRegexMode(flags: string | undefined): boolean {
 export function readCompleteEscapeAtom(
   source: string,
   index: number,
-  options: { unicode?: boolean } = {},
+  options: { unicode?: boolean; capturingGroups?: number } = {},
 ): { end: number; sig: string } {
   if (source[index] !== "\\") {
     return { end: index + 1, sig: source[index] ?? "" };
@@ -93,15 +93,7 @@ export function readCompleteEscapeAtom(
     }
   }
   if (next >= "0" && next <= "9") {
-    let end = index + 2;
-    while (end < source.length) {
-      const digit = source[end];
-      if (digit === undefined || digit < "0" || digit > "9") {
-        break;
-      }
-      end += 1;
-    }
-    return { end, sig: source.slice(index, end) };
+    return readNumericEscapeAtom(source, index, options);
   }
   return { end: index + 2, sig: source.slice(index, index + 2) };
 }
@@ -483,7 +475,7 @@ function sequencesFromSource(
       }
       additions = collectSequences(group.sig, foldCase, depth + 1, unicode, capturingGroups);
     } else if (ch === "\\") {
-      const esc = readCompleteEscapeAtom(source, i, { unicode });
+      const esc = readCompleteEscapeAtom(source, i, { unicode, capturingGroups });
       atomEnd = esc.end;
       additions = [[escapeLanguage(esc.sig, foldCase, false, unicode, capturingGroups)]];
     } else if (ch === "[") {
@@ -529,7 +521,7 @@ function collectSequences(
     return [[classLanguage(sig, foldCase, unicode)]];
   }
   if (sig.startsWith("\\")) {
-    const esc = readCompleteEscapeAtom(sig, 0, { unicode });
+    const esc = readCompleteEscapeAtom(sig, 0, { unicode, capturingGroups });
     return [[escapeLanguage(esc.sig, foldCase, false, unicode, capturingGroups)]];
   }
   if (!sig || sig === ".") {
@@ -636,7 +628,7 @@ function atomLanguageAtDepth(
     return classLanguage(atom, foldCase, unicode);
   }
   if (atom.startsWith("\\")) {
-    const esc = readCompleteEscapeAtom(atom, 0, { unicode });
+    const esc = readCompleteEscapeAtom(atom, 0, { unicode, capturingGroups });
     return escapeLanguage(esc.sig, foldCase, false, unicode, capturingGroups);
   }
   if (atom.length === 1) {

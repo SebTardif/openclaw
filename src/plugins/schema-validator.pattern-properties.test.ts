@@ -426,6 +426,54 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("rejects word-boundary overlapping alternatives on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.word-boundary",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(a\\Bb|abab)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { abab: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects leftover-octal overlapping alternatives on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.octal-leftover",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\1414c|a4ca4c)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { a4ca4c: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects inline case-flag overlapping alternatives on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.inline-case-flag",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^((?i:a)|AA)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { AA: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
   it("accepts deterministic groups that share a first character on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.shared-first-char",
