@@ -126,6 +126,68 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("accepts disjoint multi-character groups on the plugin entrypoint", () => {
+    const result = validateJsonSchemaValue({
+      cacheKey: "schema-validator.pattern-properties.multi-char-disjoint",
+      schema: {
+        type: "object",
+        patternProperties: {
+          "^(ab)+(cd)+$": {
+            type: "object",
+            properties: {
+              mode: { type: "string", default: "keep" },
+            },
+            additionalProperties: false,
+          },
+        },
+        additionalProperties: true,
+      },
+      value: { abcd: {}, ab: {}, zz: {} },
+      applyDefaults: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error("expected multi-character patternProperties to validate");
+    }
+    expect(result.value).toEqual({
+      abcd: { mode: "keep" },
+      ab: {},
+      zz: {},
+    });
+  });
+
+  it("rejects hex-escape alternatives that share a decoded prefix on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.hex-escape-prefix",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\x61|aa)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { a: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects non-ASCII whitespace overlap on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.unicode-whitespace",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\s|[\\u00a0][\\u00a0])+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "\u00a0": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
   it("rejects semantically overlapping adjacent patternProperties", () => {
     expect(() =>
       validateJsonSchemaValue({

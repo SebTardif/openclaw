@@ -447,6 +447,67 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     expect(result.bb.mode).toBeUndefined();
   });
 
+  it("applies defaults through disjoint multi-character groups", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(ab)+(cd)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "keep" },
+          },
+        },
+      },
+    };
+
+    const result = applyJsonSchemaDefaults(schema, { abcd: {}, ab: {}, zz: {} }) as {
+      abcd: { mode?: string };
+      ab: { mode?: string };
+      zz: { mode?: string };
+    };
+    expect(result.abcd.mode).toBe("keep");
+    expect(result.ab.mode).toBeUndefined();
+    expect(result.zz.mode).toBeUndefined();
+  });
+
+  it("skips hex-escape alternatives that share a decoded prefix", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(\\x61|aa)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { a: {}, aa: {} }) as {
+      a: { mode?: string };
+      aa: { mode?: string };
+    };
+    expect(result.a.mode).toBeUndefined();
+    expect(result.aa.mode).toBeUndefined();
+  });
+
+  it("skips non-ASCII whitespace overlapping patternProperties", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(\\s|[\\u00a0][\\u00a0])+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { "\u00a0": {} }) as {
+      "\u00a0": { mode?: string };
+    };
+    expect(result["\u00a0"].mode).toBeUndefined();
+  });
+
   it("skips semantically overlapping adjacent patternProperties", () => {
     const schema = {
       type: "object",
