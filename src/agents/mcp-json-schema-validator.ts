@@ -7,8 +7,8 @@ import type {
 import { normalizeJsonSchemaForTypeBox } from "@openclaw/normalization-core/json-schema";
 import { Compile } from "typebox/compile";
 import { toErrorObject } from "../infra/errors.js";
+import { findUnsafePatternProperty } from "../plugins/schema-validator.js";
 import { findJsonSchemaShapeError } from "../shared/json-schema-defaults.js";
-import { findUnsafePatternProperty } from "../shared/json-schema-unsafe-patterns.js";
 
 const DRAFT_2020_12_SCHEMA = "https://json-schema.org/draft/2020-12/schema";
 
