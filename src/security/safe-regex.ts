@@ -2,8 +2,9 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 import {
+  alternativeSequencesOverlap,
   atomsCanMatchSamePrefix,
-  firstAtomsOverlap,
+  isUnicodeRegexMode,
   readCompleteEscapeAtom,
 } from "./safe-regex-atoms.js";
 
@@ -18,7 +19,7 @@ type TokenState = {
   hasAmbiguousAlternation: boolean;
   minLength: number;
   maxLength: number;
-  firstAtoms: string[];
+  sequences: string[][];
 };
 
 type ParseFrame = {
@@ -30,8 +31,8 @@ type ParseFrame = {
   branchMaxLength: number;
   altMinLength: number | null;
   altMaxLength: number | null;
-  branchFirstAtoms: string[];
-  altFirstAtoms: string[];
+  branchSequences: string[][];
+  altSequences: string[][];
 };
 
 type PatternToken =
@@ -71,9 +72,30 @@ function createParseFrame(): ParseFrame {
     branchMaxLength: 0,
     altMinLength: null,
     altMaxLength: null,
-    branchFirstAtoms: [],
-    altFirstAtoms: [],
+    branchSequences: [],
+    altSequences: [],
   };
+}
+
+const MAX_TOKEN_SEQUENCE_SET = 32;
+
+function concatTokenSequences(left: string[][], right: string[][]): string[][] {
+  if (right.length === 0) {
+    return left;
+  }
+  if (left.length === 0) {
+    return right.map((seq) => [...seq]);
+  }
+  const out: string[][] = [];
+  for (const prefix of left) {
+    for (const suffix of right) {
+      out.push([...prefix, ...suffix]);
+      if (out.length > MAX_TOKEN_SEQUENCE_SET) {
+        return [["."]];
+      }
+    }
+  }
+  return out;
 }
 
 function addLength(left: number, right: number): number {
@@ -91,12 +113,12 @@ function multiplyLength(length: number, factor: number): number {
 }
 
 function recordAlternative(frame: ParseFrame): void {
-  if (frame.branchFirstAtoms.length === 0) {
-    frame.altFirstAtoms.push("");
+  if (frame.branchSequences.length === 0) {
+    frame.altSequences.push([]);
   } else {
-    frame.altFirstAtoms.push(...frame.branchFirstAtoms);
+    frame.altSequences.push(...frame.branchSequences);
   }
-  frame.branchFirstAtoms = [];
+  frame.branchSequences = [];
   if (frame.altMinLength === null || frame.altMaxLength === null) {
     frame.altMinLength = frame.branchMinLength;
     frame.altMaxLength = frame.branchMaxLength;
@@ -209,14 +231,14 @@ function consumeGroupPrefix(
   return { nextIndex: question + 1, unknown: true, assertion: false };
 }
 
-function tokenizePattern(source: string): PatternToken[] {
+function tokenizePattern(source: string, unicode = false): PatternToken[] {
   const tokens: PatternToken[] = [];
 
   for (let i = 0; i < source.length; i += 1) {
     const ch = source[i];
 
     if (ch === "\\") {
-      const atom = readCompleteEscapeAtom(source, i);
+      const atom = readCompleteEscapeAtom(source, i, { unicode });
       tokens.push({ kind: "simple-token", sig: atom.sig });
       i = atom.end - 1;
       continue;
@@ -266,6 +288,7 @@ function analyzeTokensForNestedRepetition(
   tokens: PatternToken[],
   distinguishDisjointAlternatives = false,
   foldCase = false,
+  unicode = false,
 ): boolean {
   const frames: ParseFrame[] = [createParseFrame()];
 
@@ -275,8 +298,8 @@ function analyzeTokensForNestedRepetition(
     if (token.containsRepetition) {
       frame.containsRepetition = true;
     }
-    if (frame.branchFirstAtoms.length === 0) {
-      frame.branchFirstAtoms = [...token.firstAtoms];
+    if (token.sequences.length > 0) {
+      frame.branchSequences = concatTokenSequences(frame.branchSequences, token.sequences);
     }
     frame.branchMinLength = addLength(frame.branchMinLength, token.minLength);
     frame.branchMaxLength = addLength(frame.branchMaxLength, token.maxLength);
@@ -288,7 +311,7 @@ function analyzeTokensForNestedRepetition(
       hasAmbiguousAlternation: false,
       minLength: 1,
       maxLength: 1,
-      firstAtoms: [sig],
+      sequences: [[sig]],
     });
   };
 
@@ -314,7 +337,7 @@ function analyzeTokensForNestedRepetition(
             hasAmbiguousAlternation: false,
             minLength: 0,
             maxLength: 0,
-            firstAtoms: [],
+            sequences: [],
           });
           continue;
         }
@@ -332,8 +355,8 @@ function analyzeTokensForNestedRepetition(
           frame.altMinLength !== null &&
           frame.altMaxLength !== null &&
           frame.altMinLength !== frame.altMaxLength;
-        const groupFirstAtoms = frame.hasAlternation ? frame.altFirstAtoms : frame.branchFirstAtoms;
-        const overlapping = firstAtomsOverlap(groupFirstAtoms, foldCase);
+        const groupSequences = frame.hasAlternation ? frame.altSequences : frame.branchSequences;
+        const overlapping = alternativeSequencesOverlap(groupSequences, foldCase, unicode);
         emitToken({
           containsRepetition: frame.containsRepetition,
           hasAmbiguousAlternation: distinguishDisjointAlternatives
@@ -341,12 +364,12 @@ function analyzeTokensForNestedRepetition(
             : lengthAmbiguous,
           minLength: groupMinLength,
           maxLength: groupMaxLength,
-          firstAtoms:
+          sequences:
             frame.hasAlternation && overlapping
-              ? ["."]
-              : groupFirstAtoms.length > 0
-                ? groupFirstAtoms
-                : [""],
+              ? [["."]]
+              : groupSequences.length > 0
+                ? groupSequences
+                : [[""]],
         });
       }
       continue;
@@ -424,10 +447,12 @@ function hasNestedRepetition(
 ): boolean {
   // Conservative parser: tokenize first, then check if repeated tokens/groups are repeated again.
   // Non-goal: complete regex AST support; keep strict enough for config safety checks.
+  const flags = options?.flags ?? "";
   return analyzeTokensForNestedRepetition(
-    tokenizePattern(source),
+    tokenizePattern(source, isUnicodeRegexMode(flags)),
     options?.distinguishDisjointAlternatives === true,
-    options?.flags?.includes("i") === true,
+    flags.includes("i"),
+    isUnicodeRegexMode(flags),
   );
 }
 
@@ -521,6 +546,7 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
   let pending: string | null = null;
   let i = 0;
   const foldCase = flags.includes("i");
+  const unicode = isUnicodeRegexMode(flags);
 
   while (i < source.length) {
     const ch = source[i];
@@ -538,7 +564,7 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
     let sig = ch ?? "";
     let zeroWidth = false;
     if (ch === "\\") {
-      const atom = readCompleteEscapeAtom(source, i);
+      const atom = readCompleteEscapeAtom(source, i, { unicode });
       end = atom.end;
       sig = atom.sig;
     } else if (ch === "[") {
@@ -562,7 +588,7 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
 
     if (unbounded) {
       if (!zeroWidth) {
-        if (pending !== null && atomsCanMatchSamePrefix(pending, sig, foldCase)) {
+        if (pending !== null && atomsCanMatchSamePrefix(pending, sig, foldCase, unicode)) {
           return true;
         }
         pending = sig;
