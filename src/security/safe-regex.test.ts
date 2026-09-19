@@ -199,6 +199,21 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed("^(a|x)*(b|y)*z$").reason).toBeNull();
   });
 
+  it("preserves complete languages for non-alternating grouped sequences", () => {
+    // Last-token fallback would reduce (ab)* and (cb)* to b vs b and reject.
+    const grouped = expectCompiledRegex("^(ab)*(cb)*$");
+    expect(grouped.test("abcb")).toBe(true);
+    expect(grouped.test("ab")).toBe(true);
+    expect(grouped.test("cb")).toBe(true);
+    expect(compileSafeRegexDetailed("^(ab)*(cb)*$").reason).toBeNull();
+    expect(compileSafeRegexForExec("^(ab)*(cb)*$").regex).toBeInstanceOf(RegExp);
+    // Repeated complete sequence is still a twin.
+    expect(compileSafeRegex("^(ab)*(ab)*$")).toBeNull();
+    expect(compileSafeRegexDetailed("^(ab)*(ab)*$").reason).toBe("unsafe-nested-repetition");
+    // Wrapping groups still flatten inner unions.
+    expect(compileSafeRegex("((a|b))*((b|c))*")).toBeNull();
+  });
+
   it("accepts adjacent repeats that do not overlap and non-adjacent twins", () => {
     expect(compileSafeRegex("a*b*")).toBeInstanceOf(RegExp);
     expect(compileSafeRegex("[ab]*[cd]*")).toBeInstanceOf(RegExp);

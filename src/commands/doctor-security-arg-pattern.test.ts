@@ -228,4 +228,68 @@ describe("doctor security exec argPattern repair", () => {
       ]);
     });
   });
+
+  it("preserves conservatively refused Unicode approvals during Doctor repair", async () => {
+    const conservative = {
+      pattern: "/usr/bin/printf",
+      argPattern: "^(?:[猫]|[犬])+$",
+    };
+    const grouped = { pattern: "/bin/grouped", argPattern: "^(ab)*(cb)*$" };
+    const approvals = {
+      version: 1,
+      agents: {
+        main: {
+          allowlist: [
+            { pattern: "/bin/unsafe", argPattern: "(a+)+$" },
+            conservative,
+            grouped,
+            { pattern: "/bin/safe", argPattern: "^safe$" },
+          ],
+        },
+      },
+    } satisfies ExecApprovalsFile;
+
+    await withExecApprovalsFile(approvals, async () => {
+      const { CORE_HEALTH_CHECKS } = await import("../flows/doctor-core-checks.js");
+      const check = CORE_HEALTH_CHECKS.find(
+        (candidate) => candidate.id === "core/doctor/exec-approval-arg-patterns",
+      );
+      expect(check).toBeDefined();
+      const context = {
+        mode: "fix" as const,
+        runtime: { log() {}, error() {}, exit() {} },
+        cfg: {} as OpenClawConfig,
+      };
+      const findings = await check!.detect(context);
+      expect(findings).toHaveLength(2);
+      expect(findings.some((finding) => finding.message.includes("/bin/unsafe"))).toBe(true);
+      expect(findings.some((finding) => finding.message.includes("conservatively refused"))).toBe(
+        true,
+      );
+      expect(findings.some((finding) => finding.message.includes("/bin/grouped"))).toBe(false);
+      expect(
+        findings.find((finding) => finding.message.includes("conservatively refused"))?.fixHint,
+      ).toContain("keeps this stored rule");
+
+      const repaired = await check!.repair?.(context, findings);
+      expect(repaired?.changes).toEqual([
+        expect.stringContaining("Removed 1 rejected exec approval entry"),
+      ]);
+      expect(repaired?.changes?.[0]).toContain("Kept 1 conservatively refused");
+      expect(await check!.detect(context)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            message: expect.stringContaining("conservatively refused"),
+          }),
+        ]),
+      );
+
+      const remaining = loadExecApprovals().agents?.main?.allowlist ?? [];
+      expect(remaining.map(({ pattern, argPattern }) => ({ pattern, argPattern }))).toEqual([
+        conservative,
+        grouped,
+        { pattern: "/bin/safe", argPattern: "^safe$" },
+      ]);
+    });
+  });
 });

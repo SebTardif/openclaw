@@ -29,6 +29,7 @@ type ParseFrame = {
   branchStart: number;
   branchMinLength: number;
   branchMaxLength: number;
+  branchTokenCount: number;
   altMinLength: number | null;
   altMaxLength: number | null;
   // Previous unbounded quantified atom, used to catch a*a* adjacent twins.
@@ -70,6 +71,7 @@ function createParseFrame(contentStart = 0): ParseFrame {
     branchStart: contentStart,
     branchMinLength: 0,
     branchMaxLength: 0,
+    branchTokenCount: 0,
     altMinLength: null,
     altMaxLength: null,
     pendingAdjacentAlts: null,
@@ -443,6 +445,7 @@ function analyzeTokensForNestedRepetition(
     }
     frame.branchMinLength = addLength(frame.branchMinLength, token.minLength);
     frame.branchMaxLength = addLength(frame.branchMaxLength, token.maxLength);
+    frame.branchTokenCount += 1;
   };
 
   const noteAdjacentAtom = (language: string, alternatives: string[], minLength = 1) => {
@@ -515,7 +518,9 @@ function analyzeTokensForNestedRepetition(
         const groupAlts =
           frame.hasAlternation && frame.alternativeSources.length > 0
             ? frame.alternativeSources
-            : frame.lastToken?.alternatives && frame.lastToken.alternatives.length > 0
+            : frame.branchTokenCount === 1 &&
+                frame.lastToken?.alternatives &&
+                frame.lastToken.alternatives.length > 0
               ? frame.lastToken.alternatives
               : [groupLanguage];
         const groupUnbounded = !Number.isFinite(groupMaxLength);
@@ -567,6 +572,7 @@ function analyzeTokensForNestedRepetition(
       frame.branchStart = token.end;
       frame.branchMinLength = 0;
       frame.branchMaxLength = 0;
+      frame.branchTokenCount = 0;
       frame.lastToken = null;
       frame.pendingAdjacentAlts = null;
       frame.pendingNextAlts = null;

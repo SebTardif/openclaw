@@ -1,5 +1,9 @@
 // Compiles persisted exec argPattern values without changing their exact match semantics.
-import { compileSafeRegexForExec, type SafeRegexRejectReason } from "../security/safe-regex.js";
+import {
+  compileSafeRegexDetailed,
+  compileSafeRegexForExec,
+  type SafeRegexRejectReason,
+} from "../security/safe-regex.js";
 
 export type ExecArgPatternRejectReason = Exclude<SafeRegexRejectReason, "empty">;
 
@@ -25,4 +29,15 @@ export function compileExecArgPattern(source: string): ExecArgPatternCompileResu
   } catch {
     return { regex: null, reason: "invalid-regex" };
   }
+}
+
+/**
+ * True when exec refuses a pattern that the shared compiler still accepts.
+ * Doctor must keep those stored rules; runtime matching stays refused.
+ */
+export function isConservativeExecArgPatternRefusal(source: string): boolean {
+  if (compileExecArgPattern(source).regex) {
+    return false;
+  }
+  return compileSafeRegexDetailed(source).regex !== null;
 }

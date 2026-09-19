@@ -24,6 +24,7 @@ import {
 } from "../infra/exec-approvals.js";
 import {
   compileExecArgPattern,
+  isConservativeExecArgPatternRefusal,
   type ExecArgPatternRejectReason,
 } from "../infra/exec-arg-pattern.js";
 import { isLikelySensitiveModelProviderHeaderName } from "../secrets/model-provider-header-policy.js";
@@ -38,6 +39,7 @@ type RejectedExecArgPattern = {
   pattern: string;
   argPattern: string;
   reason: ExecArgPatternRejectReason;
+  preserve: boolean;
 };
 
 function collectRejectedExecArgPatternsFromAllowlist(
@@ -56,6 +58,7 @@ function collectRejectedExecArgPatternsFromAllowlist(
         pattern: entry.pattern,
         argPattern: entry.argPattern,
         reason: compiled.reason,
+        preserve: isConservativeExecArgPatternRefusal(entry.argPattern),
       });
     }
   }
@@ -83,7 +86,7 @@ export function repairRejectedExecArgPatterns(): RejectedExecArgPattern[] {
             return true;
           }
           const compiled = compileExecArgPattern(entry.argPattern);
-          if (compiled.regex) {
+          if (compiled.regex || isConservativeExecArgPatternRefusal(entry.argPattern)) {
             return true;
           }
           changed = true;
@@ -92,6 +95,7 @@ export function repairRejectedExecArgPatterns(): RejectedExecArgPattern[] {
             pattern: entry.pattern,
             argPattern: entry.argPattern,
             reason: compiled.reason,
+            preserve: false,
           });
           return false;
         });

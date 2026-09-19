@@ -925,6 +925,17 @@ const execApprovalArgPatternCheck: HealthCheck = {
     return collectRejectedExecArgPatterns().map((finding) => {
       const pattern =
         finding.pattern.length > 120 ? `${finding.pattern.slice(0, 117)}...` : finding.pattern;
+      if (finding.preserve) {
+        return {
+          checkId: "core/doctor/exec-approval-arg-patterns",
+          severity: "warning" as const,
+          message: `${finding.scope} exec approval ${JSON.stringify(pattern)} has a conservatively refused argPattern (${finding.reason}).`,
+          target: finding.scope,
+          requirement: "Persisted exec approval argPatterns must pass the runtime safety guard.",
+          fixHint:
+            "Doctor --fix keeps this stored rule. Runtime still refuses it until the operator replaces the pattern.",
+        };
+      }
       return {
         checkId: "core/doctor/exec-approval-arg-patterns",
         severity: "warning" as const,
@@ -935,22 +946,32 @@ const execApprovalArgPatternCheck: HealthCheck = {
       };
     });
   },
-  async repair(ctx, findings) {
-    const { repairRejectedExecArgPatterns } = await import("../commands/doctor-security.js");
+  async repair(ctx) {
+    const { collectRejectedExecArgPatterns, repairRejectedExecArgPatterns } =
+      await import("../commands/doctor-security.js");
     const { resolveExecApprovalsDisplayPath } = await import("../infra/exec-approvals.js");
-    const count = findings.length;
+    const pending = collectRejectedExecArgPatterns();
+    const removableCount = pending.filter((finding) => !finding.preserve).length;
+    const preservedCount = pending.filter((finding) => finding.preserve).length;
+    const keepNoun = preservedCount === 1 ? "rule" : "rules";
+    const keepNote =
+      preservedCount > 0 ? ` Kept ${preservedCount} conservatively refused ${keepNoun}.` : "";
     const target = resolveExecApprovalsDisplayPath();
     const effect = {
       kind: "state" as const,
-      action: `remove ${count} rejected exec approval entr${count === 1 ? "y" : "ies"}`,
+      action: `remove ${removableCount} rejected exec approval entr${removableCount === 1 ? "y" : "ies"}`,
       target,
       dryRunSafe: false,
     };
     if (ctx.dryRun === true) {
+      const dryKeepNote =
+        preservedCount > 0
+          ? ` Would keep ${preservedCount} conservatively refused ${keepNoun}.`
+          : "";
       return {
         status: "repaired" as const,
         changes: [
-          `Would remove ${count} rejected exec approval entr${count === 1 ? "y" : "ies"} from ${target}.`,
+          `Would remove ${removableCount} rejected exec approval entr${removableCount === 1 ? "y" : "ies"} from ${target}.${dryKeepNote}`,
         ],
         effects: [effect],
       };
@@ -959,7 +980,7 @@ const execApprovalArgPatternCheck: HealthCheck = {
     return {
       status: "repaired" as const,
       changes: [
-        `Removed ${removed.length} rejected exec approval entr${removed.length === 1 ? "y" : "ies"} from ${target}. Re-approve any still-needed command through the normal allow-always flow.`,
+        `Removed ${removed.length} rejected exec approval entr${removed.length === 1 ? "y" : "ies"} from ${target}.${keepNote} Re-approve any still-needed command through the normal allow-always flow.`,
       ],
       effects: [
         {

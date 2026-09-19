@@ -89,6 +89,18 @@
       "pattern": "^(a|x)*(b|y)*z$",
       "accept": true,
       "argument": "axbyz"
+    },
+    {
+      "id": "grouped-sequence-disjoint",
+      "pattern": "^(ab)*(cb)*$",
+      "accept": true,
+      "argument": "abcb"
+    },
+    {
+      "id": "grouped-sequence-repeated-tail",
+      "pattern": "^(ab)*(ab)*$",
+      "accept": false,
+      "argument": "abab"
     }
   ]
 }

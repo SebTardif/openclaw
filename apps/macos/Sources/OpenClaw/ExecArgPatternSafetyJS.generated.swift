@@ -25,7 +25,8 @@ var OpenClawExecArgPattern = (() => {
   // src/infra/exec-arg-pattern.ts
   var exec_arg_pattern_exports = {};
   __export(exec_arg_pattern_exports, {
-    compileExecArgPattern: () => compileExecArgPattern
+    compileExecArgPattern: () => compileExecArgPattern,
+    isConservativeExecArgPatternRefusal: () => isConservativeExecArgPatternRefusal
   });
 
   // packages/normalization-core/src/expect.ts
@@ -395,6 +396,7 @@ var OpenClawExecArgPattern = (() => {
       branchStart: contentStart,
       branchMinLength: 0,
       branchMaxLength: 0,
+      branchTokenCount: 0,
       altMinLength: null,
       altMaxLength: null,
       pendingAdjacentAlts: null,
@@ -666,6 +668,7 @@ var OpenClawExecArgPattern = (() => {
       }
       frame.branchMinLength = addLength(frame.branchMinLength, token.minLength);
       frame.branchMaxLength = addLength(frame.branchMaxLength, token.maxLength);
+      frame.branchTokenCount += 1;
     };
     const noteAdjacentAtom = (language, alternatives, minLength = 1) => {
       if (minLength === 0 || isZeroWidthLanguage(language, alternatives)) {
@@ -722,7 +725,7 @@ var OpenClawExecArgPattern = (() => {
           const groupMinLength = frame2.hasAlternation ? frame2.altMinLength ?? 0 : frame2.branchMinLength;
           const groupMaxLength = frame2.hasAlternation ? frame2.altMaxLength ?? 0 : frame2.branchMaxLength;
           const groupLanguage = (frame2.hasAlternation ? frame2.alternativeSources.join("|") : source.slice(frame2.contentStart, token.start)) || "(?:)";
-          const groupAlts = frame2.hasAlternation && frame2.alternativeSources.length > 0 ? frame2.alternativeSources : frame2.lastToken?.alternatives && frame2.lastToken.alternatives.length > 0 ? frame2.lastToken.alternatives : [groupLanguage];
+          const groupAlts = frame2.hasAlternation && frame2.alternativeSources.length > 0 ? frame2.alternativeSources : frame2.branchTokenCount === 1 && frame2.lastToken?.alternatives && frame2.lastToken.alternatives.length > 0 ? frame2.lastToken.alternatives : [groupLanguage];
           const groupUnbounded = !Number.isFinite(groupMaxLength);
           if (groupUnbounded && parent.pendingAdjacentAlts && parent.pendingNextAlts === null && adjacentRepeatsOverlap(
             parent.pendingAdjacentAlts,
@@ -764,6 +767,7 @@ var OpenClawExecArgPattern = (() => {
         frame2.branchStart = token.end;
         frame2.branchMinLength = 0;
         frame2.branchMaxLength = 0;
+        frame2.branchTokenCount = 0;
         frame2.lastToken = null;
         frame2.pendingAdjacentAlts = null;
         frame2.pendingNextAlts = null;
@@ -845,6 +849,9 @@ var OpenClawExecArgPattern = (() => {
     pruneMapToMaxSize(safeRegexCache, SAFE_REGEX_CACHE_MAX);
     return result;
   }
+  function compileSafeRegexDetailed(source, flags = "") {
+    return compileSafeRegexDetailedImpl(source, flags, false);
+  }
   function compileSafeRegexForExec(source, flags = "") {
     return compileSafeRegexDetailedImpl(source, flags, true);
   }
@@ -860,6 +867,12 @@ var OpenClawExecArgPattern = (() => {
     } catch {
       return { regex: null, reason: "invalid-regex" };
     }
+  }
+  function isConservativeExecArgPatternRefusal(source) {
+    if (compileExecArgPattern(source).regex) {
+      return false;
+    }
+    return compileSafeRegexDetailed(source).regex !== null;
   }
   return __toCommonJS(exec_arg_pattern_exports);
 })();
