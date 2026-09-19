@@ -85,6 +85,29 @@ describe("safe regex", () => {
     expect(compiled.regex?.test("zz")).toBe(false);
   });
 
+  it("accepts disjoint character-class JSON Schema alternatives", () => {
+    const compiled = compileJsonSchemaPatternRegexDetailed("^([ab]|cd)+$");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("a")).toBe(true);
+    expect(compiled.regex?.test("b")).toBe(true);
+    expect(compiled.regex?.test("cd")).toBe(true);
+    expect(compiled.regex?.test("acd")).toBe(true);
+    expect(compiled.regex?.test("zz")).toBe(false);
+  });
+
+  it("rejects nested alternatives that share a possible prefix", () => {
+    expect(compileJsonSchemaPatternRegexDetailed("^((a|b)|bb)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects semantically overlapping adjacent JSON Schema atoms", () => {
+    expect(compileJsonSchemaPatternRegexDetailed("a*[a]*$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileSafeRegexDetailed("a*[a]*$").reason).toBeNull();
+  });
+
   it("still rejects overlapping JSON Schema alternatives", () => {
     expect(compileJsonSchemaPatternRegexDetailed("(a|aa)+$").reason).toBe(
       "unsafe-nested-repetition",

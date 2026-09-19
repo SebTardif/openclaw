@@ -184,6 +184,45 @@ describe("createMcpJsonSchemaValidator patternProperties preflight", () => {
     expect(validate({ a: "ok", bc: "ok" }).valid).toBe(true);
   });
 
+  it("accepts disjoint character-class patternProperties on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    const validate = factory.getValidator<{ a?: string; cd?: string }>({
+      $schema: DRAFT,
+      type: "object",
+      patternProperties: {
+        "^([ab]|cd)+$": { type: "string" },
+      },
+      additionalProperties: true,
+    });
+    expect(validate({ a: "ok", cd: "ok" }).valid).toBe(true);
+  });
+
+  it("rejects nested alternatives that share a possible prefix on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^((a|b)|bb)+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("rejects semantically overlapping adjacent patternProperties on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "a*[a]*$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
   it("compiles empty JSON Schema patternProperties on the MCP entrypoint", () => {
     const factory = createMcpJsonSchemaValidator();
     const validate = factory.getValidator<{ x?: { mode?: string } }>({

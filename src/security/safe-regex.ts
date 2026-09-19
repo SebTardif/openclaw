@@ -1,6 +1,8 @@
 // Performs lightweight safe-regex checks for user-supplied patterns.
 import { expectDefined } from "@openclaw/normalization-core";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
+import { atomsCanMatchSamePrefix, firstAtomsOverlap } from "./safe-regex-atoms.js";
+
 type QuantifierRead = {
   consumed: number;
   minRepeat: number;
@@ -12,7 +14,7 @@ type TokenState = {
   hasAmbiguousAlternation: boolean;
   minLength: number;
   maxLength: number;
-  firstAtom: string;
+  firstAtoms: string[];
 };
 
 type ParseFrame = {
@@ -23,7 +25,7 @@ type ParseFrame = {
   branchMaxLength: number;
   altMinLength: number | null;
   altMaxLength: number | null;
-  branchFirstAtom: string | null;
+  branchFirstAtoms: string[];
   altFirstAtoms: string[];
 };
 
@@ -63,7 +65,7 @@ function createParseFrame(): ParseFrame {
     branchMaxLength: 0,
     altMinLength: null,
     altMaxLength: null,
-    branchFirstAtom: null,
+    branchFirstAtoms: [],
     altFirstAtoms: [],
   };
 }
@@ -83,8 +85,12 @@ function multiplyLength(length: number, factor: number): number {
 }
 
 function recordAlternative(frame: ParseFrame): void {
-  frame.altFirstAtoms.push(frame.branchFirstAtom ?? "");
-  frame.branchFirstAtom = null;
+  if (frame.branchFirstAtoms.length === 0) {
+    frame.altFirstAtoms.push("");
+  } else {
+    frame.altFirstAtoms.push(...frame.branchFirstAtoms);
+  }
+  frame.branchFirstAtoms = [];
   if (frame.altMinLength === null || frame.altMaxLength === null) {
     frame.altMinLength = frame.branchMinLength;
     frame.altMaxLength = frame.branchMaxLength;
@@ -92,44 +98,6 @@ function recordAlternative(frame: ParseFrame): void {
   }
   frame.altMinLength = Math.min(frame.altMinLength, frame.branchMinLength);
   frame.altMaxLength = Math.max(frame.altMaxLength, frame.branchMaxLength);
-}
-
-function atomsCanMatchSamePrefix(left: string, right: string): boolean {
-  if (left === right || !left || !right) {
-    return true;
-  }
-  if (left === "." || right === ".") {
-    return true;
-  }
-  if (left.startsWith("[") || right.startsWith("[")) {
-    return true;
-  }
-  if (left.startsWith("\\") || right.startsWith("\\")) {
-    return true;
-  }
-  return false;
-}
-
-function firstAtomsOverlap(atoms: readonly string[]): boolean {
-  if (atoms.length < 2) {
-    return false;
-  }
-  for (let i = 0; i < atoms.length; i += 1) {
-    const left = atoms[i];
-    if (left === undefined) {
-      continue;
-    }
-    for (let j = i + 1; j < atoms.length; j += 1) {
-      const right = atoms[j];
-      if (right === undefined) {
-        continue;
-      }
-      if (atomsCanMatchSamePrefix(left, right)) {
-        return true;
-      }
-    }
-  }
-  return false;
 }
 
 function readCharClassSig(source: string, index: number): { end: number; sig: string } {
@@ -253,6 +221,7 @@ function tokenizePattern(source: string): PatternToken[] {
 function analyzeTokensForNestedRepetition(
   tokens: PatternToken[],
   distinguishDisjointAlternatives = false,
+  foldCase = false,
 ): boolean {
   const frames: ParseFrame[] = [createParseFrame()];
 
@@ -262,8 +231,8 @@ function analyzeTokensForNestedRepetition(
     if (token.containsRepetition) {
       frame.containsRepetition = true;
     }
-    if (frame.branchFirstAtom === null) {
-      frame.branchFirstAtom = token.firstAtom;
+    if (frame.branchFirstAtoms.length === 0) {
+      frame.branchFirstAtoms = [...token.firstAtoms];
     }
     frame.branchMinLength = addLength(frame.branchMinLength, token.minLength);
     frame.branchMaxLength = addLength(frame.branchMaxLength, token.maxLength);
@@ -275,7 +244,7 @@ function analyzeTokensForNestedRepetition(
       hasAmbiguousAlternation: false,
       minLength: 1,
       maxLength: 1,
-      firstAtom: sig,
+      firstAtoms: [sig],
     });
   };
 
@@ -307,19 +276,21 @@ function analyzeTokensForNestedRepetition(
           frame.altMinLength !== null &&
           frame.altMaxLength !== null &&
           frame.altMinLength !== frame.altMaxLength;
-        const firstAtom = frame.hasAlternation
-          ? firstAtomsOverlap(frame.altFirstAtoms)
-            ? "."
-            : (frame.altFirstAtoms[0] ?? "")
-          : (frame.branchFirstAtom ?? "");
+        const groupFirstAtoms = frame.hasAlternation ? frame.altFirstAtoms : frame.branchFirstAtoms;
+        const overlapping = firstAtomsOverlap(groupFirstAtoms, foldCase);
         emitToken({
           containsRepetition: frame.containsRepetition,
           hasAmbiguousAlternation: distinguishDisjointAlternatives
-            ? lengthAmbiguous && firstAtomsOverlap(frame.altFirstAtoms)
+            ? lengthAmbiguous && overlapping
             : lengthAmbiguous,
           minLength: groupMinLength,
           maxLength: groupMaxLength,
-          firstAtom,
+          firstAtoms:
+            frame.hasAlternation && overlapping
+              ? ["."]
+              : groupFirstAtoms.length > 0
+                ? groupFirstAtoms
+                : [""],
         });
       }
       continue;
@@ -393,13 +364,14 @@ export function testRegexWithBoundedInput(
 
 function hasNestedRepetition(
   source: string,
-  options?: { distinguishDisjointAlternatives?: boolean },
+  options?: { distinguishDisjointAlternatives?: boolean; flags?: string },
 ): boolean {
   // Conservative parser: tokenize first, then check if repeated tokens/groups are repeated again.
   // Non-goal: complete regex AST support; keep strict enough for config safety checks.
   return analyzeTokensForNestedRepetition(
     tokenizePattern(source),
     options?.distinguishDisjointAlternatives === true,
+    options?.flags?.includes("i") === true,
   );
 }
 
@@ -520,16 +492,6 @@ function readGroupAtom(
   return { end: i, sig: source.slice(index, i), zeroWidth };
 }
 
-function signaturesEqual(left: string, right: string, foldCase: boolean): boolean {
-  if (left === right) {
-    return true;
-  }
-  if (foldCase && left.length === 1 && right.length === 1) {
-    return left.toLowerCase() === right.toLowerCase();
-  }
-  return false;
-}
-
 function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
   let pending: string | null = null;
   let i = 0;
@@ -574,7 +536,7 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
     }
 
     if (unbounded) {
-      if (pending !== null && signaturesEqual(pending, sig, foldCase)) {
+      if (pending !== null && atomsCanMatchSamePrefix(pending, sig, foldCase)) {
         return true;
       }
       pending = sig;
@@ -609,7 +571,7 @@ export function compileJsonSchemaPatternRegexDetailed(
   }
   let result: SafeRegexCompileResult;
   if (
-    hasNestedRepetition(source, { distinguishDisjointAlternatives: true }) ||
+    hasNestedRepetition(source, { distinguishDisjointAlternatives: true, flags }) ||
     hasAdjacentUnboundedTwins(source, flags)
   ) {
     result = { regex: null, source, flags, reason: "unsafe-nested-repetition" };

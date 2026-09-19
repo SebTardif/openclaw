@@ -13,54 +13,43 @@ describe("schema validator patternProperties screening", () => {
   it("rejects nested-repetition patternProperties before TypeBox validation", () => {
     const value = { aaaaaaaaaaaaaaaaaaaaX: {} };
     const started = Date.now();
-    const result = validateJsonSchemaValue({
-      cacheKey: "schema-validator.pattern-properties.nested",
-      schema: {
-        type: "object",
-        patternProperties: {
-          "(a+)+$": {
-            type: "object",
-            properties: {
-              mode: { type: "string", default: "applied" },
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.nested",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "(a+)+$": {
+              type: "object",
+              properties: {
+                mode: { type: "string", default: "applied" },
+              },
+              additionalProperties: true,
             },
-            additionalProperties: true,
           },
+          additionalProperties: true,
         },
-        additionalProperties: true,
-      },
-      value,
-      applyDefaults: true,
-    });
-    const elapsedMs = Date.now() - started;
-    expect(elapsedMs).toBeLessThan(2_000);
-    expect(result.ok).toBe(false);
-    if (result.ok) {
-      throw new Error("expected validation failure for unsafe patternProperties");
-    }
-    expect(result.errors.some((error) => /unsafe patternProperties/i.test(error.message))).toBe(
-      true,
-    );
+        value,
+        applyDefaults: true,
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   it("rejects adjacent unbounded patternProperties on the plugin entrypoint", () => {
-    const result = validateJsonSchemaValue({
-      cacheKey: "schema-validator.pattern-properties.adjacent",
-      schema: {
-        type: "object",
-        patternProperties: {
-          "a*a*$": { type: "string" },
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.adjacent",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "a*a*$": { type: "string" },
+          },
+          additionalProperties: true,
         },
-        additionalProperties: true,
-      },
-      value: { aaa: "keep" },
-    });
-    expect(result.ok).toBe(false);
-    if (result.ok) {
-      throw new Error("expected validation failure for adjacent patternProperties");
-    }
-    expect(result.errors.some((error) => /unsafe patternProperties/i.test(error.message))).toBe(
-      true,
-    );
+        value: { aaa: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
   });
 
   it("accepts safe disjoint patternProperties on the plugin entrypoint", () => {
@@ -90,6 +79,67 @@ describe("schema validator patternProperties screening", () => {
       a: { mode: "keep" },
       bc: { mode: "keep" },
     });
+  });
+
+  it("accepts disjoint character-class patternProperties on the plugin entrypoint", () => {
+    const result = validateJsonSchemaValue({
+      cacheKey: "schema-validator.pattern-properties.class-disjoint",
+      schema: {
+        type: "object",
+        patternProperties: {
+          "^([ab]|cd)+$": {
+            type: "object",
+            properties: {
+              mode: { type: "string", default: "keep" },
+            },
+            additionalProperties: false,
+          },
+        },
+        additionalProperties: true,
+      },
+      value: { a: {}, cd: {} },
+      applyDefaults: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error("expected character-class patternProperties to validate");
+    }
+    expect(result.value).toEqual({
+      a: { mode: "keep" },
+      cd: { mode: "keep" },
+    });
+  });
+
+  it("rejects nested alternatives that share a possible prefix", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.nested-prefix",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^((a|b)|bb)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { a: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects semantically overlapping adjacent patternProperties", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.semantic-adjacent",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "a*[a]*$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { aaa: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
   });
 
   it("applies empty patternProperties defaults on the plugin entrypoint", () => {
