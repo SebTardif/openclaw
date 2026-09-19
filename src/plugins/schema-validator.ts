@@ -10,15 +10,118 @@ import { Compile, type Validator as TypeBoxValidator } from "typebox/schema";
 import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text.js";
 import { appendAllowedValuesHint, summarizeAllowedValues } from "../config/allowed-values.js";
 import { isBlockedObjectKey } from "../infra/prototype-keys.js";
+import { compileJsonSchemaPatternRegexDetailed } from "../security/safe-regex.js";
 import {
   applyJsonSchemaDefaults,
   findJsonSchemaShapeError,
 } from "../shared/json-schema-defaults.js";
-import { findUnsafePatternProperty } from "../shared/json-schema-unsafe-patterns.js";
 import type { JsonSchemaObject } from "../shared/json-schema.types.js";
 import { parseConfigPathArrayIndex } from "../shared/path-array-index.js";
 import { PluginLruCache } from "./plugin-lru-cache.js";
 import type { PluginOrigin } from "./plugin-origin.types.js";
+
+const nestedSchemaMapKeywords = new Set([
+  "$defs",
+  "definitions",
+  "dependencies",
+  "dependentSchemas",
+  "patternProperties",
+  "properties",
+]);
+const nestedSchemaValueKeywords = new Set([
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "else",
+  "if",
+  "items",
+  "not",
+  "propertyNames",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+]);
+const nestedSchemaArrayKeywords = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
+
+function asNestedSchemaRecord(value: object): Record<string, unknown> {
+  return value as Record<string, unknown>; // SAFETY: caller already excluded arrays and primitives.
+}
+
+/** Locate nested-repetition patternProperties that TypeBox would compile unsafely. */
+export function findUnsafePatternProperty(schema: unknown, path = "$"): string | null {
+  if (!schema || typeof schema !== "object") {
+    return null;
+  }
+  if (Array.isArray(schema)) {
+    for (let i = 0; i < schema.length; i += 1) {
+      const nested = findUnsafePatternProperty(schema[i], `${path}[${i}]`);
+      if (nested) {
+        return nested;
+      }
+    }
+    return null;
+  }
+  const record = asNestedSchemaRecord(schema);
+  const patterns = record.patternProperties;
+  if (patterns && typeof patterns === "object" && !Array.isArray(patterns)) {
+    for (const pattern of Object.keys(asNestedSchemaRecord(patterns))) {
+      const compiled = compileJsonSchemaPatternRegexDetailed(pattern);
+      if (!compiled.regex && compiled.reason === "unsafe-nested-repetition") {
+        return `${path}.patternProperties[${JSON.stringify(pattern)}]`;
+      }
+    }
+  }
+  for (const key of nestedSchemaMapKeywords) {
+    const value = record[key];
+    if (value === undefined || !value || typeof value !== "object" || Array.isArray(value)) {
+      continue;
+    }
+    for (const [entryKey, entry] of Object.entries(asNestedSchemaRecord(value))) {
+      if (Array.isArray(entry) || typeof entry !== "object" || entry === null) {
+        continue;
+      }
+      const nested = findUnsafePatternProperty(entry, `${path}.${key}.${entryKey}`);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+  for (const key of nestedSchemaValueKeywords) {
+    const value = record[key];
+    if (value === undefined || typeof value === "boolean") {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      if (key !== "items") {
+        continue;
+      }
+      for (let i = 0; i < value.length; i += 1) {
+        const nested = findUnsafePatternProperty(value[i], `${path}.${key}[${i}]`);
+        if (nested) {
+          return nested;
+        }
+      }
+      continue;
+    }
+    const nested = findUnsafePatternProperty(value, `${path}.${key}`);
+    if (nested) {
+      return nested;
+    }
+  }
+  for (const key of nestedSchemaArrayKeywords) {
+    const value = record[key];
+    if (!Array.isArray(value)) {
+      continue;
+    }
+    for (let i = 0; i < value.length; i += 1) {
+      const nested = findUnsafePatternProperty(value[i], `${path}.${key}[${i}]`);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+  return null;
+}
 
 type CachedValidator = {
   hasDefaults: boolean;
