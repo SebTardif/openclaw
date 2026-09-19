@@ -2,10 +2,10 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
 import {
-  adjacentRepeatsOverlap,
   isLookaroundPrefix,
   isZeroWidthLanguage,
   nextPendingAdjacentAlts,
+  shouldRejectAdjacentOverlap,
 } from "./safe-regex-adjacent.js";
 import { readEscapeAtomEnd, tokenizePattern, type PatternToken } from "./safe-regex-tokens.js";
 
@@ -104,12 +104,16 @@ function escapeRegExpLiteral(value: string): string {
 function readScalarEscape(
   source: string,
   index: number,
+  unicodeMode = false,
 ): { value: string; nextIndex: number } | null {
   if (source[index] !== "\\") {
     return null;
   }
   const kind = source[index + 1];
   if (kind === "u" && source[index + 2] === "{") {
+    if (!unicodeMode) {
+      return null;
+    }
     const close = source.indexOf("}", index + 3);
     if (close < 0) {
       return null;
@@ -137,6 +141,7 @@ function readScalarEscape(
 
 function readAlternativeLiteral(
   source: string,
+  unicodeMode = false,
 ): { kind: "broad" } | { kind: "literal"; value: string } {
   let value = "";
   for (let index = 0; index < source.length; index += 1) {
@@ -145,7 +150,7 @@ function readAlternativeLiteral(
       continue;
     }
     if (ch === "\\") {
-      const scalar = readScalarEscape(source, index);
+      const scalar = readScalarEscape(source, index, unicodeMode);
       if (scalar) {
         value += scalar.value;
         index = scalar.nextIndex - 1;
@@ -181,7 +186,7 @@ function readAlternativeLiteral(
   return value.length === 0 ? { kind: "broad" } : { kind: "literal", value };
 }
 
-function isSingleTokenAlternative(source: string): boolean {
+function isSingleTokenAlternative(source: string, unicodeMode = false): boolean {
   // True for one char, one escape, or one char-class after anchors.
   // Used so unions like ([\w]|[-.])+ are not treated as nested ReDoS.
   let tokens = 0;
@@ -192,7 +197,7 @@ function isSingleTokenAlternative(source: string): boolean {
     }
     if (ch === "\\") {
       tokens += 1;
-      index = readEscapeAtomEnd(source, index);
+      index = readEscapeAtomEnd(source, index, unicodeMode);
       if (tokens > 1) {
         return false;
       }
@@ -245,9 +250,10 @@ function alternativesMayOverlap(
   right: string,
   ignoreCase: boolean,
   failClosedUnprobedUnicode: boolean,
+  unicodeMode = false,
 ): boolean {
-  const leftLit = readAlternativeLiteral(left);
-  const rightLit = readAlternativeLiteral(right);
+  const leftLit = readAlternativeLiteral(left, unicodeMode);
+  const rightLit = readAlternativeLiteral(right, unicodeMode);
   if (leftLit.kind === "literal" && rightLit.kind === "literal") {
     const a = leftLit.value;
     const b = rightLit.value;
@@ -267,7 +273,7 @@ function alternativesMayOverlap(
   }
   // Single-token unions (class/escape/literal) are safe only when proven
   // disjoint. Overlapping classes like \w|\d still admit unbounded ambiguity.
-  if (isSingleTokenAlternative(left) && isSingleTokenAlternative(right)) {
+  if (isSingleTokenAlternative(left, unicodeMode) && isSingleTokenAlternative(right, unicodeMode)) {
     return singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode);
   }
   // Mixed structure with broad components (e.g. aa|a.) can overlap under +.
@@ -398,11 +404,18 @@ function recordAlternative(
   branchEnd: number,
   ignoreCase: boolean,
   failClosedUnprobedUnicode: boolean,
+  unicodeMode: boolean,
 ): void {
   const branchSource = source.slice(frame.branchStart, branchEnd);
   if (
     frame.alternativeSources.some((alternative) =>
-      alternativesMayOverlap(alternative, branchSource, ignoreCase, failClosedUnprobedUnicode),
+      alternativesMayOverlap(
+        alternative,
+        branchSource,
+        ignoreCase,
+        failClosedUnprobedUnicode,
+        unicodeMode,
+      ),
     )
   ) {
     frame.hasOverlappingAlternative = true;
@@ -418,11 +431,16 @@ function recordAlternative(
 }
 
 /** Adjacent twins: equal signatures, or proven single-token overlap. No Unicode fail-closed. */
-function adjacentPairOverlaps(left: string, right: string, ignoreCase: boolean): boolean {
+function adjacentPairOverlaps(
+  left: string,
+  right: string,
+  ignoreCase: boolean,
+  unicodeMode = false,
+): boolean {
   return (
-    isSingleTokenAlternative(left) &&
-    isSingleTokenAlternative(right) &&
-    alternativesMayOverlap(left, right, ignoreCase, false)
+    isSingleTokenAlternative(left, unicodeMode) &&
+    isSingleTokenAlternative(right, unicodeMode) &&
+    alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode)
   );
 }
 
@@ -431,7 +449,10 @@ function analyzeTokensForNestedRepetition(
   tokens: PatternToken[],
   ignoreCase: boolean,
   failClosedUnprobedUnicode: boolean,
+  unicodeMode: boolean,
 ): boolean {
+  const pairOverlaps = (left: string, right: string, ignoreCaseFlag: boolean) =>
+    adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode);
   const frames: ParseFrame[] = [createParseFrame()];
 
   const emitToken = (token: TokenState) => {
@@ -503,7 +524,14 @@ function analyzeTokensForNestedRepetition(
           continue;
         }
         if (frame.hasAlternation) {
-          recordAlternative(frame, source, token.start, ignoreCase, failClosedUnprobedUnicode);
+          recordAlternative(
+            frame,
+            source,
+            token.start,
+            ignoreCase,
+            failClosedUnprobedUnicode,
+            unicodeMode,
+          );
         }
         const groupMinLength = frame.hasAlternation
           ? (frame.altMinLength ?? 0)
@@ -528,11 +556,12 @@ function analyzeTokensForNestedRepetition(
           groupUnbounded &&
           parent.pendingAdjacentAlts &&
           parent.pendingNextAlts === null &&
-          adjacentRepeatsOverlap(
+          shouldRejectAdjacentOverlap(
             parent.pendingAdjacentAlts,
             groupAlts,
             ignoreCase,
-            adjacentPairOverlaps,
+            failClosedUnprobedUnicode,
+            pairOverlaps,
           )
         ) {
           return true;
@@ -568,7 +597,14 @@ function analyzeTokensForNestedRepetition(
     if (token.kind === "alternation") {
       const frame = expectDefined(frames[frames.length - 1], "frames entry at frames.length 1");
       frame.hasAlternation = true;
-      recordAlternative(frame, source, token.start, ignoreCase, failClosedUnprobedUnicode);
+      recordAlternative(
+        frame,
+        source,
+        token.start,
+        ignoreCase,
+        failClosedUnprobedUnicode,
+        unicodeMode,
+      );
       frame.branchStart = token.end;
       frame.branchMinLength = 0;
       frame.branchMaxLength = 0;
@@ -588,11 +624,12 @@ function analyzeTokensForNestedRepetition(
       frame.pendingAdjacentAlts &&
       frame.pendingNextAlts &&
       token.quantifier.maxRepeat === null &&
-      adjacentRepeatsOverlap(
+      shouldRejectAdjacentOverlap(
         frame.pendingAdjacentAlts,
         frame.pendingNextAlts,
         ignoreCase,
-        adjacentPairOverlaps,
+        failClosedUnprobedUnicode,
+        pairOverlaps,
       )
     ) {
       return true;
@@ -664,11 +701,13 @@ function hasUnsafeRepetition(
 ): boolean {
   // Conservative parser: tokenize first, then check if repeated tokens/groups are repeated again.
   // Non-goal: complete regex AST support; keep strict enough for config safety checks.
+  const unicodeMode = flags.includes("u") || flags.includes("v");
   return analyzeTokensForNestedRepetition(
     source,
-    tokenizePattern(source),
+    tokenizePattern(source, flags),
     flags.includes("i"),
     failClosedUnprobedUnicode,
+    unicodeMode,
   );
 }
 

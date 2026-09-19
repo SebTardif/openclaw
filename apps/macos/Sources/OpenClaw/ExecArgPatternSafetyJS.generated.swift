@@ -215,6 +215,33 @@ var OpenClawExecArgPattern = (() => {
     }
     return out.length > 0 ? out : [""];
   }
+  function sameAlternativeSet(left, right) {
+    if (left.length !== right.length) {
+      return false;
+    }
+    const sortedLeft = [...left].toSorted();
+    const sortedRight = [...right].toSorted();
+    return sortedLeft.every((alt, index) => alt === sortedRight[index]);
+  }
+  function isCharacterClassAlternative(source) {
+    let body = source;
+    if (body.startsWith("^")) {
+      body = body.slice(1);
+    }
+    if (body.endsWith("$")) {
+      body = body.slice(0, -1);
+    }
+    return body.startsWith("[") && body.endsWith("]") && body.length >= 2;
+  }
+  function shouldRejectAdjacentOverlap(leftAlts, rightAlts, ignoreCase, failClosedUnprobedUnicode, singleTokenPairOverlaps) {
+    if (!adjacentRepeatsOverlap(leftAlts, rightAlts, ignoreCase, singleTokenPairOverlaps)) {
+      return false;
+    }
+    if (!failClosedUnprobedUnicode && sameAlternativeSet(leftAlts, rightAlts) && leftAlts.every((alt) => isCharacterClassAlternative(alt))) {
+      return false;
+    }
+    return true;
+  }
   function adjacentRepeatsOverlap(leftAlts, rightAlts, ignoreCase, singleTokenPairOverlaps) {
     const leftFlat = flattenAlternatives(leftAlts);
     const rightFlat = flattenAlternatives(rightAlts);
@@ -296,7 +323,7 @@ var OpenClawExecArgPattern = (() => {
   function isUnicodePropertyName(interior) {
     return /^[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?$/.test(interior);
   }
-  function readEscapeAtomEnd(source, backslashIndex) {
+  function readEscapeAtomEnd(source, backslashIndex, unicodeMode = false) {
     if (backslashIndex + 1 >= source.length) {
       return backslashIndex;
     }
@@ -310,6 +337,9 @@ var OpenClawExecArgPattern = (() => {
       return backslashIndex + 1;
     }
     if (kind === "u" && source[afterKind] === "{") {
+      if (!unicodeMode) {
+        return backslashIndex + 1;
+      }
       const close = source.indexOf("}", afterKind + 1);
       if (close !== -1 && /^[0-9a-fA-F]{1,6}$/.test(source.slice(afterKind + 1, close))) {
         const cp = Number.parseInt(source.slice(afterKind + 1, close), 16);
@@ -327,12 +357,13 @@ var OpenClawExecArgPattern = (() => {
     }
     return backslashIndex + 1;
   }
-  function tokenizePattern(source) {
+  function tokenizePattern(source, flags = "") {
     const tokens = [];
+    const unicodeMode = flags.includes("u") || flags.includes("v");
     for (let i = 0; i < source.length; i += 1) {
       const ch = source[i];
       if (ch === "\\") {
-        const end = readEscapeAtomEnd(source, i);
+        const end = readEscapeAtomEnd(source, i, unicodeMode);
         tokens.push({ kind: "simple-token", source: source.slice(i, end + 1) });
         i = end;
         continue;
@@ -418,12 +449,15 @@ var OpenClawExecArgPattern = (() => {
   function escapeRegExpLiteral(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
-  function readScalarEscape(source, index) {
+  function readScalarEscape(source, index, unicodeMode = false) {
     if (source[index] !== "\\") {
       return null;
     }
     const kind = source[index + 1];
     if (kind === "u" && source[index + 2] === "{") {
+      if (!unicodeMode) {
+        return null;
+      }
       const close = source.indexOf("}", index + 3);
       if (close < 0) {
         return null;
@@ -448,7 +482,7 @@ var OpenClawExecArgPattern = (() => {
     }
     return null;
   }
-  function readAlternativeLiteral(source) {
+  function readAlternativeLiteral(source, unicodeMode = false) {
     let value = "";
     for (let index = 0; index < source.length; index += 1) {
       const ch = source[index];
@@ -456,7 +490,7 @@ var OpenClawExecArgPattern = (() => {
         continue;
       }
       if (ch === "\\") {
-        const scalar = readScalarEscape(source, index);
+        const scalar = readScalarEscape(source, index, unicodeMode);
         if (scalar) {
           value += scalar.value;
           index = scalar.nextIndex - 1;
@@ -481,7 +515,7 @@ var OpenClawExecArgPattern = (() => {
     }
     return value.length === 0 ? { kind: "broad" } : { kind: "literal", value };
   }
-  function isSingleTokenAlternative(source) {
+  function isSingleTokenAlternative(source, unicodeMode = false) {
     let tokens = 0;
     for (let index = 0; index < source.length; index += 1) {
       const ch = source[index];
@@ -490,7 +524,7 @@ var OpenClawExecArgPattern = (() => {
       }
       if (ch === "\\") {
         tokens += 1;
-        index = readEscapeAtomEnd(source, index);
+        index = readEscapeAtomEnd(source, index, unicodeMode);
         if (tokens > 1) {
           return false;
         }
@@ -528,9 +562,9 @@ var OpenClawExecArgPattern = (() => {
     }
     return tokens === 1;
   }
-  function alternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode) {
-    const leftLit = readAlternativeLiteral(left);
-    const rightLit = readAlternativeLiteral(right);
+  function alternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode, unicodeMode = false) {
+    const leftLit = readAlternativeLiteral(left, unicodeMode);
+    const rightLit = readAlternativeLiteral(right, unicodeMode);
     if (leftLit.kind === "literal" && rightLit.kind === "literal") {
       const a = leftLit.value;
       const b = rightLit.value;
@@ -545,7 +579,7 @@ var OpenClawExecArgPattern = (() => {
         return true;
       }
     }
-    if (isSingleTokenAlternative(left) && isSingleTokenAlternative(right)) {
+    if (isSingleTokenAlternative(left, unicodeMode) && isSingleTokenAlternative(right, unicodeMode)) {
       return singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode);
     }
     return true;
@@ -636,10 +670,16 @@ var OpenClawExecArgPattern = (() => {
     }
     return false;
   }
-  function recordAlternative(frame, source, branchEnd, ignoreCase, failClosedUnprobedUnicode) {
+  function recordAlternative(frame, source, branchEnd, ignoreCase, failClosedUnprobedUnicode, unicodeMode) {
     const branchSource = source.slice(frame.branchStart, branchEnd);
     if (frame.alternativeSources.some(
-      (alternative) => alternativesMayOverlap(alternative, branchSource, ignoreCase, failClosedUnprobedUnicode)
+      (alternative) => alternativesMayOverlap(
+        alternative,
+        branchSource,
+        ignoreCase,
+        failClosedUnprobedUnicode,
+        unicodeMode
+      )
     )) {
       frame.hasOverlappingAlternative = true;
     }
@@ -652,10 +692,11 @@ var OpenClawExecArgPattern = (() => {
     frame.altMinLength = Math.min(frame.altMinLength, frame.branchMinLength);
     frame.altMaxLength = Math.max(frame.altMaxLength, frame.branchMaxLength);
   }
-  function adjacentPairOverlaps(left, right, ignoreCase) {
-    return isSingleTokenAlternative(left) && isSingleTokenAlternative(right) && alternativesMayOverlap(left, right, ignoreCase, false);
+  function adjacentPairOverlaps(left, right, ignoreCase, unicodeMode = false) {
+    return isSingleTokenAlternative(left, unicodeMode) && isSingleTokenAlternative(right, unicodeMode) && alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode);
   }
-  function analyzeTokensForNestedRepetition(source, tokens, ignoreCase, failClosedUnprobedUnicode) {
+  function analyzeTokensForNestedRepetition(source, tokens, ignoreCase, failClosedUnprobedUnicode, unicodeMode) {
+    const pairOverlaps = (left, right, ignoreCaseFlag) => adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode);
     const frames = [createParseFrame()];
     const emitToken = (token) => {
       const frame = expectDefined(frames[frames.length - 1], "frames entry at frames.length 1");
@@ -720,18 +761,26 @@ var OpenClawExecArgPattern = (() => {
             continue;
           }
           if (frame2.hasAlternation) {
-            recordAlternative(frame2, source, token.start, ignoreCase, failClosedUnprobedUnicode);
+            recordAlternative(
+              frame2,
+              source,
+              token.start,
+              ignoreCase,
+              failClosedUnprobedUnicode,
+              unicodeMode
+            );
           }
           const groupMinLength = frame2.hasAlternation ? frame2.altMinLength ?? 0 : frame2.branchMinLength;
           const groupMaxLength = frame2.hasAlternation ? frame2.altMaxLength ?? 0 : frame2.branchMaxLength;
           const groupLanguage = (frame2.hasAlternation ? frame2.alternativeSources.join("|") : source.slice(frame2.contentStart, token.start)) || "(?:)";
           const groupAlts = frame2.hasAlternation && frame2.alternativeSources.length > 0 ? frame2.alternativeSources : frame2.branchTokenCount === 1 && frame2.lastToken?.alternatives && frame2.lastToken.alternatives.length > 0 ? frame2.lastToken.alternatives : [groupLanguage];
           const groupUnbounded = !Number.isFinite(groupMaxLength);
-          if (groupUnbounded && parent.pendingAdjacentAlts && parent.pendingNextAlts === null && adjacentRepeatsOverlap(
+          if (groupUnbounded && parent.pendingAdjacentAlts && parent.pendingNextAlts === null && shouldRejectAdjacentOverlap(
             parent.pendingAdjacentAlts,
             groupAlts,
             ignoreCase,
-            adjacentPairOverlaps
+            failClosedUnprobedUnicode,
+            pairOverlaps
           )) {
             return true;
           }
@@ -763,7 +812,14 @@ var OpenClawExecArgPattern = (() => {
       if (token.kind === "alternation") {
         const frame2 = expectDefined(frames[frames.length - 1], "frames entry at frames.length 1");
         frame2.hasAlternation = true;
-        recordAlternative(frame2, source, token.start, ignoreCase, failClosedUnprobedUnicode);
+        recordAlternative(
+          frame2,
+          source,
+          token.start,
+          ignoreCase,
+          failClosedUnprobedUnicode,
+          unicodeMode
+        );
         frame2.branchStart = token.end;
         frame2.branchMinLength = 0;
         frame2.branchMaxLength = 0;
@@ -778,11 +834,12 @@ var OpenClawExecArgPattern = (() => {
       if (!previousToken) {
         continue;
       }
-      if (frame.pendingAdjacentAlts && frame.pendingNextAlts && token.quantifier.maxRepeat === null && adjacentRepeatsOverlap(
+      if (frame.pendingAdjacentAlts && frame.pendingNextAlts && token.quantifier.maxRepeat === null && shouldRejectAdjacentOverlap(
         frame.pendingAdjacentAlts,
         frame.pendingNextAlts,
         ignoreCase,
-        adjacentPairOverlaps
+        failClosedUnprobedUnicode,
+        pairOverlaps
       )) {
         return true;
       }
@@ -814,11 +871,13 @@ var OpenClawExecArgPattern = (() => {
     return false;
   }
   function hasUnsafeRepetition(source, flags, failClosedUnprobedUnicode) {
+    const unicodeMode = flags.includes("u") || flags.includes("v");
     return analyzeTokensForNestedRepetition(
       source,
-      tokenizePattern(source),
+      tokenizePattern(source, flags),
       flags.includes("i"),
-      failClosedUnprobedUnicode
+      failClosedUnprobedUnicode,
+      unicodeMode
     );
   }
   function compileSafeRegexDetailedImpl(source, flags, failClosedUnprobedUnicode) {

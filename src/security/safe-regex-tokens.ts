@@ -89,7 +89,11 @@ function isUnicodePropertyName(interior: string): boolean {
  * one-char escape after `\`. Do not swallow `\p{(a+)+}`: without `u`,
  * `\p` is an identity escape and the group must still be analyzed.
  */
-export function readEscapeAtomEnd(source: string, backslashIndex: number): number {
+export function readEscapeAtomEnd(
+  source: string,
+  backslashIndex: number,
+  unicodeMode = false,
+): number {
   if (backslashIndex + 1 >= source.length) {
     return backslashIndex;
   }
@@ -105,6 +109,9 @@ export function readEscapeAtomEnd(source: string, backslashIndex: number): numbe
   }
 
   if (kind === "u" && source[afterKind] === "{") {
+    if (!unicodeMode) {
+      return backslashIndex + 1;
+    }
     const close = source.indexOf("}", afterKind + 1);
     if (close !== -1 && /^[0-9a-fA-F]{1,6}$/.test(source.slice(afterKind + 1, close))) {
       const cp = Number.parseInt(source.slice(afterKind + 1, close), 16);
@@ -126,14 +133,15 @@ export function readEscapeAtomEnd(source: string, backslashIndex: number): numbe
   return backslashIndex + 1;
 }
 
-export function tokenizePattern(source: string): PatternToken[] {
+export function tokenizePattern(source: string, flags = ""): PatternToken[] {
   const tokens: PatternToken[] = [];
+  const unicodeMode = flags.includes("u") || flags.includes("v");
 
   for (let i = 0; i < source.length; i += 1) {
     const ch = source[i];
 
     if (ch === "\\") {
-      const end = readEscapeAtomEnd(source, i);
+      const end = readEscapeAtomEnd(source, i, unicodeMode);
       tokens.push({ kind: "simple-token", source: source.slice(i, end + 1) });
       i = end;
       continue;

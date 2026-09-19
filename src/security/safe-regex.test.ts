@@ -166,11 +166,13 @@ describe("safe regex", () => {
       "unsafe-nested-repetition",
     );
     expect(compileSafeRegex("a*a*")).toBeNull();
-    expect(compileSafeRegex("[ab]*[ab]*")).toBeNull();
     expect(compileSafeRegex("(a)*(a)*")).toBeNull();
     expect(compileSafeRegex("(a*)(a*)")).toBeNull();
     expect(compileSafeRegex("a*(?:)a*")).toBeNull();
-    expect(compileSafeRegex("[猫]*[猫]*")).toBeNull();
+    expect(compileSafeRegex("[ab]*[ab]*")).toBeInstanceOf(RegExp);
+    expect(compileSafeRegex("[猫]*[猫]*")).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec("[ab]*[ab]*").regex).toBeNull();
+    expect(compileSafeRegexForExec("[猫]*[猫]*").regex).toBeNull();
   });
 
   it("rejects adjacent unbounded groups whose complete branch unions overlap", () => {
@@ -244,6 +246,21 @@ describe("safe regex", () => {
     expect(compileSafeRegexForExec("^a*x?a*x?a*x?a*b$").regex).toBeNull();
     expect(compileSafeRegex("a*x?b*")).toBeInstanceOf(RegExp);
     expect(compileSafeRegex("a*x+a*")).toBeInstanceOf(RegExp);
+  });
+
+  it("keeps custom redaction adjacent class repeats on the shared compiler", () => {
+    expect(compileSafeRegexDetailed("corp-[A-Z]+[A-Z]+").reason).toBeNull();
+    expect(compileSafeRegex("corp-[A-Z]+[A-Z]+")).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec("corp-[A-Z]+[A-Z]+").regex).toBeNull();
+  });
+
+  it("treats braced unicode escapes as identity plus quantifier without u/v", () => {
+    expect(compileSafeRegexDetailed(String.raw`^(\u{2}|u)+$`).reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileSafeRegex(String.raw`^(\u{2}|u)+$`)).toBeNull();
+    expect(compileSafeRegexForExec(String.raw`^(\u{2}|u)+$`).regex).toBeNull();
+    expect(compileSafeRegexDetailed(String.raw`^(\u{2}|u)+$`, "u").reason).toBeNull();
   });
 
   it("still compiles every default redact pattern after zero-minimum carry", () => {

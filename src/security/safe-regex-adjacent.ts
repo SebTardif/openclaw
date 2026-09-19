@@ -185,6 +185,46 @@ function flattenAlternatives(alternatives: readonly string[]): string[] {
   return out.length > 0 ? out : [""];
 }
 
+function sameAlternativeSet(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const sortedLeft = [...left].toSorted();
+  const sortedRight = [...right].toSorted();
+  return sortedLeft.every((alt, index) => alt === sortedRight[index]);
+}
+
+function isCharacterClassAlternative(source: string): boolean {
+  let body = source;
+  if (body.startsWith("^")) {
+    body = body.slice(1);
+  }
+  if (body.endsWith("$")) {
+    body = body.slice(0, -1);
+  }
+  return body.startsWith("[") && body.endsWith("]") && body.length >= 2;
+}
+
+export function shouldRejectAdjacentOverlap(
+  leftAlts: readonly string[],
+  rightAlts: readonly string[],
+  ignoreCase: boolean,
+  failClosedUnprobedUnicode: boolean,
+  singleTokenPairOverlaps: (left: string, right: string, ignoreCase: boolean) => boolean,
+): boolean {
+  if (!adjacentRepeatsOverlap(leftAlts, rightAlts, ignoreCase, singleTokenPairOverlaps)) {
+    return false;
+  }
+  if (
+    !failClosedUnprobedUnicode &&
+    sameAlternativeSet(leftAlts, rightAlts) &&
+    leftAlts.every((alt) => isCharacterClassAlternative(alt))
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function adjacentRepeatsOverlap(
   leftAlts: readonly string[],
   rightAlts: readonly string[],

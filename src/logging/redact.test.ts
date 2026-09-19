@@ -87,6 +87,15 @@ describe("default redact pattern ownership", () => {
   });
 });
 
+describe("custom adjacent-class redaction", () => {
+  it("still masks corp-[A-Z]+[A-Z]+ deployment values", () => {
+    const output = redactSensitiveText("id=corp-ABCDEFG", {
+      patterns: ["corp-[A-Z]+[A-Z]+"],
+    });
+    expect(output).not.toContain("ABCDEFG");
+  });
+});
+
 describe("registered exact secret values", () => {
   it("masks registered values in text and nested structured data", () => {
     const secret = "registered-exact-secret";
