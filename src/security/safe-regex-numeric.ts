@@ -180,7 +180,7 @@ function readLegacyOctalEnd(source: string, index: number): number {
   return end;
 }
 
-export function readNumericEscapeAtom(
+function readNumericEscapeAtom(
   source: string,
   index: number,
   options: { unicode?: boolean; capturingGroups?: number } = {},
