@@ -220,6 +220,68 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("rejects noncapturing overlapping alternatives on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.noncapturing-overlap",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(?:a|aaa)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { a: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects backreference alternatives on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.backref-overlap",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(a)(\\1|aa)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { aaa: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("accepts disjoint alternating groups adjacent to a different repetition", () => {
+    const result = validateJsonSchemaValue({
+      cacheKey: "schema-validator.pattern-properties.alt-group-adjacent",
+      schema: {
+        type: "object",
+        patternProperties: {
+          "^(a|b)+c+$": {
+            type: "object",
+            properties: {
+              mode: { type: "string", default: "keep" },
+            },
+            additionalProperties: false,
+          },
+        },
+        additionalProperties: true,
+      },
+      value: { ac: {}, bbc: {}, zz: {} },
+      applyDefaults: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error("expected alternating-group patternProperties to validate");
+    }
+    expect(result.value).toEqual({
+      ac: { mode: "keep" },
+      bbc: { mode: "keep" },
+      zz: {},
+    });
+  });
+
   it("applies empty patternProperties defaults on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.empty",
