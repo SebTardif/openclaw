@@ -275,6 +275,45 @@ describe("createMcpJsonSchemaValidator patternProperties preflight", () => {
     ).toThrow(/unsafe patternProperties pattern rejected/);
   });
 
+  it("rejects noncapturing overlapping alternatives on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^(?:a|aaa)+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("rejects backreference alternatives on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^(a)(\\1|aa)+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("accepts disjoint alternating groups adjacent to a different repetition on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    const validate = factory.getValidator<{ ac?: string; bbc?: string }>({
+      $schema: DRAFT,
+      type: "object",
+      patternProperties: {
+        "^(a|b)+c+$": { type: "string" },
+      },
+      additionalProperties: true,
+    });
+    expect(validate({ ac: "ok", bbc: "ok" }).valid).toBe(true);
+  });
+
   it("compiles empty JSON Schema patternProperties on the MCP entrypoint", () => {
     const factory = createMcpJsonSchemaValidator();
     const validate = factory.getValidator<{ x?: { mode?: string } }>({

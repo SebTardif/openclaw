@@ -156,4 +156,26 @@ describe("safe regex", () => {
       "unsafe-nested-repetition",
     );
   });
+
+  it("rejects noncapturing groups with overlapping alternatives", () => {
+    expect(compileSafeRegexDetailed("^(?:a|aaa)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^(?:a|aaa)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects backreference alternatives as unknown prefix languages", () => {
+    expect(compileSafeRegexDetailed("^(a)(\\1|aa)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^(a)(\\1|aa)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("accepts disjoint alternating groups adjacent to a different repetition", () => {
+    const compiled = compileJsonSchemaPatternRegexDetailed("^(a|b)+c+$");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("ac")).toBe(true);
+    expect(compiled.regex?.test("bbc")).toBe(true);
+    expect(compiled.regex?.test("ab")).toBe(false);
+  });
 });

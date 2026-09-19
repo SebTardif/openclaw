@@ -130,6 +130,9 @@ function escapeLanguage(sig: string, foldCase: boolean): AtomLanguage {
   if (body.startsWith("p") || body.startsWith("P")) {
     return { kind: "any" };
   }
+  if (/^[1-9]\d*$/.test(body)) {
+    return { kind: "any" };
+  }
   if (body.length === 1) {
     return singleton(body, foldCase);
   }
@@ -243,10 +246,180 @@ function unwrapSimpleGroup(sig: string): string {
   return current;
 }
 
-function atomLanguage(sig: string, foldCase: boolean): AtomLanguage {
-  const atom = unwrapSimpleGroup(sig);
-  if (!atom || atom === "." || atom.startsWith("(")) {
+function readCharClassSig(source: string, index: number): { end: number; sig: string } {
+  let i = index + 1;
+  if (source[i] === "^") {
+    i += 1;
+  }
+  while (i < source.length) {
+    if (source[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (source[i] === "]") {
+      return { end: i + 1, sig: source.slice(index, i + 1) };
+    }
+    i += 1;
+  }
+  return { end: source.length, sig: source.slice(index) };
+}
+
+function readGroupSig(source: string, index: number): { end: number; sig: string } {
+  let depth = 1;
+  let i = index + 1;
+  while (i < source.length && depth > 0) {
+    if (source[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (source[i] === "[") {
+      i = readCharClassSig(source, i).end;
+      continue;
+    }
+    if (source[i] === "(") {
+      depth += 1;
+    } else if (source[i] === ")") {
+      depth -= 1;
+    }
+    i += 1;
+  }
+  return { end: i, sig: source.slice(index, i) };
+}
+
+function stripOuterGroup(sig: string): string | null {
+  if (!sig.startsWith("(") || !sig.endsWith(")")) {
+    return null;
+  }
+  let inner = sig.slice(1, -1);
+  if (inner.startsWith("?:") || inner.startsWith("?=") || inner.startsWith("?!")) {
+    inner = inner.slice(2);
+  } else if (inner.startsWith("?<=") || inner.startsWith("?<!")) {
+    inner = inner.slice(3);
+  } else if (inner.startsWith("?<")) {
+    const nameEnd = inner.indexOf(">");
+    if (nameEnd === -1) {
+      return null;
+    }
+    inner = inner.slice(nameEnd + 1);
+  } else if (inner.startsWith("?")) {
+    let i = 1;
+    while (i < inner.length && /[a-zA-Z-]/.test(inner[i] ?? "")) {
+      i += 1;
+    }
+    if (inner[i] !== ":") {
+      return null;
+    }
+    inner = inner.slice(i + 1);
+  }
+  return inner;
+}
+
+function splitTopLevelAlternatives(source: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch === "[") {
+      i = readCharClassSig(source, i).end - 1;
+      continue;
+    }
+    if (ch === "(") {
+      depth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      depth -= 1;
+      continue;
+    }
+    if (ch === "|" && depth === 0) {
+      parts.push(source.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+function firstAtomSig(source: string): string {
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "^" || ch === "$") {
+      i += 1;
+      continue;
+    }
+    if (ch === "(") {
+      const group = readGroupSig(source, i);
+      const prefix = source.slice(i, Math.min(i + 4, group.end));
+      const zeroWidth =
+        prefix.startsWith("(?=") ||
+        prefix.startsWith("(?!") ||
+        prefix.startsWith("(?<=") ||
+        prefix.startsWith("(?<!");
+      if (zeroWidth) {
+        i = group.end;
+        continue;
+      }
+      return group.sig;
+    }
+    if (ch === "\\") {
+      return readCompleteEscapeAtom(source, i).sig;
+    }
+    if (ch === "[") {
+      return readCharClassSig(source, i).sig;
+    }
+    return ch ?? "";
+  }
+  return "";
+}
+
+function unionLanguages(left: AtomLanguage, right: AtomLanguage): AtomLanguage {
+  if (left.kind === "any" || right.kind === "any") {
     return { kind: "any" };
+  }
+  if (left.kind === "chars" && right.kind === "chars") {
+    const chars = new Set(left.chars);
+    for (const ch of right.chars) {
+      chars.add(ch);
+    }
+    return { kind: "chars", chars };
+  }
+  return { kind: "any" };
+}
+
+function groupPrefixLanguage(sig: string, foldCase: boolean, depth: number): AtomLanguage {
+  if (depth > 4) {
+    return { kind: "any" };
+  }
+  const inner = stripOuterGroup(sig);
+  if (inner === null) {
+    return { kind: "any" };
+  }
+  const alternatives = splitTopLevelAlternatives(inner);
+  let union: AtomLanguage | null = null;
+  for (const alternative of alternatives) {
+    const first = firstAtomSig(alternative);
+    const lang = atomLanguageAtDepth(first, foldCase, depth + 1);
+    union = union ? unionLanguages(union, lang) : lang;
+    if (union.kind === "any") {
+      return union;
+    }
+  }
+  return union ?? { kind: "any" };
+}
+
+function atomLanguageAtDepth(sig: string, foldCase: boolean, depth: number): AtomLanguage {
+  const atom = unwrapSimpleGroup(sig);
+  if (!atom || atom === ".") {
+    return { kind: "any" };
+  }
+  if (atom.startsWith("(")) {
+    return groupPrefixLanguage(atom, foldCase, depth);
   }
   if (atom.startsWith("[")) {
     return classLanguage(atom, foldCase);
@@ -258,6 +431,10 @@ function atomLanguage(sig: string, foldCase: boolean): AtomLanguage {
     return singleton(atom, foldCase);
   }
   return singleton(atom[0] ?? "", foldCase);
+}
+
+function atomLanguage(sig: string, foldCase: boolean): AtomLanguage {
+  return atomLanguageAtDepth(sig, foldCase, 0);
 }
 
 function languagesOverlap(left: AtomLanguage, right: AtomLanguage): boolean {

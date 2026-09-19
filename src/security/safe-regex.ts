@@ -171,6 +171,39 @@ function readQuantifier(source: string, index: number): QuantifierRead | null {
   return { consumed: i - index, minRepeat, maxRepeat };
 }
 
+function consumeGroupPrefix(
+  source: string,
+  openIndex: number,
+): { nextIndex: number; unknown: boolean } {
+  const question = openIndex + 1;
+  if (source[question] !== "?") {
+    return { nextIndex: openIndex + 1, unknown: false };
+  }
+  const after = source[question + 1];
+  if (after === ":" || after === "=" || after === "!") {
+    return { nextIndex: question + 2, unknown: false };
+  }
+  if (after === "<") {
+    const look = source[question + 2];
+    if (look === "=" || look === "!") {
+      return { nextIndex: question + 3, unknown: false };
+    }
+    const nameEnd = source.indexOf(">", question + 2);
+    if (nameEnd !== -1) {
+      return { nextIndex: nameEnd + 1, unknown: false };
+    }
+    return { nextIndex: question + 1, unknown: true };
+  }
+  let i = question + 1;
+  while (i < source.length && /[a-zA-Z-]/.test(source[i] ?? "")) {
+    i += 1;
+  }
+  if (source[i] === ":") {
+    return { nextIndex: i + 1, unknown: false };
+  }
+  return { nextIndex: question + 1, unknown: true };
+}
+
 function tokenizePattern(source: string): PatternToken[] {
   const tokens: PatternToken[] = [];
 
@@ -193,6 +226,11 @@ function tokenizePattern(source: string): PatternToken[] {
 
     if (ch === "(") {
       tokens.push({ kind: "group-open" });
+      const prefix = consumeGroupPrefix(source, i);
+      if (prefix.unknown) {
+        tokens.push({ kind: "simple-token", sig: "." });
+      }
+      i = prefix.nextIndex - 1;
       continue;
     }
 

@@ -21,4 +21,13 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain(secret);
     expect(output).toContain("corp-");
   });
+
+  it("drops overlapping noncapturing custom redaction alternatives", () => {
+    const secret = "aaaaX";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["(?:a|aaa)+"],
+    });
+    expect(output).toContain(secret);
+  });
 });
