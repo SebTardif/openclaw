@@ -83,6 +83,7 @@ describe("validatePluginSchemaValue", () => {
       config: { plugins: { entries: {} } } as OpenClawConfig,
       pluginId: "demo-unsafe-schema",
       manifest: {
+        id: "demo-unsafe-schema",
         origin: "global",
         configSchema: {
           type: "object",
@@ -90,7 +91,7 @@ describe("validatePluginSchemaValue", () => {
             "^((a|b)|bb)+$": { type: "string" },
           },
         },
-      } as PluginManifestRecord,
+      } as unknown as PluginManifestRecord,
     });
     expect(setup.mode).toBe("invalid");
     if (setup.mode !== "invalid") {
