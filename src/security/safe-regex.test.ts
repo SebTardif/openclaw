@@ -272,4 +272,21 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(pattern).reason).toBe("unsafe-nested-repetition");
     expect(compileJsonSchemaPatternRegexDetailed(pattern).reason).toBe("unsafe-nested-repetition");
   });
+
+  it("rejects backreferences that hide overlapping consumed lengths", () => {
+    expect(compileSafeRegexDetailed("^(ab)(\\1c|abcabc)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^(ab)(\\1c|abcabc)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("keeps disjoint octal custom redaction alternatives", () => {
+    const compiled = compileSafeRegexDetailed("corp-(\\141|BCD)+");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("corp-aBCD")).toBe(true);
+    expect(compiled.regex?.test("corp-BCD")).toBe(true);
+    expect(compiled.regex?.test("corp-xyz")).toBe(false);
+  });
 });

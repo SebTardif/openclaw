@@ -42,4 +42,14 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain(longer);
     expect(output).toContain("corp-");
   });
+
+  it("keeps disjoint octal custom redaction alternatives active", () => {
+    const secret = "corp-aBCD";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["corp-(\\141|BCD)+"],
+    });
+    expect(output).not.toContain(secret);
+    expect(output).toContain("corp-");
+  });
 });

@@ -9,6 +9,7 @@ import {
   sequenceHasUnknownLength,
   UNKNOWN_LENGTH_ATOM,
 } from "./safe-regex-atoms.js";
+import { escapeHasUnknownConsumedLength } from "./safe-regex-numeric.js";
 
 type QuantifierRead = {
   consumed: number;
@@ -308,6 +309,7 @@ function analyzeTokensForNestedRepetition(
   distinguishDisjointAlternatives = false,
   foldCase = false,
   unicode = false,
+  capturingGroups = 0,
 ): boolean {
   const frames: ParseFrame[] = [createParseFrame()];
 
@@ -325,6 +327,16 @@ function analyzeTokensForNestedRepetition(
   };
 
   const emitSimpleToken = (sig: string) => {
+    if (escapeHasUnknownConsumedLength(sig, { unicode, capturingGroups })) {
+      emitToken({
+        containsRepetition: false,
+        hasAmbiguousAlternation: false,
+        minLength: 0,
+        maxLength: Number.POSITIVE_INFINITY,
+        sequences: unknownLengthSequences(),
+      });
+      return;
+    }
     emitToken({
       containsRepetition: false,
       hasAmbiguousAlternation: false,
@@ -377,7 +389,7 @@ function analyzeTokensForNestedRepetition(
         const groupSequences = frame.hasAlternation ? frame.altSequences : frame.branchSequences;
         const overlapping =
           sequencesHaveUnknownLength(groupSequences) ||
-          alternativeSequencesOverlap(groupSequences, foldCase, unicode);
+          alternativeSequencesOverlap(groupSequences, foldCase, unicode, capturingGroups);
         emitToken({
           containsRepetition: frame.containsRepetition,
           hasAmbiguousAlternation: distinguishDisjointAlternatives
@@ -457,6 +469,33 @@ export function testRegexWithBoundedInput(
   return testRegexFromStart(regex, input.slice(-maxWindow));
 }
 
+function countCapturingGroups(source: string): number {
+  let count = 0;
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch === "[") {
+      i = readCharClassSig(source, i).end - 1;
+      continue;
+    }
+    if (ch !== "(") {
+      continue;
+    }
+    const prefix = consumeGroupPrefix(source, i);
+    if (!prefix.assertion && !prefix.unknown) {
+      const head = source.slice(i, Math.min(prefix.nextIndex, i + 3));
+      if (head === "(" || head.startsWith("(?<")) {
+        count += 1;
+      }
+    }
+    i = prefix.nextIndex - 1;
+  }
+  return count;
+}
+
 function hasNestedRepetition(
   source: string,
   options?: { distinguishDisjointAlternatives?: boolean; flags?: string },
@@ -464,11 +503,14 @@ function hasNestedRepetition(
   // Conservative parser: tokenize first, then check if repeated tokens/groups are repeated again.
   // Non-goal: complete regex AST support; keep strict enough for config safety checks.
   const flags = options?.flags ?? "";
+  const unicode = isUnicodeRegexMode(flags);
+  const capturingGroups = countCapturingGroups(source);
   return analyzeTokensForNestedRepetition(
-    tokenizePattern(source, isUnicodeRegexMode(flags)),
+    tokenizePattern(source, unicode),
     options?.distinguishDisjointAlternatives === true,
     flags.includes("i"),
-    isUnicodeRegexMode(flags),
+    unicode,
+    capturingGroups,
   );
 }
 
@@ -563,6 +605,7 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
   let i = 0;
   const foldCase = flags.includes("i");
   const unicode = isUnicodeRegexMode(flags);
+  const capturingGroups = countCapturingGroups(source);
 
   while (i < source.length) {
     const ch = source[i];
@@ -604,7 +647,10 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
 
     if (unbounded) {
       if (!zeroWidth) {
-        if (pending !== null && atomsCanMatchSamePrefix(pending, sig, foldCase, unicode)) {
+        if (
+          pending !== null &&
+          atomsCanMatchSamePrefix(pending, sig, foldCase, unicode, capturingGroups)
+        ) {
           return true;
         }
         pending = sig;

@@ -410,6 +410,22 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("rejects backreferences that hide overlapping consumed lengths on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.backref-length",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(ab)(\\1c|abcabc)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { ababcabc: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
   it("accepts deterministic groups that share a first character on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.shared-first-char",
