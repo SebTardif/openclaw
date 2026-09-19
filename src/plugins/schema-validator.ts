@@ -66,7 +66,11 @@ export function findUnsafePatternProperty(schema: unknown, path = "$"): string |
   if (patterns && typeof patterns === "object" && !Array.isArray(patterns)) {
     for (const pattern of Object.keys(asNestedSchemaRecord(patterns))) {
       const compiled = compileJsonSchemaPatternRegexDetailed(pattern);
-      if (!compiled.regex && compiled.reason === "unsafe-nested-repetition") {
+      const unicodeCompiled = compileJsonSchemaPatternRegexDetailed(pattern, "u");
+      if (
+        (!compiled.regex && compiled.reason === "unsafe-nested-repetition") ||
+        (!unicodeCompiled.regex && unicodeCompiled.reason === "unsafe-nested-repetition")
+      ) {
         return `${path}.patternProperties[${JSON.stringify(pattern)}]`;
       }
     }

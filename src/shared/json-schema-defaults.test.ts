@@ -808,6 +808,42 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     expect(result.AA.mode).toBeUndefined();
   });
 
+  it("skips class control-escape overlapping alternatives", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^([\\c_]|\\x1f\\x1f)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { "\x1f": {} }) as {
+      "\x1f": { mode?: string };
+    };
+    expect(result["\x1f"].mode).toBeUndefined();
+  });
+
+  it("skips non-Unicode property identity-escape overlapping alternatives", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(\\p{L}c|p{L}cp{L}c)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { "p{L}c": {} }) as {
+      "p{L}c": { mode?: string };
+    };
+    expect(result["p{L}c"].mode).toBeUndefined();
+  });
+
   it("applies defaults through disjoint octal alternatives", () => {
     const schema = {
       type: "object",

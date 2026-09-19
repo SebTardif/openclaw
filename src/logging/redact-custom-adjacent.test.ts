@@ -79,4 +79,31 @@ describe("custom adjacent-class redaction", () => {
     });
     expect(output).toContain(secret);
   });
+
+  it("drops class control-escape overlapping custom redaction alternatives", () => {
+    const secret = "\x1f\x1fX";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["([\\c_]|\\x1f\\x1f)+"],
+    });
+    expect(output).toContain(secret);
+  });
+
+  it("drops non-Unicode property identity-escape overlapping custom redaction alternatives", () => {
+    const secret = "p{L}cp{L}cX";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["(\\p{L}c|p{L}cp{L}c)+"],
+    });
+    expect(output).toContain(secret);
+  });
+
+  it("drops mixed Unicode code-point overlapping custom redaction alternatives", () => {
+    const secret = "😀😀X";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["/(\\u{1F600}|😀😀)+/u"],
+    });
+    expect(output).toContain(secret);
+  });
 });

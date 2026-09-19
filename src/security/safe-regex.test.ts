@@ -310,4 +310,31 @@ describe("safe regex", () => {
       "unsafe-nested-repetition",
     );
   });
+
+  it("rejects class control-escapes that decode like legacy JS", () => {
+    expect(compileSafeRegexDetailed("^([\\c_]|\\x1f\\x1f)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^([\\c_]|\\x1f\\x1f)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects non-Unicode property identity-escapes as overlapping literals", () => {
+    expect(compileSafeRegexDetailed("^(\\p{L}c|p{L}cp{L}c)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\p{L}c|p{L}cp{L}c)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects Unicode code-point escapes compared against surrogate literals", () => {
+    expect(compileSafeRegexDetailed("^(\\u{1F600}|😀😀)+$", "u").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\u{1F600}|😀😀)+$", "u").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
 });

@@ -12,6 +12,7 @@ import {
 import {
   escapeHasUnknownConsumedLength,
   isZeroWidthAssertionEscape,
+  readLiteralCodePoint,
 } from "./safe-regex-numeric.js";
 
 type QuantifierRead = {
@@ -307,7 +308,9 @@ function tokenizePattern(source: string, unicode = false, capturingGroups = 0): 
       continue;
     }
 
-    tokens.push({ kind: "simple-token", sig: ch ?? "" });
+    const literal = readLiteralCodePoint(source, i, unicode);
+    tokens.push({ kind: "simple-token", sig: literal.sig });
+    i = literal.end - 1;
   }
 
   return tokens;
@@ -643,8 +646,8 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
       continue;
     }
 
-    let end = i + 1;
-    let sig = ch ?? "";
+    let end: number;
+    let sig: string;
     let zeroWidth = false;
     if (ch === "\\") {
       const atom = readCompleteEscapeAtom(source, i, { unicode, capturingGroups });
@@ -660,6 +663,10 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
       end = atom.end;
       sig = atom.sig;
       zeroWidth = atom.zeroWidth;
+    } else {
+      const literal = readLiteralCodePoint(source, i, unicode);
+      end = literal.end;
+      sig = literal.sig;
     }
 
     i = end;
