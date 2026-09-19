@@ -122,3 +122,94 @@ describe("normalizeMcpToolCatalog", () => {
     expect(normalized.metadata.validatorForCall("excluded")).toBeUndefined();
   });
 });
+
+const DRAFT = "https://json-schema.org/draft/2020-12/schema";
+
+describe("createMcpJsonSchemaValidator patternProperties preflight", () => {
+  it("rejects nested-repetition patternProperties before TypeBox Compile", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "(a+)+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("rejects nested-repetition patternProperties under schema-valued dependencies", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        properties: { mode: { type: "string" } },
+        dependencies: {
+          mode: {
+            type: "object",
+            patternProperties: {
+              "(a+)+$": { type: "string" },
+            },
+          },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("rejects adjacent unbounded patternProperties on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "a*a*$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("accepts safe disjoint patternProperties on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    const validate = factory.getValidator<{ a?: string; bc?: string }>({
+      $schema: DRAFT,
+      type: "object",
+      patternProperties: {
+        "^(a|bc)+$": { type: "string" },
+      },
+      additionalProperties: true,
+    });
+    expect(validate({ a: "ok", bc: "ok" }).valid).toBe(true);
+  });
+
+  it("compiles empty JSON Schema patternProperties on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    const validate = factory.getValidator<{ x?: { mode?: string } }>({
+      $schema: DRAFT,
+      type: "object",
+      patternProperties: {
+        "": {
+          type: "object",
+          properties: { mode: { type: "string" } },
+        },
+      },
+      additionalProperties: true,
+    });
+    expect(validate({ x: { mode: "auto" } }).valid).toBe(true);
+  });
+
+  it("still compiles safe draft-2020-12 schemas", () => {
+    const factory = createMcpJsonSchemaValidator();
+    const validate = factory.getValidator<{ name: string }>({
+      $schema: DRAFT,
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+      additionalProperties: false,
+    });
+    expect(validate({ name: "ok" }).valid).toBe(true);
+    expect(validate({}).valid).toBe(false);
+  });
+});

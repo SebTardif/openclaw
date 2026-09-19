@@ -1684,6 +1684,16 @@ describe("redactSensitiveText", () => {
     expect(output).toBe(input);
   });
 
+  it("keeps custom adjacent-class redaction patterns active", () => {
+    const secret = "corp-ABCDEFGHIJKLMNOP";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["corp-[A-Z]+[A-Z]+"],
+    });
+    expect(output).not.toContain(secret);
+    expect(output).toContain("corp-");
+  });
+
   it("redacts large payloads with bounded regex passes", () => {
     const input = `${"x".repeat(40_000)} OPENAI_API_KEY=sk-1234567890abcdef ${"y".repeat(40_000)}`;
     const output = redactSensitiveText(input, { mode: "tools" });

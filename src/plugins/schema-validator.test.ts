@@ -2150,5 +2150,111 @@ describe("schema validator", () => {
     expect(Format.Get("email")?.("not an email")).toBe(false);
     expect(Format.Get("uuid")?.("not a uuid")).toBe(false);
   });
+
+  it("rejects nested-repetition patternProperties before TypeBox validation", () => {
+    const value = { aaaaaaaaaaaaaaaaaaaaX: {} };
+    const started = Date.now();
+    const result = validateJsonSchemaValue({
+      cacheKey: "schema-validator.test.defaults.pattern-properties-redos",
+      schema: {
+        type: "object",
+        patternProperties: {
+          "(a+)+$": {
+            type: "object",
+            properties: {
+              mode: { type: "string", default: "applied" },
+            },
+            additionalProperties: true,
+          },
+        },
+        additionalProperties: true,
+      },
+      value,
+      applyDefaults: true,
+    });
+    const elapsedMs = Date.now() - started;
+    expect(elapsedMs).toBeLessThan(2_000);
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("expected validation failure for unsafe patternProperties");
+    }
+    expect(result.errors.some((error) => /unsafe patternProperties/i.test(error.message))).toBe(
+      true,
+    );
+  });
+
+  it("rejects adjacent unbounded patternProperties on the plugin entrypoint", () => {
+    const result = validateJsonSchemaValue({
+      cacheKey: "schema-validator.test.defaults.pattern-properties-adjacent",
+      schema: {
+        type: "object",
+        patternProperties: {
+          "a*a*$": { type: "string" },
+        },
+        additionalProperties: true,
+      },
+      value: { aaa: "keep" },
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("expected validation failure for adjacent patternProperties");
+    }
+    expect(result.errors.some((error) => /unsafe patternProperties/i.test(error.message))).toBe(
+      true,
+    );
+  });
+
+  it("accepts safe disjoint patternProperties on the plugin entrypoint", () => {
+    expectSuccessfulValidationValue({
+      input: {
+        cacheKey: "schema-validator.test.defaults.pattern-properties-disjoint",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(a|bc)+$": {
+              type: "object",
+              properties: {
+                mode: { type: "string", default: "keep" },
+              },
+              additionalProperties: false,
+            },
+          },
+          additionalProperties: true,
+        },
+        value: { a: {}, bc: {} },
+        applyDefaults: true,
+      },
+      expectedValue: {
+        a: { mode: "keep" },
+        bc: { mode: "keep" },
+      },
+    });
+  });
+
+  it("applies empty patternProperties defaults on the plugin entrypoint", () => {
+    expectSuccessfulValidationValue({
+      input: {
+        cacheKey: "schema-validator.test.defaults.pattern-properties-empty",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "": {
+              type: "object",
+              properties: {
+                mode: { type: "string", default: "auto" },
+              },
+              additionalProperties: false,
+            },
+          },
+          additionalProperties: false,
+        },
+        value: { x: {} },
+        applyDefaults: true,
+      },
+      expectedValue: {
+        x: { mode: "auto" },
+      },
+    });
+  });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

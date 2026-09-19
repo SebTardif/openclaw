@@ -1,6 +1,7 @@
 // Covers safe-regex checks for risky user-supplied patterns.
 import { describe, expect, it } from "vitest";
 import {
+  compileJsonSchemaPatternRegexDetailed,
   compileSafeRegex,
   compileSafeRegexDetailed,
   testRegexWithBoundedInput,
@@ -54,5 +55,48 @@ describe("safe regex", () => {
     [/discord:tail$/, `${"x".repeat(5000)}telegram:tail`, false],
   ] as const)("checks bounded regex windows for %s", (pattern, input, expected) => {
     expect(testRegexWithBoundedInput(pattern, input)).toBe(expected);
+  });
+
+  it("keeps custom adjacent-class redaction patterns on the shared compiler", () => {
+    const compiled = compileSafeRegexDetailed("corp-[A-Z]+[A-Z]+");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("corp-ABCDEFGHIJKLMNOP")).toBe(true);
+  });
+
+  it("compiles JSON Schema patterns without trimming significant spaces", () => {
+    const compiled = compileJsonSchemaPatternRegexDetailed(" a");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test(" a")).toBe(true);
+  });
+
+  it("compiles empty JSON Schema patterns as match-all", () => {
+    const compiled = compileJsonSchemaPatternRegexDetailed("");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("x")).toBe(true);
+    expect(compiled.regex?.test("mode")).toBe(true);
+  });
+
+  it("accepts safe disjoint JSON Schema alternatives", () => {
+    const compiled = compileJsonSchemaPatternRegexDetailed("^(a|bc)+$");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("a")).toBe(true);
+    expect(compiled.regex?.test("bc")).toBe(true);
+    expect(compiled.regex?.test("abc")).toBe(true);
+    expect(compiled.regex?.test("zz")).toBe(false);
+  });
+
+  it("still rejects overlapping JSON Schema alternatives", () => {
+    expect(compileJsonSchemaPatternRegexDetailed("(a|aa)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects nested-repetition JSON Schema patterns", () => {
+    expect(compileJsonSchemaPatternRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
+  });
+
+  it("rejects adjacent unbounded JSON Schema twins without changing the shared compiler", () => {
+    expect(compileJsonSchemaPatternRegexDetailed("a*a*$").reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegexDetailed("a*a*$").reason).toBeNull();
   });
 });
