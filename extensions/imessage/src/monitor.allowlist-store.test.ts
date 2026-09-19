@@ -180,7 +180,7 @@ async function runInboundStoreCase(params: {
       messages: { inbound: { debounceMs: 0 } },
       session: { mainKey: "main" },
     } as never,
-    runtime,
+    runtime: runtime as never,
   });
 
   return { runtime, sendClient };
