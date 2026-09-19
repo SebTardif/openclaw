@@ -241,4 +241,35 @@ describe("safe regex", () => {
       "unsafe-nested-repetition",
     );
   });
+
+  it("rejects octal escapes that share a decoded prefix with longer alternatives", () => {
+    expect(compileSafeRegexDetailed("^(\\141|aaaa)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\141|aaaa)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects multi-digit backreferences as complete unknown sequences", () => {
+    expect(compileSafeRegexDetailed("^(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(\\10|jj)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(
+      compileJsonSchemaPatternRegexDetailed("^(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(\\10|jj)+$").reason,
+    ).toBe("unsafe-nested-repetition");
+  });
+
+  it("rejects overlapping groups that keep complete alternative lengths", () => {
+    expect(compileSafeRegexDetailed("^((ab|[a]b)c|abcabc)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^((ab|[a]b)c|abcabc)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects overflowed alternative sets that would lose consumed length", () => {
+    const pattern = "^(((ab|cd|ef|gh|ij|kl)(mn|op|qr|st|uv|wx)y)|abmnyabmny)+$";
+    expect(compileSafeRegexDetailed(pattern).reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed(pattern).reason).toBe("unsafe-nested-repetition");
+  });
 });

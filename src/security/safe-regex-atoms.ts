@@ -91,6 +91,17 @@ export function readCompleteEscapeAtom(
       return { end: index + 3, sig: source.slice(index, index + 3) };
     }
   }
+  if (next >= "0" && next <= "9") {
+    let end = index + 2;
+    while (end < source.length) {
+      const digit = source[end];
+      if (digit === undefined || digit < "0" || digit > "9") {
+        break;
+      }
+      end += 1;
+    }
+    return { end, sig: source.slice(index, end) };
+  }
   return { end: index + 2, sig: source.slice(index, index + 2) };
 }
 
@@ -402,6 +413,12 @@ function emptyLanguage(): AtomLanguage {
 
 const MAX_SEQUENCE_SET = 32;
 
+export const UNKNOWN_LENGTH_ATOM = "\0*";
+
+export function sequenceHasUnknownLength(seq: readonly string[]): boolean {
+  return seq.includes(UNKNOWN_LENGTH_ATOM);
+}
+
 function unknownSequence(): AtomLanguage[] {
   return [{ kind: "any" }];
 }
@@ -593,7 +610,7 @@ function atomLanguageAtDepth(
   unicode: boolean,
 ): AtomLanguage {
   const atom = unwrapSimpleGroup(sig);
-  if (!atom || atom === ".") {
+  if (!atom || atom === "." || atom === UNKNOWN_LENGTH_ATOM) {
     return { kind: "any" };
   }
   if (isAssertionGroup(atom)) {
@@ -662,6 +679,9 @@ function atomSigSequencesOverlap(
   unicode: boolean,
 ): boolean {
   if (left.length === 0 || right.length === 0) {
+    return true;
+  }
+  if (sequenceHasUnknownLength(left) || sequenceHasUnknownLength(right)) {
     return true;
   }
   const leftLangs = left.map((sig) => atomLanguageAtDepth(sig, foldCase, 0, unicode));

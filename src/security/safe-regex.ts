@@ -6,6 +6,8 @@ import {
   atomsCanMatchSamePrefix,
   isUnicodeRegexMode,
   readCompleteEscapeAtom,
+  sequenceHasUnknownLength,
+  UNKNOWN_LENGTH_ATOM,
 } from "./safe-regex-atoms.js";
 
 type QuantifierRead = {
@@ -79,6 +81,14 @@ function createParseFrame(): ParseFrame {
 
 const MAX_TOKEN_SEQUENCE_SET = 32;
 
+function unknownLengthSequences(): string[][] {
+  return [[UNKNOWN_LENGTH_ATOM]];
+}
+
+function sequencesHaveUnknownLength(sequences: readonly (readonly string[])[]): boolean {
+  return sequences.some((seq) => sequenceHasUnknownLength(seq));
+}
+
 function concatTokenSequences(left: string[][], right: string[][]): string[][] {
   if (right.length === 0) {
     return left;
@@ -86,12 +96,15 @@ function concatTokenSequences(left: string[][], right: string[][]): string[][] {
   if (left.length === 0) {
     return right.map((seq) => [...seq]);
   }
+  if (sequencesHaveUnknownLength(left) || sequencesHaveUnknownLength(right)) {
+    return unknownLengthSequences();
+  }
   const out: string[][] = [];
   for (const prefix of left) {
     for (const suffix of right) {
       out.push([...prefix, ...suffix]);
       if (out.length > MAX_TOKEN_SEQUENCE_SET) {
-        return [["."]];
+        return unknownLengthSequences();
       }
     }
   }
@@ -117,6 +130,12 @@ function recordAlternative(frame: ParseFrame): void {
     frame.altSequences.push([]);
   } else {
     frame.altSequences.push(...frame.branchSequences);
+  }
+  if (
+    frame.altSequences.length > MAX_TOKEN_SEQUENCE_SET ||
+    sequencesHaveUnknownLength(frame.altSequences)
+  ) {
+    frame.altSequences = unknownLengthSequences();
   }
   frame.branchSequences = [];
   if (frame.altMinLength === null || frame.altMaxLength === null) {
@@ -356,7 +375,9 @@ function analyzeTokensForNestedRepetition(
           frame.altMaxLength !== null &&
           frame.altMinLength !== frame.altMaxLength;
         const groupSequences = frame.hasAlternation ? frame.altSequences : frame.branchSequences;
-        const overlapping = alternativeSequencesOverlap(groupSequences, foldCase, unicode);
+        const overlapping =
+          sequencesHaveUnknownLength(groupSequences) ||
+          alternativeSequencesOverlap(groupSequences, foldCase, unicode);
         emitToken({
           containsRepetition: frame.containsRepetition,
           hasAmbiguousAlternation: distinguishDisjointAlternatives
@@ -364,12 +385,7 @@ function analyzeTokensForNestedRepetition(
             : lengthAmbiguous,
           minLength: groupMinLength,
           maxLength: groupMaxLength,
-          sequences:
-            frame.hasAlternation && overlapping
-              ? [["."]]
-              : groupSequences.length > 0
-                ? groupSequences
-                : [[""]],
+          sequences: groupSequences.length > 0 ? groupSequences : [[""]],
         });
       }
       continue;
