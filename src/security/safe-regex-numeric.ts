@@ -65,6 +65,45 @@ export function isZeroWidthAssertionEscape(sig: string): boolean {
   return sig === "\\b" || sig === "\\B";
 }
 
+export function isZeroWidthAssertionToken(sig: string): boolean {
+  return sig === "^" || sig === "$" || isZeroWidthAssertionEscape(sig);
+}
+
+export function isUnicodeSetsMode(flags: string | undefined): boolean {
+  return Boolean(flags?.includes("v"));
+}
+
+export function readCharClassSig(
+  source: string,
+  index: number,
+  unicodeSets = false,
+): { end: number; sig: string } {
+  let i = index + 1;
+  if (source[i] === "^") {
+    i += 1;
+  }
+  let depth = 1;
+  while (i < source.length) {
+    if (source[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (unicodeSets && source[i] === "[") {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (source[i] === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return { end: i + 1, sig: source.slice(index, i + 1) };
+      }
+    }
+    i += 1;
+  }
+  return { end: source.length, sig: source.slice(index) };
+}
+
 export function isSurrogatePairAtom(sig: string): boolean {
   return (
     sig.length === 2 &&
@@ -238,6 +277,9 @@ export function readCompleteEscapeAtom(
     );
     if (control && (/[A-Za-z]/.test(control) || classControl)) {
       return { end: index + 3, sig: source.slice(index, index + 3) };
+    }
+    if (!options.unicode) {
+      return { end: index + 1, sig: "\\\\" };
     }
   }
   if (next >= "0" && next <= "9") {

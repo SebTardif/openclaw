@@ -554,6 +554,38 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("rejects malformed control-escape overlap on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.malformed-control",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\c|\\\\c\\\\c)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "\\c": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects input-boundary overlapping alternatives on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.input-boundary",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\n^a|\\na\\na)+Z": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "\naZ": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
   it("accepts deterministic groups that share a first character on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.shared-first-char",

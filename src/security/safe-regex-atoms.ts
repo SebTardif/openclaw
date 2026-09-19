@@ -5,6 +5,7 @@ import {
   expandCodePointRange,
   isSurrogatePairAtom,
   parseHexChar,
+  readCharClassSig,
   readCompleteEscapeAtom,
   readLiteralCodePoint,
 } from "./safe-regex-numeric.js";
@@ -161,6 +162,28 @@ function readClassAtom(
   return { next: esc.end, lang: escapeLanguage(esc.sig, foldCase, true, unicode) };
 }
 
+function classBodyHasNestedSet(sig: string, start: number, end: number): boolean {
+  for (let i = start; i < end; i += 1) {
+    if (sig[i] === "\\") {
+      i += 1;
+      continue;
+    }
+    if (sig[i] !== "[") {
+      continue;
+    }
+    for (let j = i + 1; j < end; j += 1) {
+      if (sig[j] === "\\") {
+        j += 1;
+        continue;
+      }
+      if (sig[j] === "]") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function classLanguage(sig: string, foldCase: boolean, unicode = false): AtomLanguage {
   if (!sig.startsWith("[") || !sig.endsWith("]")) {
     return { kind: "any" };
@@ -171,6 +194,9 @@ function classLanguage(sig: string, foldCase: boolean, unicode = false): AtomLan
   if (sig[i] === "^") {
     negated = true;
     i += 1;
+  }
+  if (classBodyHasNestedSet(sig, i, end)) {
+    return { kind: "any" };
   }
   const chars = new Set<string>();
   while (i < end) {
@@ -232,24 +258,6 @@ function unwrapSimpleGroup(sig: string): string {
     current = inner;
   }
   return current;
-}
-
-function readCharClassSig(source: string, index: number): { end: number; sig: string } {
-  let i = index + 1;
-  if (source[i] === "^") {
-    i += 1;
-  }
-  while (i < source.length) {
-    if (source[i] === "\\") {
-      i += 2;
-      continue;
-    }
-    if (source[i] === "]") {
-      return { end: i + 1, sig: source.slice(index, i + 1) };
-    }
-    i += 1;
-  }
-  return { end: source.length, sig: source.slice(index) };
 }
 
 function readGroupSig(source: string, index: number): { end: number; sig: string } {
