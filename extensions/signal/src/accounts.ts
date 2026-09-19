@@ -133,18 +133,13 @@ function resolveSignalManagedNativePort(params: {
           `Signal managed native accounts "${params.accountId}" and "${accountId}" both bind port ${explicitPort}. Assign each account a distinct transport.httpPort.`,
         );
       }
-      const independentLocalUrl =
-        transport?.kind === "external-native" ||
-        transport?.kind === "container" ||
-        (transport?.kind === "managed-native" &&
-          Boolean(transport.url) &&
-          !isSignalManagedNativeConnectionUrlForBind(transport))
-          ? transport.url
-          : undefined;
-      if (
-        independentLocalUrl &&
-        resolveLocalSignalTransportPort(independentLocalUrl) === explicitPort
-      ) {
+      const independentLocalPort =
+        transport?.kind === "external-native" || transport?.kind === "container"
+          ? resolveLocalSignalTransportPort(transport.url)
+          : transport?.kind === "managed-native"
+            ? independentLocalPortFromManagedNativeConnectionUrl(transport)
+            : undefined;
+      if (independentLocalPort === explicitPort) {
         throw new Error(
           `Signal managed native account "${params.accountId}" binds port ${explicitPort}, which conflicts with account "${accountId}" local transport endpoint. Assign a distinct transport.httpPort.`,
         );

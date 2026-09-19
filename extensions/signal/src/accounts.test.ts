@@ -339,6 +339,42 @@ describe("resolveSignalAccount", () => {
     expect(accountB.transport.baseUrl).toBe(`http://127.0.0.1:${accountB.transport.httpPort}`);
   });
 
+  it("does not treat a URL-only sibling as an independent endpoint of an explicit 8082 bind", () => {
+    const cfg = {
+      channels: {
+        signal: {
+          accounts: {
+            a: {
+              account: "+10000000001",
+              transport: {
+                kind: "managed-native",
+                url: "http://127.0.0.1:8082",
+                httpPort: 8082,
+              },
+            },
+            b: {
+              account: "+10000000002",
+              transport: { kind: "managed-native", url: "http://127.0.0.1:8082" },
+            },
+          },
+        },
+      },
+    } as never;
+
+    expect(resolveSignalAccount({ cfg, accountId: "a" }).transport).toMatchObject({
+      kind: "managed-native",
+      httpPort: 8082,
+      baseUrl: "http://127.0.0.1:8082",
+    });
+    const accountB = resolveSignalAccount({ cfg, accountId: "b" });
+    expect(accountB.transport.kind).toBe("managed-native");
+    if (accountB.transport.kind !== "managed-native") {
+      throw new Error("expected managed-native");
+    }
+    expect(accountB.transport.httpPort).not.toBe(8082);
+    expect(accountB.transport.baseUrl).toBe(`http://127.0.0.1:${accountB.transport.httpPort}`);
+  });
+
   it("falls back and rewrites URL when a sibling local endpoint already reserves 8082", () => {
     const cfg = {
       channels: {

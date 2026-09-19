@@ -122,6 +122,14 @@ export function resolveConfiguredSignalTransport(
     : resolveAccountEntry(signal?.accounts, normalizedAccountId)?.transport;
 }
 
+function existingManagedTransportForAlignment(
+  existing: SignalManagedNativeTransport,
+): SignalManagedNativeTransport {
+  // URL-only local HTTP infers its bind; the default 8080 is not the pre-edit endpoint.
+  const preferredUrlPort = preferredManagedNativePortFromConnectionUrl(existing);
+  return preferredUrlPort === undefined ? existing : { ...existing, httpPort: preferredUrlPort };
+}
+
 function alignManagedConnectionUrlAfterBindChange(params: {
   existing: SignalManagedNativeTransport | undefined;
   prepared: SignalManagedNativeTransport;
@@ -131,7 +139,9 @@ function alignManagedConnectionUrlAfterBindChange(params: {
   if (
     params.hasUrlOverride ||
     !params.existing?.url ||
-    !isSignalManagedNativeConnectionUrlForBind(params.existing)
+    !isSignalManagedNativeConnectionUrlForBind(
+      existingManagedTransportForAlignment(params.existing),
+    )
   ) {
     return assignSignalManagedNativePort(params.prepared, params.httpPort);
   }
@@ -171,7 +181,9 @@ export function prepareSignalManagedNativeTransport(params: {
   const preferredPort =
     params.overrides?.httpPort ??
     existingManaged?.httpPort ??
-    preferredManagedNativePortFromConnectionUrl(prepared);
+    preferredManagedNativePortFromConnectionUrl(
+      params.overrides?.url !== undefined ? prepared : (existingManaged ?? prepared),
+    );
   const portsByAccountId = new Map<string, Set<number>>();
   const implicitManagedAccountIds: string[] = [];
   // Resolve the full current allocation before excluding the selected owner. Otherwise an
