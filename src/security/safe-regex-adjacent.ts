@@ -245,3 +245,31 @@ export function adjacentRepeatsOverlap(
   }
   return false;
 }
+
+export function mixedEqualLengthSequencesOverlap(
+  leftAtoms: readonly string[],
+  rightAtoms: readonly string[],
+  ignoreCase: boolean,
+  failClosedUnprobedUnicode: boolean,
+  singleTokenPairOverlaps: (
+    left: string,
+    right: string,
+    ignoreCase: boolean,
+    failClosedUnprobedUnicode: boolean,
+  ) => boolean,
+): boolean {
+  if (leftAtoms.length !== rightAtoms.length) {
+    return true;
+  }
+  for (let index = 0; index < leftAtoms.length; index += 1) {
+    const leftAtom = leftAtoms[index];
+    const rightAtom = rightAtoms[index];
+    if (leftAtom === undefined || rightAtom === undefined) {
+      return true;
+    }
+    if (!singleTokenPairOverlaps(leftAtom, rightAtom, ignoreCase, failClosedUnprobedUnicode)) {
+      return false;
+    }
+  }
+  return true;
+}

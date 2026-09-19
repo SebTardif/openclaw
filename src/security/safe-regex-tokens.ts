@@ -196,3 +196,37 @@ export function tokenizePattern(source: string, flags = ""): PatternToken[] {
 
   return tokens;
 }
+
+const ZERO_WIDTH_SIMPLE_ATOMS = new Set(["^", "$", "\\b", "\\B"]);
+
+/**
+ * Fixed-length atom sequence for one alternative, or null when a
+ * quantifier/group/alternation makes consumed length unknown.
+ */
+export function readFixedLengthAlternativeAtoms(
+  source: string,
+  unicodeMode = false,
+): string[] | null {
+  let body = source;
+  if (body.startsWith("^")) {
+    body = body.slice(1);
+  }
+  if (body.endsWith("$") && body.length > 0) {
+    body = body.slice(0, -1);
+  }
+  if (!body) {
+    return null;
+  }
+  const tokens = tokenizePattern(body, unicodeMode ? "u" : "");
+  const atoms: string[] = [];
+  for (const token of tokens) {
+    if (token.kind !== "simple-token") {
+      return null;
+    }
+    if (ZERO_WIDTH_SIMPLE_ATOMS.has(token.source)) {
+      continue;
+    }
+    atoms.push(token.source);
+  }
+  return atoms.length > 0 ? atoms : null;
+}

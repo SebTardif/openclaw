@@ -36,6 +36,9 @@ describe("safe regex", () => {
     ["(?:a|b)+$", RegExp],
     ["(aa|bb)+$", RegExp],
     ["^(ab|ac)+$", RegExp],
+    ["(ab|[c]d)+$", RegExp],
+    ["corp-(ab|[c]d)+", RegExp],
+    ["^(ab|[a]b)+$", null],
     // Disjoint unequal-length alts under + are not ReDoS (not length-diff alone).
     ["(a|bc)+$", RegExp],
     ["^(?:a|bc)+$", RegExp],
@@ -252,6 +255,20 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed("corp-[A-Z]+[A-Z]+").reason).toBeNull();
     expect(compileSafeRegex("corp-[A-Z]+[A-Z]+")).toBeInstanceOf(RegExp);
     expect(compileSafeRegexForExec("corp-[A-Z]+[A-Z]+").regex).toBeNull();
+  });
+
+  it("accepts disjoint mixed alternatives of equal consumed length", () => {
+    const mixed = "corp-(ab|[c]d)+";
+    const grouped = "^(ab|[c]d)+$";
+    expect(compileSafeRegexDetailed(mixed).reason).toBeNull();
+    expect(compileSafeRegex(mixed)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(mixed).regex).toBeInstanceOf(RegExp);
+    const compiled = expectCompiledRegex(grouped);
+    expect(compiled.test("abcd")).toBe(true);
+    expect(compiled.test("cdab")).toBe(true);
+    expect(compileSafeRegexForExec(grouped).regex).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegexForExec("(aa|a.)+$").regex).toBeNull();
   });
 
   it("treats braced unicode escapes as identity plus quantifier without u/v", () => {

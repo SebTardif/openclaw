@@ -94,6 +94,14 @@ describe("custom adjacent-class redaction", () => {
     });
     expect(output).not.toContain("ABCDEFG");
   });
+
+  it("still masks corp-(ab|[c]d)+ mixed alternatives", () => {
+    const output = redactSensitiveText("id=corp-abcd", {
+      patterns: ["corp-(ab|[c]d)+"],
+    });
+    expect(output).not.toContain("corp-abcd");
+    expect(output).not.toContain("abcd");
+  });
 });
 
 describe("registered exact secret values", () => {

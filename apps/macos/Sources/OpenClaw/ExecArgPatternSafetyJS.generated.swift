@@ -257,6 +257,22 @@ var OpenClawExecArgPattern = (() => {
     }
     return false;
   }
+  function mixedEqualLengthSequencesOverlap(leftAtoms, rightAtoms, ignoreCase, failClosedUnprobedUnicode, singleTokenPairOverlaps) {
+    if (leftAtoms.length !== rightAtoms.length) {
+      return true;
+    }
+    for (let index = 0; index < leftAtoms.length; index += 1) {
+      const leftAtom = leftAtoms[index];
+      const rightAtom = rightAtoms[index];
+      if (leftAtom === void 0 || rightAtom === void 0) {
+        return true;
+      }
+      if (!singleTokenPairOverlaps(leftAtom, rightAtom, ignoreCase, failClosedUnprobedUnicode)) {
+        return false;
+      }
+    }
+    return true;
+  }
 
   // src/security/safe-regex-tokens.ts
   function readGroupContentStart(source, index) {
@@ -410,6 +426,31 @@ var OpenClawExecArgPattern = (() => {
       tokens.push({ kind: "simple-token", source: source.slice(i, i + 1) });
     }
     return tokens;
+  }
+  var ZERO_WIDTH_SIMPLE_ATOMS = /* @__PURE__ */ new Set(["^", "$", "\\b", "\\B"]);
+  function readFixedLengthAlternativeAtoms(source, unicodeMode = false) {
+    let body = source;
+    if (body.startsWith("^")) {
+      body = body.slice(1);
+    }
+    if (body.endsWith("$") && body.length > 0) {
+      body = body.slice(0, -1);
+    }
+    if (!body) {
+      return null;
+    }
+    const tokens = tokenizePattern(body, unicodeMode ? "u" : "");
+    const atoms = [];
+    for (const token of tokens) {
+      if (token.kind !== "simple-token") {
+        return null;
+      }
+      if (ZERO_WIDTH_SIMPLE_ATOMS.has(token.source)) {
+        continue;
+      }
+      atoms.push(token.source);
+    }
+    return atoms.length > 0 ? atoms : null;
   }
 
   // src/security/safe-regex.ts
@@ -581,6 +622,17 @@ var OpenClawExecArgPattern = (() => {
     }
     if (isSingleTokenAlternative(left, unicodeMode) && isSingleTokenAlternative(right, unicodeMode)) {
       return singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode);
+    }
+    const leftAtoms = readFixedLengthAlternativeAtoms(left, unicodeMode);
+    const rightAtoms = readFixedLengthAlternativeAtoms(right, unicodeMode);
+    if (leftAtoms && rightAtoms) {
+      return mixedEqualLengthSequencesOverlap(
+        leftAtoms,
+        rightAtoms,
+        ignoreCase,
+        failClosedUnprobedUnicode,
+        singleTokenAlternativesMayOverlap
+      );
     }
     return true;
   }

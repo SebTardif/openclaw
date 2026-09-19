@@ -4,10 +4,16 @@ import { pruneMapToMaxSize } from "../infra/map-size.js";
 import {
   isLookaroundPrefix,
   isZeroWidthLanguage,
+  mixedEqualLengthSequencesOverlap,
   nextPendingAdjacentAlts,
   shouldRejectAdjacentOverlap,
 } from "./safe-regex-adjacent.js";
-import { readEscapeAtomEnd, tokenizePattern, type PatternToken } from "./safe-regex-tokens.js";
+import {
+  readEscapeAtomEnd,
+  readFixedLengthAlternativeAtoms,
+  tokenizePattern,
+  type PatternToken,
+} from "./safe-regex-tokens.js";
 
 type TokenState = {
   containsRepetition: boolean;
@@ -275,6 +281,18 @@ function alternativesMayOverlap(
   // disjoint. Overlapping classes like \w|\d still admit unbounded ambiguity.
   if (isSingleTokenAlternative(left, unicodeMode) && isSingleTokenAlternative(right, unicodeMode)) {
     return singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode);
+  }
+  const leftAtoms = readFixedLengthAlternativeAtoms(left, unicodeMode);
+  const rightAtoms = readFixedLengthAlternativeAtoms(right, unicodeMode);
+  if (leftAtoms && rightAtoms) {
+    // Equal consumed length: disjoint mixed alts such as ab|[c]d are safe.
+    return mixedEqualLengthSequencesOverlap(
+      leftAtoms,
+      rightAtoms,
+      ignoreCase,
+      failClosedUnprobedUnicode,
+      singleTokenAlternativesMayOverlap,
+    );
   }
   // Mixed structure with broad components (e.g. aa|a.) can overlap under +.
   return true;
