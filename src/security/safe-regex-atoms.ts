@@ -1,5 +1,13 @@
 // Compares regex atom languages for schema-pattern ReDoS screening.
-import { classifyNumericEscape, readNumericEscapeAtom } from "./safe-regex-numeric.js";
+import {
+  classifyNumericEscape,
+  isSurrogatePairAtom,
+  parseHexChar,
+  readCompleteEscapeAtom,
+  readLiteralCodePoint,
+} from "./safe-regex-numeric.js";
+
+export { readCompleteEscapeAtom };
 
 const DIGITS = "0123456789";
 const WORD = `${DIGITS}ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_`;
@@ -27,75 +35,8 @@ function singleton(ch: string, foldCase: boolean): AtomLanguage {
   return { kind: "chars", chars: foldedChars([ch], foldCase) };
 }
 
-function parseHexChar(hex: string): string | null {
-  if (!hex || !/^[0-9a-fA-F]+$/.test(hex)) {
-    return null;
-  }
-  const code = Number.parseInt(hex, 16);
-  if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) {
-    return null;
-  }
-  return String.fromCodePoint(code);
-}
-
-function isUnicodePropertyName(value: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*(?:=[A-Za-z0-9_-]+)?$/.test(value);
-}
-
 export function isUnicodeRegexMode(flags: string | undefined): boolean {
   return Boolean(flags && (flags.includes("u") || flags.includes("v")));
-}
-
-export function readCompleteEscapeAtom(
-  source: string,
-  index: number,
-  options: { unicode?: boolean; capturingGroups?: number } = {},
-): { end: number; sig: string } {
-  if (source[index] !== "\\") {
-    return { end: index + 1, sig: source[index] ?? "" };
-  }
-  const next = source[index + 1];
-  if (next === undefined) {
-    return { end: index + 1, sig: "\\" };
-  }
-  if (next === "p" || next === "P") {
-    if (source[index + 2] === "{") {
-      const close = source.indexOf("}", index + 3);
-      if (close !== -1 && isUnicodePropertyName(source.slice(index + 3, close))) {
-        return { end: close + 1, sig: source.slice(index, close + 1) };
-      }
-    }
-  }
-  if (options.unicode && next === "u" && source[index + 2] === "{") {
-    const close = source.indexOf("}", index + 3);
-    if (close !== -1 && parseHexChar(source.slice(index + 3, close))) {
-      return { end: close + 1, sig: source.slice(index, close + 1) };
-    }
-  }
-  const unicodeHex = source.slice(index + 2, index + 6);
-  if (next === "u" && unicodeHex.length === 4 && parseHexChar(unicodeHex)) {
-    return { end: index + 6, sig: source.slice(index, index + 6) };
-  }
-  const hex = source.slice(index + 2, index + 4);
-  if (next === "x" && hex.length === 2 && parseHexChar(hex)) {
-    return { end: index + 4, sig: source.slice(index, index + 4) };
-  }
-  if (next === "k" && source[index + 2] === "<") {
-    const close = source.indexOf(">", index + 3);
-    if (close !== -1) {
-      return { end: close + 1, sig: source.slice(index, close + 1) };
-    }
-  }
-  if (next === "c") {
-    const control = source[index + 2];
-    if (control && /[A-Za-z]/.test(control)) {
-      return { end: index + 3, sig: source.slice(index, index + 3) };
-    }
-  }
-  if (next >= "0" && next <= "9") {
-    return readNumericEscapeAtom(source, index, options);
-  }
-  return { end: index + 2, sig: source.slice(index, index + 2) };
 }
 
 function escapeLanguage(
@@ -170,8 +111,11 @@ function escapeLanguage(
   if (body.startsWith("k")) {
     return { kind: "any" };
   }
-  if (body.length === 2 && body[0] === "c" && /[A-Za-z]/.test(body[1] ?? "")) {
-    return singleton(String.fromCharCode((body.charCodeAt(1) ?? 0) % 32), false);
+  if (body.length === 2 && body[0] === "c") {
+    const control = body[1] ?? "";
+    if (/[A-Za-z]/.test(control) || (inClass && /[\d_]/.test(control))) {
+      return singleton(String.fromCharCode(control.charCodeAt(0) % 32), false);
+    }
   }
   if (body.length === 1) {
     return singleton(body, foldCase);
@@ -197,12 +141,13 @@ function readClassAtom(
     return null;
   }
   if (source[index] !== "\\") {
-    return { next: index + 1, lang: singleton(source[index] ?? "", foldCase) };
+    const literal = readLiteralCodePoint(source, index, unicode);
+    return { next: literal.end, lang: singleton(literal.sig, foldCase) };
   }
   if (index + 1 >= end) {
     return { next: index + 1, lang: singleton("\\", foldCase) };
   }
-  const esc = readCompleteEscapeAtom(source, index, { unicode });
+  const esc = readCompleteEscapeAtom(source, index, { unicode, inClass: true });
   if (esc.end > end) {
     return {
       next: index + 2,
@@ -402,7 +347,7 @@ function firstAtomSig(source: string, unicode: boolean): string {
     if (ch === "[") {
       return readCharClassSig(source, i).sig;
     }
-    return ch ?? "";
+    return readLiteralCodePoint(source, i, unicode).sig;
   }
   return "";
 }
@@ -485,7 +430,9 @@ function sequencesFromSource(
     } else if (ch === ".") {
       additions = unknownSequences();
     } else {
-      additions = [[singleton(ch ?? "", foldCase)]];
+      const literal = readLiteralCodePoint(source, i, unicode);
+      atomEnd = literal.end;
+      additions = [[singleton(literal.sig, foldCase)]];
     }
     const next = source[atomEnd];
     if (next === "*" || next === "+" || next === "?" || next === "{") {
@@ -631,7 +578,7 @@ function atomLanguageAtDepth(
     const esc = readCompleteEscapeAtom(atom, 0, { unicode, capturingGroups });
     return escapeLanguage(esc.sig, foldCase, false, unicode, capturingGroups);
   }
-  if (atom.length === 1) {
+  if (atom.length === 1 || isSurrogatePairAtom(atom)) {
     return singleton(atom, foldCase);
   }
   return singleton(atom[0] ?? "", foldCase);

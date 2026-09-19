@@ -474,6 +474,54 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("rejects class control-escape overlap on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.class-control",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^([\\c_]|\\x1f\\x1f)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "\x1f": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects non-Unicode property identity-escape overlap on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.property-identity",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\p{L}c|p{L}cp{L}c)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "p{L}c": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects mixed Unicode code-point overlap on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.unicode-code-point",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\u{1F600}|😀😀)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "😀": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
   it("accepts deterministic groups that share a first character on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.shared-first-char",

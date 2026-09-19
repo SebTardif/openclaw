@@ -65,6 +65,102 @@ export function isZeroWidthAssertionEscape(sig: string): boolean {
   return sig === "\\b" || sig === "\\B";
 }
 
+export function isSurrogatePairAtom(sig: string): boolean {
+  return (
+    sig.length === 2 &&
+    sig.charCodeAt(0) >= 0xd800 &&
+    sig.charCodeAt(0) <= 0xdbff &&
+    sig.charCodeAt(1) >= 0xdc00 &&
+    sig.charCodeAt(1) <= 0xdfff
+  );
+}
+
+export function readLiteralCodePoint(
+  source: string,
+  index: number,
+  unicode: boolean,
+): { end: number; sig: string } {
+  const ch = source[index] ?? "";
+  if (!unicode || !ch) {
+    return { end: index + 1, sig: ch };
+  }
+  const next = source[index + 1];
+  if (next !== undefined && isSurrogatePairAtom(`${ch}${next}`)) {
+    return { end: index + 2, sig: `${ch}${next}` };
+  }
+  return { end: index + 1, sig: ch };
+}
+
+export function parseHexChar(hex: string): string | null {
+  if (!hex || !/^[0-9a-fA-F]+$/.test(hex)) {
+    return null;
+  }
+  const code = Number.parseInt(hex, 16);
+  if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) {
+    return null;
+  }
+  return String.fromCodePoint(code);
+}
+
+function isUnicodePropertyName(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*(?:=[A-Za-z0-9_-]+)?$/.test(value);
+}
+
+export function readCompleteEscapeAtom(
+  source: string,
+  index: number,
+  options: { unicode?: boolean; capturingGroups?: number; inClass?: boolean } = {},
+): { end: number; sig: string } {
+  if (source[index] !== "\\") {
+    return { end: index + 1, sig: source[index] ?? "" };
+  }
+  const next = source[index + 1];
+  if (next === undefined) {
+    return { end: index + 1, sig: "\\" };
+  }
+  if (options.unicode && (next === "p" || next === "P")) {
+    if (source[index + 2] === "{") {
+      const close = source.indexOf("}", index + 3);
+      if (close !== -1 && isUnicodePropertyName(source.slice(index + 3, close))) {
+        return { end: close + 1, sig: source.slice(index, close + 1) };
+      }
+    }
+  }
+  if (options.unicode && next === "u" && source[index + 2] === "{") {
+    const close = source.indexOf("}", index + 3);
+    if (close !== -1 && parseHexChar(source.slice(index + 3, close))) {
+      return { end: close + 1, sig: source.slice(index, close + 1) };
+    }
+  }
+  const unicodeHex = source.slice(index + 2, index + 6);
+  if (next === "u" && unicodeHex.length === 4 && parseHexChar(unicodeHex)) {
+    return { end: index + 6, sig: source.slice(index, index + 6) };
+  }
+  const hex = source.slice(index + 2, index + 4);
+  if (next === "x" && hex.length === 2 && parseHexChar(hex)) {
+    return { end: index + 4, sig: source.slice(index, index + 4) };
+  }
+  if (next === "k" && source[index + 2] === "<") {
+    const close = source.indexOf(">", index + 3);
+    if (close !== -1) {
+      return { end: close + 1, sig: source.slice(index, close + 1) };
+    }
+  }
+  if (next === "c") {
+    const control = source[index + 2];
+    const classControl = Boolean(
+      options.inClass && !options.unicode && control && /[\d_]/.test(control),
+    );
+    if (control && (/[A-Za-z]/.test(control) || classControl)) {
+      return { end: index + 3, sig: source.slice(index, index + 3) };
+    }
+  }
+  if (next >= "0" && next <= "9") {
+    return readNumericEscapeAtom(source, index, options);
+  }
+  return { end: index + 2, sig: source.slice(index, index + 2) };
+}
+
 function readLegacyOctalEnd(source: string, index: number): number {
   const first = source[index + 1];
   if (first === undefined || first < "0" || first > "7") {
