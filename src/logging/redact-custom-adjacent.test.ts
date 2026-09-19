@@ -160,4 +160,14 @@ describe("custom adjacent-class redaction", () => {
     });
     expect(output).toContain(secret);
   });
+
+  it("keeps a long custom redaction literal active", { timeout: 2000 }, () => {
+    const secret = `corp-${"A".repeat(20_000)}`;
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: [secret],
+    });
+    expect(output).not.toContain(secret);
+    expect(output).toContain("corp-");
+  });
 });

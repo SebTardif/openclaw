@@ -632,6 +632,40 @@ describe("schema validator patternProperties screening", () => {
     });
   });
 
+  it(
+    "accepts a long literal patternProperties key on the plugin entrypoint",
+    { timeout: 2000 },
+    () => {
+      const key = "a".repeat(20_000);
+      const result = validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.long-literal",
+        schema: {
+          type: "object",
+          patternProperties: {
+            [key]: {
+              type: "object",
+              properties: {
+                mode: { type: "string", default: "keep" },
+              },
+              additionalProperties: false,
+            },
+          },
+          additionalProperties: true,
+        },
+        value: { [key]: {}, zz: {} },
+        applyDefaults: true,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) {
+        throw new Error("expected long-literal patternProperties to validate");
+      }
+      expect(result.value).toEqual({
+        [key]: { mode: "keep" },
+        zz: {},
+      });
+    },
+  );
+
   it("applies empty patternProperties defaults on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.empty",

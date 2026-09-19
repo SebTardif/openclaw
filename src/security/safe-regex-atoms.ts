@@ -434,12 +434,17 @@ function cartesianConcat(left: AtomLanguage[][], right: AtomLanguage[][]): AtomL
     return left;
   }
   if (left.length === 0) {
-    return right.map((seq) => [...seq]);
+    // Bound atoms per sequence. The 32-set cap does not bound one long literal.
+    return right.map((seq) => seq.slice(0, MAX_SEQUENCE_SET));
+  }
+  if (left.every((seq) => seq.length >= MAX_SEQUENCE_SET)) {
+    return left;
   }
   const out: AtomLanguage[][] = [];
   for (const prefix of left) {
     for (const suffix of right) {
-      out.push([...prefix, ...suffix]);
+      const room = MAX_SEQUENCE_SET - prefix.length;
+      out.push(room <= 0 ? prefix : [...prefix, ...suffix.slice(0, room)]);
       if (out.length > MAX_SEQUENCE_SET) {
         return unknownSequences();
       }

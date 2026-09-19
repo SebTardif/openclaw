@@ -411,4 +411,22 @@ describe("safe regex", () => {
         .reason,
     ).toBe("unsafe-nested-repetition");
   });
+
+  it("screens a long literal without nested repetition", { timeout: 2000 }, () => {
+    const pattern = "a".repeat(100_000);
+    expect(compileSafeRegexDetailed(pattern).reason).toBeNull();
+    expect(compileJsonSchemaPatternRegexDetailed(pattern).reason).toBeNull();
+  });
+
+  it(
+    "rejects long adjacent groups that only differ after the bounded prefix",
+    { timeout: 2000 },
+    () => {
+      const left = "a".repeat(100_000);
+      const right = `${"a".repeat(99_999)}b`;
+      expect(compileJsonSchemaPatternRegexDetailed(`(${left})*(${right})*`).reason).toBe(
+        "unsafe-nested-repetition",
+      );
+    },
+  );
 });

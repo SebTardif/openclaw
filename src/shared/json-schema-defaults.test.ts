@@ -905,6 +905,26 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     expect(result.aaa.mode).toBeUndefined();
   });
 
+  it("applies defaults through a long literal patternProperties key", { timeout: 2000 }, () => {
+    const key = "a".repeat(20_000);
+    const schema = {
+      type: "object",
+      patternProperties: {
+        [key]: {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "keep" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { [key]: {}, zz: {} }) as {
+      [key: string]: { mode?: string };
+    };
+    expect(result[key]?.mode).toBe("keep");
+    expect(result.zz?.mode).toBeUndefined();
+  });
+
   it("skips equal-length lookaround overlapping alternatives", () => {
     const schema = {
       type: "object",
