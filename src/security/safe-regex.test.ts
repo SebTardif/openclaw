@@ -178,4 +178,37 @@ describe("safe regex", () => {
     expect(compiled.regex?.test("bbc")).toBe(true);
     expect(compiled.regex?.test("ab")).toBe(false);
   });
+
+  it("rejects named backreferences as unknown prefix languages", () => {
+    expect(compileSafeRegexDetailed("^(?<x>a)(\\k<x>|aa)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^(?<x>a)(\\k<x>|aa)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects class backspace as the decoded control character", () => {
+    expect(compileSafeRegexDetailed("^([\\b]|\\x08\\x08)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^([\\b]|\\x08\\x08)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects overlapping alternatives hidden behind a lookahead", () => {
+    expect(compileSafeRegexDetailed("^((?!b)a|aaaa)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^((?!b)a|aaaa)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("accepts deterministic adjacent groups that share a first character", () => {
+    const compiled = compileJsonSchemaPatternRegexDetailed("^(ab)+(ac)+$");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("abac")).toBe(true);
+    expect(compiled.regex?.test("ababacab")).toBe(false);
+    expect(compiled.regex?.test("ab")).toBe(false);
+  });
 });

@@ -588,6 +588,85 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     expect(result.zz.mode).toBeUndefined();
   });
 
+  it("skips named backreference alternatives that share a capture prefix", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(?<x>a)(\\k<x>|aa)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { aaa: {} }) as {
+      aaa: { mode?: string };
+    };
+    expect(result.aaa.mode).toBeUndefined();
+  });
+
+  it("skips class-backspace alternatives that share a decoded prefix", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^([\\b]|\\x08\\x08)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { "\b": {} }) as {
+      "\b": { mode?: string };
+    };
+    expect(result["\b"].mode).toBeUndefined();
+  });
+
+  it("skips lookahead-hidden overlapping alternatives", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^((?!b)a|aaaa)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { a: {}, aaaa: {} }) as {
+      a: { mode?: string };
+      aaaa: { mode?: string };
+    };
+    expect(result.a.mode).toBeUndefined();
+    expect(result.aaaa.mode).toBeUndefined();
+  });
+
+  it("applies defaults through deterministic groups that share a first character", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(ab)+(ac)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "keep" },
+          },
+        },
+      },
+    };
+
+    const result = applyJsonSchemaDefaults(schema, { abac: {}, ab: {}, zz: {} }) as {
+      abac: { mode?: string };
+      ab: { mode?: string };
+      zz: { mode?: string };
+    };
+    expect(result.abac.mode).toBe("keep");
+    expect(result.ab.mode).toBeUndefined();
+    expect(result.zz.mode).toBeUndefined();
+  });
+
   it("skips semantically overlapping adjacent patternProperties", () => {
     const schema = {
       type: "object",

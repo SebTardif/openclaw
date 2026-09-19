@@ -282,6 +282,84 @@ describe("schema validator patternProperties screening", () => {
     });
   });
 
+  it("rejects named backreferences on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.named-backref",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(?<x>a)(\\k<x>|aa)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { aaa: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects class-backspace overlap on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.class-backspace",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^([\\b]|\\x08\\x08)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "\b": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects lookahead-hidden overlapping alternatives on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.lookahead-overlap",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^((?!b)a|aaaa)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { a: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("accepts deterministic groups that share a first character on the plugin entrypoint", () => {
+    const result = validateJsonSchemaValue({
+      cacheKey: "schema-validator.pattern-properties.shared-first-char",
+      schema: {
+        type: "object",
+        patternProperties: {
+          "^(ab)+(ac)+$": {
+            type: "object",
+            properties: {
+              mode: { type: "string", default: "keep" },
+            },
+            additionalProperties: false,
+          },
+        },
+        additionalProperties: true,
+      },
+      value: { abac: {}, ab: {}, zz: {} },
+      applyDefaults: true,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error("expected shared-first-character patternProperties to validate");
+    }
+    expect(result.value).toEqual({
+      abac: { mode: "keep" },
+      ab: {},
+      zz: {},
+    });
+  });
+
   it("applies empty patternProperties defaults on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.empty",

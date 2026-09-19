@@ -74,10 +74,16 @@ export function readCompleteEscapeAtom(
   if (next === "x" && hex.length === 2 && parseHexChar(hex)) {
     return { end: index + 4, sig: source.slice(index, index + 4) };
   }
+  if (next === "k" && source[index + 2] === "<") {
+    const close = source.indexOf(">", index + 3);
+    if (close !== -1) {
+      return { end: close + 1, sig: source.slice(index, close + 1) };
+    }
+  }
   return { end: index + 2, sig: source.slice(index, index + 2) };
 }
 
-function escapeLanguage(sig: string, foldCase: boolean): AtomLanguage {
+function escapeLanguage(sig: string, foldCase: boolean, inClass = false): AtomLanguage {
   const body = sig.slice(1);
   if (body === "d") {
     return { kind: "chars", chars: new Set(DIGITS) };
@@ -133,6 +139,15 @@ function escapeLanguage(sig: string, foldCase: boolean): AtomLanguage {
   if (/^[1-9]\d*$/.test(body)) {
     return { kind: "any" };
   }
+  if (body === "b") {
+    return inClass ? singleton("\b", false) : { kind: "any" };
+  }
+  if (body === "B") {
+    return inClass ? singleton("B", foldCase) : { kind: "any" };
+  }
+  if (body.startsWith("k")) {
+    return { kind: "any" };
+  }
   if (body.length === 1) {
     return singleton(body, foldCase);
   }
@@ -186,7 +201,7 @@ function readClassAtom(
     const ch = parseHexChar(source.slice(index + 2, index + 4));
     return { next: index + 4, lang: ch ? singleton(ch, foldCase) : { kind: "any" } };
   }
-  return { next: index + 2, lang: escapeLanguage(source.slice(index, index + 2), foldCase) };
+  return { next: index + 2, lang: escapeLanguage(source.slice(index, index + 2), foldCase, true) };
 }
 
 function classLanguage(sig: string, foldCase: boolean): AtomLanguage {
@@ -231,11 +246,23 @@ function classLanguage(sig: string, foldCase: boolean): AtomLanguage {
   return negated ? { kind: "complement", chars: folded } : { kind: "chars", chars: folded };
 }
 
+function isAssertionGroup(sig: string): boolean {
+  return (
+    sig.startsWith("(?=") ||
+    sig.startsWith("(?!") ||
+    sig.startsWith("(?<=") ||
+    sig.startsWith("(?<!")
+  );
+}
+
 function unwrapSimpleGroup(sig: string): string {
   let current = sig;
   while (current.startsWith("(") && current.endsWith(")")) {
+    if (isAssertionGroup(current)) {
+      break;
+    }
     let inner = current.slice(1, -1);
-    if (inner.startsWith("?:") || inner.startsWith("?=") || inner.startsWith("?!")) {
+    if (inner.startsWith("?:")) {
       inner = inner.slice(2);
     }
     if (/[|*+?{(]/.test(inner)) {
@@ -355,13 +382,7 @@ function firstAtomSig(source: string): string {
     }
     if (ch === "(") {
       const group = readGroupSig(source, i);
-      const prefix = source.slice(i, Math.min(i + 4, group.end));
-      const zeroWidth =
-        prefix.startsWith("(?=") ||
-        prefix.startsWith("(?!") ||
-        prefix.startsWith("(?<=") ||
-        prefix.startsWith("(?<!");
-      if (zeroWidth) {
+      if (isAssertionGroup(source.slice(i))) {
         i = group.end;
         continue;
       }
@@ -376,6 +397,118 @@ function firstAtomSig(source: string): string {
     return ch ?? "";
   }
   return "";
+}
+
+function emptyLanguage(): AtomLanguage {
+  return { kind: "chars", chars: new Set() };
+}
+
+function sequenceFromSource(source: string, foldCase: boolean, depth: number): AtomLanguage[] {
+  const seq: AtomLanguage[] = [];
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i];
+    if (ch === "^" || ch === "$") {
+      i += 1;
+      continue;
+    }
+    if (ch === "*" || ch === "+" || ch === "?" || ch === "{" || ch === "|") {
+      return [{ kind: "any" }];
+    }
+    let atomEnd = i + 1;
+    if (ch === "(") {
+      const group = readGroupSig(source, i);
+      atomEnd = group.end;
+      if (isAssertionGroup(source.slice(i))) {
+        i = atomEnd;
+        continue;
+      }
+      const nested = collectSequences(group.sig, foldCase, depth + 1);
+      const nestedSeq = nested[0];
+      if (nested.length === 1 && nestedSeq) {
+        seq.push(...nestedSeq);
+      } else {
+        seq.push(groupPrefixLanguage(group.sig, foldCase, depth + 1));
+      }
+    } else if (ch === "\\") {
+      const esc = readCompleteEscapeAtom(source, i);
+      atomEnd = esc.end;
+      seq.push(escapeLanguage(esc.sig, foldCase));
+    } else if (ch === "[") {
+      const cls = readCharClassSig(source, i);
+      atomEnd = cls.end;
+      seq.push(classLanguage(cls.sig, foldCase));
+    } else if (ch === ".") {
+      seq.push({ kind: "any" });
+    } else {
+      seq.push(singleton(ch ?? "", foldCase));
+    }
+    const next = source[atomEnd];
+    if (next === "*" || next === "+" || next === "?" || next === "{") {
+      return [{ kind: "any" }];
+    }
+    i = atomEnd;
+  }
+  return seq;
+}
+
+function collectSequences(sig: string, foldCase: boolean, depth: number): AtomLanguage[][] {
+  if (depth > 4) {
+    return [[{ kind: "any" }]];
+  }
+  if (isAssertionGroup(sig)) {
+    return [[]];
+  }
+  const inner = stripOuterGroup(sig);
+  if (inner !== null) {
+    return splitTopLevelAlternatives(inner).map((alternative) => {
+      const seq = sequenceFromSource(alternative, foldCase, depth);
+      return seq.length > 0 ? seq : [{ kind: "any" }];
+    });
+  }
+  if (sig.startsWith("[")) {
+    return [[classLanguage(sig, foldCase)]];
+  }
+  if (sig.startsWith("\\")) {
+    return [[escapeLanguage(readCompleteEscapeAtom(sig, 0).sig, foldCase)]];
+  }
+  if (!sig || sig === ".") {
+    return [[{ kind: "any" }]];
+  }
+  if (sig.length === 1) {
+    return [[singleton(sig, foldCase)]];
+  }
+  const seq = sequenceFromSource(sig, foldCase, depth);
+  return [seq.length > 0 ? seq : [{ kind: "any" }]];
+}
+
+function sequencesOverlap(left: readonly AtomLanguage[], right: readonly AtomLanguage[]): boolean {
+  if (left.length === 0 || right.length === 0) {
+    return false;
+  }
+  const n = Math.min(left.length, right.length);
+  for (let i = 0; i < n; i += 1) {
+    const leftLang = left[i];
+    const rightLang = right[i];
+    if (!leftLang || !rightLang || !languagesOverlap(leftLang, rightLang)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sequenceSetsOverlap(
+  left: readonly AtomLanguage[][],
+  right: readonly AtomLanguage[][],
+): boolean {
+  for (const leftSeq of left) {
+    for (const rightSeq of right) {
+      if (sequencesOverlap(leftSeq, rightSeq)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function unionLanguages(left: AtomLanguage, right: AtomLanguage): AtomLanguage {
@@ -395,6 +528,9 @@ function unionLanguages(left: AtomLanguage, right: AtomLanguage): AtomLanguage {
 function groupPrefixLanguage(sig: string, foldCase: boolean, depth: number): AtomLanguage {
   if (depth > 4) {
     return { kind: "any" };
+  }
+  if (isAssertionGroup(sig)) {
+    return emptyLanguage();
   }
   const inner = stripOuterGroup(sig);
   if (inner === null) {
@@ -418,6 +554,9 @@ function atomLanguageAtDepth(sig: string, foldCase: boolean, depth: number): Ato
   if (!atom || atom === ".") {
     return { kind: "any" };
   }
+  if (isAssertionGroup(atom)) {
+    return emptyLanguage();
+  }
   if (atom.startsWith("(")) {
     return groupPrefixLanguage(atom, foldCase, depth);
   }
@@ -431,10 +570,6 @@ function atomLanguageAtDepth(sig: string, foldCase: boolean, depth: number): Ato
     return singleton(atom, foldCase);
   }
   return singleton(atom[0] ?? "", foldCase);
-}
-
-function atomLanguage(sig: string, foldCase: boolean): AtomLanguage {
-  return atomLanguageAtDepth(sig, foldCase, 0);
 }
 
 function languagesOverlap(left: AtomLanguage, right: AtomLanguage): boolean {
@@ -467,7 +602,10 @@ export function atomsCanMatchSamePrefix(left: string, right: string, foldCase = 
   if (left === right || !left || !right) {
     return true;
   }
-  return languagesOverlap(atomLanguage(left, foldCase), atomLanguage(right, foldCase));
+  return sequenceSetsOverlap(
+    collectSequences(left, foldCase, 0),
+    collectSequences(right, foldCase, 0),
+  );
 }
 
 export function firstAtomsOverlap(atoms: readonly string[], foldCase = false): boolean {
