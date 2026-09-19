@@ -63,6 +63,13 @@ describe("safe regex", () => {
     expect(compiled.regex?.test("corp-ABCDEFGHIJKLMNOP")).toBe(true);
   });
 
+  it("keeps disjoint escaped custom redaction alternatives on the shared compiler", () => {
+    const compiled = compileSafeRegexDetailed("corp-(\\x41|BCD)+");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("corp-ABCD")).toBe(true);
+    expect(compiled.regex?.test("corp-BCD")).toBe(true);
+  });
+
   it("compiles JSON Schema patterns without trimming significant spaces", () => {
     const compiled = compileJsonSchemaPatternRegexDetailed(" a");
     expect(compiled.reason).toBeNull();
@@ -142,5 +149,11 @@ describe("safe regex", () => {
   it("rejects adjacent unbounded JSON Schema twins without changing the shared compiler", () => {
     expect(compileJsonSchemaPatternRegexDetailed("a*a*$").reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegexDetailed("a*a*$").reason).toBeNull();
+  });
+
+  it("rejects unparsed alternating groups adjacent to overlapping repetitions", () => {
+    expect(compileJsonSchemaPatternRegexDetailed("^(a|b)+b+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
   });
 });

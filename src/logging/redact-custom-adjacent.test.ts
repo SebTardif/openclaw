@@ -11,4 +11,14 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain(secret);
     expect(output).toContain("corp-");
   });
+
+  it("keeps disjoint escaped custom redaction alternatives active", () => {
+    const secret = "corp-ABCD";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["corp-(\\x41|BCD)+"],
+    });
+    expect(output).not.toContain(secret);
+    expect(output).toContain("corp-");
+  });
 });
