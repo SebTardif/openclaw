@@ -120,6 +120,7 @@ type InboundStoreCase = {
   isGroup?: boolean;
   chatId?: number;
   imessage: Record<string, unknown>;
+  accessGroups?: Record<string, unknown>;
 };
 
 type InboundStoreRuntime = {
@@ -177,6 +178,7 @@ async function runInboundStoreCase(params: {
       channels: {
         imessage: params.message.imessage,
       },
+      ...(params.message.accessGroups ? { accessGroups: params.message.accessGroups } : {}),
       messages: { inbound: { debounceMs: 0 } },
       session: { mainKey: "main" },
     } as never,
@@ -242,6 +244,29 @@ describe("iMessage inbound pairing-store read failures", () => {
     );
   });
 
+  it("fails unpaired pairing DMs when the sender is not a configured access-group member", async () => {
+    const { runtime, sendClient } = await runInboundStoreCase({
+      message: {
+        guid: "pairing-store-read-fail-accessgroup-unmatched-guid-1",
+        imessage: { dmPolicy: "pairing", allowFrom: ["accessGroup:operators"] },
+        accessGroups: {
+          operators: {
+            type: "message.senders",
+            members: { imessage: ["+15559999999"] },
+          },
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(readChannelAllowFromStoreMock).toHaveBeenCalledTimes(1));
+    expect(upsertChannelPairingRequestMock).not.toHaveBeenCalled();
+    expect(sendClient.request).not.toHaveBeenCalled();
+    expect(dispatchReplyWithBufferedBlockDispatcherMock).not.toHaveBeenCalled();
+    expect(runtime.error.mock.calls.flat().map(String).join("\n")).toMatch(
+      /inbound dispatch failed|pairing db locked/i,
+    );
+  });
+
   it.each([
     {
       name: "open DM",
@@ -264,6 +289,28 @@ describe("iMessage inbound pairing-store read failures", () => {
       imessage: { allowFrom: ["+15550001111"] },
     },
     {
+      name: "configured access-group pairing-policy DM",
+      guid: "pairing-store-pairing-accessgroup-dm-guid-1",
+      imessage: { dmPolicy: "pairing", allowFrom: ["accessGroup:operators"] },
+      accessGroups: {
+        operators: {
+          type: "message.senders",
+          members: { imessage: ["+15550001111"] },
+        },
+      },
+    },
+    {
+      name: "configured access-group default-policy DM",
+      guid: "pairing-store-default-accessgroup-dm-guid-1",
+      imessage: { allowFrom: ["accessGroup:operators"] },
+      accessGroups: {
+        operators: {
+          type: "message.senders",
+          members: { imessage: ["+15550001111"] },
+        },
+      },
+    },
+    {
       name: "admitted group",
       guid: "pairing-store-group-guid-1",
       isGroup: true,
@@ -275,6 +322,7 @@ describe("iMessage inbound pairing-store read failures", () => {
         guid: testCase.guid,
         isGroup: testCase.isGroup,
         imessage: testCase.imessage,
+        accessGroups: testCase.accessGroups,
       },
     });
 
