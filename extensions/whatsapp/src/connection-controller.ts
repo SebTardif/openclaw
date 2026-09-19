@@ -1,9 +1,9 @@
 // Whatsapp plugin module implements connection controller behavior.
 import type { GroupMetadata, WASocket, WAMessageKey, proto } from "baileys";
 import { registerChannelRuntimeContext } from "openclaw/plugin-sdk/channel-runtime-context";
-import { resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
-import { getChildLogger, info } from "openclaw/plugin-sdk/runtime-env";
+import { info } from "openclaw/plugin-sdk/runtime-env";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
+import { drainBackgroundTasksForTeardown } from "./background-tasks-teardown.js";
 import {
   WHATSAPP_CONNECTION_CONTROLLER_CAPABILITY,
   WHATSAPP_CONNECTION_OWNER_PENDING_CAPABILITY,
@@ -50,39 +50,6 @@ const WHATSAPP_LOGIN_AUTH_NOT_CLEARED_MESSAGE =
 export const WHATSAPP_LOGGED_OUT_QR_MESSAGE =
   "WhatsApp reported the session is logged out. Cleared cached web session; please scan a new QR.";
 export const WHATSAPP_WATCHDOG_TIMEOUT_ERROR = "watchdog-timeout";
-// Last-route SQLite writes share the 15s bound used by socket close and creds flush.
-// An unbounded wait here blocks reconnect and `gateway stop` on a stuck store lock.
-const BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS = 15_000;
-
-type BackgroundTasksWaitResult = "drained" | "timed_out";
-
-const connectionControllerLog = getChildLogger({ module: "whatsapp-connection" });
-
-async function waitForBackgroundTasksWithTimeout(
-  backgroundTasks: Set<Promise<unknown>>,
-  timeoutMs = BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS,
-): Promise<BackgroundTasksWaitResult> {
-  if (backgroundTasks.size === 0) {
-    return "drained";
-  }
-
-  const boundedTimeoutMs = resolveTimerTimeoutMs(
-    timeoutMs,
-    BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS,
-    0,
-  );
-  let flushTimeout: ReturnType<typeof setTimeout> | undefined;
-  return await Promise.race([
-    Promise.allSettled(backgroundTasks).then(() => "drained" as const),
-    new Promise<BackgroundTasksWaitResult>((resolve) => {
-      flushTimeout = setTimeout(() => resolve("timed_out"), boundedTimeoutMs);
-    }),
-  ]).finally(() => {
-    if (flushTimeout) {
-      clearTimeout(flushTimeout);
-    }
-  });
-}
 
 type TimerHandle = ReturnType<typeof setInterval>;
 type WaSocket = Awaited<ReturnType<typeof createWaSocket>>;
@@ -928,23 +895,7 @@ export class WhatsAppConnectionController {
     if (connection.watchdogTimer) {
       clearInterval(connection.watchdogTimer);
     }
-    if (connection.backgroundTasks.size > 0) {
-      const waitResult = await waitForBackgroundTasksWithTimeout(
-        connection.backgroundTasks,
-        BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS,
-      );
-      if (waitResult !== "drained") {
-        connectionControllerLog.warn(
-          {
-            remaining: connection.backgroundTasks.size,
-            timeoutMs: BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS,
-            reason: waitResult,
-          },
-          "WhatsApp last-route writes did not finish before connection teardown; continuing close",
-        );
-      }
-      connection.backgroundTasks.clear();
-    }
+    await drainBackgroundTasksForTeardown(connection.backgroundTasks);
     try {
       await connection.listener.close?.();
     } catch {
