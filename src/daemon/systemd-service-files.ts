@@ -249,7 +249,9 @@ async function readSystemdManagerCommand(
 
     await binding?.verify();
     const managedDefinition =
-      !systemScope && sourcePath === resolveSystemdUnitPath(env) ? localDefinition : null;
+      !systemScope && sourcePath === (target?.unitPath ?? resolveSystemdUnitPath(env))
+        ? localDefinition
+        : null;
     const managedOverrides =
       !reloadPending && managedDefinition
         ? await readSystemdDropInOverrides(dropInPaths, managedUnsetEnvironment, env).catch(

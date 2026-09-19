@@ -64,7 +64,7 @@ async function runSystemdServiceAction(params: {
   } else {
     await assertSystemdAvailable(env);
     if (params.action !== "stop") {
-      await assertNoSystemGatewayOwnership(env);
+      await assertNoSystemGatewayOwnership(env, undefined, unitName);
     }
     runSystemctl = (args) => execSystemctlUser(env, args, undefined, params.assertCurrent);
   }
@@ -242,8 +242,10 @@ export async function uninstallUserSystemdGatewayUnit({
   env,
   stdout,
 }: GatewayServiceManageArgs): Promise<UninstallUserSystemdGatewayUnitResult> {
-  const unitName = `${resolveSystemdServiceName(env)}.service`;
-  const unitPath = resolveSystemdUnitPath(env);
+  const installed = await findInstalledSystemdGatewayScope(env);
+  const unitName =
+    installed?.scope === "user" ? installed.unitName : `${resolveSystemdServiceName(env)}.service`;
+  const unitPath = installed?.scope === "user" ? installed.unitPath : resolveSystemdUnitPath(env);
   let disabled = false;
   if (await isSystemctlAvailable(env)) {
     await disableSystemdUserUnitForRemoval(env, unitName);

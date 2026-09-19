@@ -128,11 +128,15 @@ async function findSystemSystemdUnitPath(
 export async function assertNoSystemGatewayOwnership(
   env: GatewayServiceEnv,
   timeoutMs?: number,
+  unitName?: string,
 ): Promise<void> {
   if (env.OPENCLAW_SERVICE_KIND?.trim() === "node") {
     return;
   }
-  await assertNoSystemSystemdOwnership(`${resolveSystemdServiceName(env)}.service`, timeoutMs);
+  await assertNoSystemSystemdOwnership(
+    unitName ?? `${resolveSystemdServiceName(env)}.service`,
+    timeoutMs,
+  );
 }
 
 async function findMarkerOwnedSystemSystemdUnit(env: GatewayServiceEnv): Promise<{

@@ -64,6 +64,18 @@ export function resolveGatewaySystemdServiceName(profile?: string): string {
   return `openclaw-gateway${suffix}`;
 }
 
+function isAmbiguousLegacyGatewayCandidate(legacyName: string): boolean {
+  // openclaw-node is the Node service. openclaw-gateway and
+  // openclaw-gateway-<profile> are canonical gateway names for default or
+  // another profile (node -> openclaw-node, gateway -> openclaw-gateway,
+  // gateway-lisa -> openclaw-gateway-lisa).
+  return (
+    legacyName === NODE_SYSTEMD_SERVICE_NAME ||
+    legacyName === GATEWAY_SYSTEMD_SERVICE_NAME ||
+    legacyName.startsWith(`${GATEWAY_SYSTEMD_SERVICE_NAME}-`)
+  );
+}
+
 /**
  * Service-name candidates for a profile, preferred order.
  *
@@ -81,7 +93,10 @@ export function resolveGatewaySystemdServiceNameCandidates(profile?: string): st
     return canonical === "openclaw" ? [canonical] : [canonical, "openclaw"];
   }
   const legacy = `openclaw${suffix}`;
-  return legacy === canonical ? [canonical] : [canonical, legacy];
+  if (legacy === canonical || isAmbiguousLegacyGatewayCandidate(legacy)) {
+    return [canonical];
+  }
+  return [canonical, legacy];
 }
 
 export function resolveGatewayWindowsTaskName(profile?: string): string {

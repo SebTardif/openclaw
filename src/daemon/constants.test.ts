@@ -52,6 +52,16 @@ describe("resolveGatewaySystemdServiceNameCandidates", () => {
       "openclaw-lisa",
     ]);
   });
+
+  it("omits legacy names that identify Node or another profile's gateway", () => {
+    expect(resolveGatewaySystemdServiceNameCandidates("node")).toEqual(["openclaw-gateway-node"]);
+    expect(resolveGatewaySystemdServiceNameCandidates("gateway")).toEqual([
+      "openclaw-gateway-gateway",
+    ]);
+    expect(resolveGatewaySystemdServiceNameCandidates("gateway-lisa")).toEqual([
+      "openclaw-gateway-gateway-lisa",
+    ]);
+  });
 });
 
 describe("resolveGatewayWindowsTaskName", () => {
