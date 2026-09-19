@@ -54,20 +54,16 @@ export const WHATSAPP_WATCHDOG_TIMEOUT_ERROR = "watchdog-timeout";
 // An unbounded wait here blocks reconnect and `gateway stop` on a stuck store lock.
 const BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS = 15_000;
 
-type BackgroundTasksWaitResult = "drained" | "timed_out" | "aborted";
+type BackgroundTasksWaitResult = "drained" | "timed_out";
 
 const connectionControllerLog = getChildLogger({ module: "whatsapp-connection" });
 
 async function waitForBackgroundTasksWithTimeout(
   backgroundTasks: Set<Promise<unknown>>,
   timeoutMs = BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS,
-  abortSignal?: AbortSignal,
 ): Promise<BackgroundTasksWaitResult> {
   if (backgroundTasks.size === 0) {
     return "drained";
-  }
-  if (abortSignal?.aborted) {
-    return "aborted";
   }
 
   const boundedTimeoutMs = resolveTimerTimeoutMs(
@@ -76,27 +72,16 @@ async function waitForBackgroundTasksWithTimeout(
     0,
   );
   let flushTimeout: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-  try {
-    return await new Promise<BackgroundTasksWaitResult>((resolve) => {
-      const settle = (result: BackgroundTasksWaitResult) => {
-        resolve(result);
-      };
-      void Promise.allSettled(backgroundTasks).then(() => settle("drained"));
-      flushTimeout = setTimeout(() => settle("timed_out"), boundedTimeoutMs);
-      if (abortSignal) {
-        onAbort = () => settle("aborted");
-        abortSignal.addEventListener("abort", onAbort, { once: true });
-      }
-    });
-  } finally {
+  return await Promise.race([
+    Promise.allSettled(backgroundTasks).then(() => "drained" as const),
+    new Promise<BackgroundTasksWaitResult>((resolve) => {
+      flushTimeout = setTimeout(() => resolve("timed_out"), boundedTimeoutMs);
+    }),
+  ]).finally(() => {
     if (flushTimeout) {
       clearTimeout(flushTimeout);
     }
-    if (abortSignal && onAbort) {
-      abortSignal.removeEventListener("abort", onAbort);
-    }
-  }
+  });
 }
 
 type TimerHandle = ReturnType<typeof setInterval>;
@@ -947,7 +932,6 @@ export class WhatsAppConnectionController {
       const waitResult = await waitForBackgroundTasksWithTimeout(
         connection.backgroundTasks,
         BACKGROUND_TASKS_TEARDOWN_TIMEOUT_MS,
-        this.setupAbortController.signal,
       );
       if (waitResult !== "drained") {
         connectionControllerLog.warn(
