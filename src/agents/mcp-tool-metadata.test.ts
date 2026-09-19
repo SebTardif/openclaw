@@ -587,6 +587,24 @@ describe("createMcpJsonSchemaValidator patternProperties preflight", () => {
     expect(validate({ abac: "ok" }).valid).toBe(true);
   });
 
+  it(
+    "accepts a long literal patternProperties key on the MCP entrypoint",
+    { timeout: 2000 },
+    () => {
+      const factory = createMcpJsonSchemaValidator();
+      const key = "a".repeat(20_000);
+      const validate = factory.getValidator<Record<string, unknown>>({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          [key]: { type: "string" },
+        },
+        additionalProperties: true,
+      });
+      expect(validate({ [key]: "ok", zz: 1 }).valid).toBe(true);
+    },
+  );
+
   it("compiles empty JSON Schema patternProperties on the MCP entrypoint", () => {
     const factory = createMcpJsonSchemaValidator();
     const validate = factory.getValidator<{ x?: { mode?: string } }>({
