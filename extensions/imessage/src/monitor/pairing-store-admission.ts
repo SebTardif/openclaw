@@ -1,6 +1,7 @@
 import { resolveChannelGroupPolicy } from "openclaw/plugin-sdk/channel-policy";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { readChannelAllowFromStore } from "openclaw/plugin-sdk/conversation-runtime";
+import { isAllowedIMessageSender } from "../targets.js";
 import { mergeIMessageGroupAllowFromWithLegacyChatTargets } from "./inbound-processing.js";
 import type { IMessagePayload } from "./types.js";
 
@@ -29,11 +30,20 @@ function isIMessagePairingStoreRequired(params: {
   allowFrom: string[];
   allowLegacyConversationAllowFromForGroup?: boolean;
 }): boolean {
-  // Shared ingress skips pairing-store reads for open/allowlist DMs and groups.
+  // Shared ingress admits open/allowlist DMs, groups, and configured allowFrom
+  // matches without stored pairing approval.
   if (params.dmPolicy === "open" || params.dmPolicy === "allowlist") {
     return false;
   }
   if (params.message.is_group) {
+    return false;
+  }
+  if (
+    isAllowedIMessageSender({
+      allowFrom: params.allowFrom,
+      sender: params.message.sender ?? "",
+    })
+  ) {
     return false;
   }
   const chatId = params.message.chat_id;

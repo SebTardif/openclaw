@@ -225,6 +225,23 @@ describe("iMessage inbound pairing-store read failures", () => {
     );
   });
 
+  it("fails unpaired pairing DMs when configured allowFrom does not match the sender", async () => {
+    const { runtime, sendClient } = await runInboundStoreCase({
+      message: {
+        guid: "pairing-store-read-fail-unmatched-guid-1",
+        imessage: { dmPolicy: "pairing", allowFrom: ["+15559999999"] },
+      },
+    });
+
+    await vi.waitFor(() => expect(readChannelAllowFromStoreMock).toHaveBeenCalledTimes(1));
+    expect(upsertChannelPairingRequestMock).not.toHaveBeenCalled();
+    expect(sendClient.request).not.toHaveBeenCalled();
+    expect(dispatchReplyWithBufferedBlockDispatcherMock).not.toHaveBeenCalled();
+    expect(runtime.error.mock.calls.flat().map(String).join("\n")).toMatch(
+      /inbound dispatch failed|pairing db locked/i,
+    );
+  });
+
   it.each([
     {
       name: "open DM",
@@ -235,6 +252,16 @@ describe("iMessage inbound pairing-store read failures", () => {
       name: "configured allowlist DM",
       guid: "pairing-store-allowlist-dm-guid-1",
       imessage: { dmPolicy: "allowlist", allowFrom: ["+15550001111"] },
+    },
+    {
+      name: "configured pairing-policy DM",
+      guid: "pairing-store-pairing-allowfrom-dm-guid-1",
+      imessage: { dmPolicy: "pairing", allowFrom: ["+15550001111"] },
+    },
+    {
+      name: "configured default-policy DM",
+      guid: "pairing-store-default-allowfrom-dm-guid-1",
+      imessage: { allowFrom: ["+15550001111"] },
     },
     {
       name: "admitted group",
