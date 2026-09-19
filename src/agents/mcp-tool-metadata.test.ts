@@ -535,6 +535,32 @@ describe("createMcpJsonSchemaValidator patternProperties preflight", () => {
     ).toThrow(/unsafe patternProperties pattern rejected/);
   });
 
+  it("rejects malformed control-escape overlap on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^(\\c|\\\\c\\\\c)+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("rejects input-boundary overlapping alternatives on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^(\\n^a|\\na\\na)+Z": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
   it("accepts deterministic groups that share a first character on the MCP entrypoint", () => {
     const factory = createMcpJsonSchemaValidator();
     const validate = factory.getValidator<{ abac?: string }>({

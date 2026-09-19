@@ -11,7 +11,10 @@ import {
 } from "./safe-regex-atoms.js";
 import {
   escapeHasUnknownConsumedLength,
+  isUnicodeSetsMode,
   isZeroWidthAssertionEscape,
+  isZeroWidthAssertionToken,
+  readCharClassSig,
   readLiteralCodePoint,
 } from "./safe-regex-numeric.js";
 
@@ -154,24 +157,6 @@ function recordAlternative(frame: ParseFrame): void {
   frame.altMaxLength = Math.max(frame.altMaxLength, frame.branchMaxLength);
 }
 
-function readCharClassSig(source: string, index: number): { end: number; sig: string } {
-  let i = index + 1;
-  if (source[i] === "^") {
-    i += 1;
-  }
-  while (i < source.length) {
-    if (source[i] === "\\") {
-      i += 2;
-      continue;
-    }
-    if (source[i] === "]") {
-      return { end: i + 1, sig: source.slice(index, i + 1) };
-    }
-    i += 1;
-  }
-  return { end: source.length, sig: source.slice(index) };
-}
-
 function readQuantifier(source: string, index: number): QuantifierRead | null {
   const ch = source[index];
   const consumed = source[index + 1] === "?" ? 2 : 1;
@@ -257,7 +242,12 @@ function consumeGroupPrefix(
   return { nextIndex: question + 1, unknown: true, assertion: false, modifierUnknown: true };
 }
 
-function tokenizePattern(source: string, unicode = false, capturingGroups = 0): PatternToken[] {
+function tokenizePattern(
+  source: string,
+  unicode = false,
+  capturingGroups = 0,
+  unicodeSets = false,
+): PatternToken[] {
   const tokens: PatternToken[] = [];
 
   for (let i = 0; i < source.length; i += 1) {
@@ -271,7 +261,7 @@ function tokenizePattern(source: string, unicode = false, capturingGroups = 0): 
     }
 
     if (ch === "[") {
-      const atom = readCharClassSig(source, i);
+      const atom = readCharClassSig(source, i, unicodeSets);
       tokens.push({ kind: "simple-token", sig: atom.sig });
       i = atom.end - 1;
       continue;
@@ -349,7 +339,7 @@ function analyzeTokensForNestedRepetition(
       });
       return;
     }
-    if (isZeroWidthAssertionEscape(sig)) {
+    if (isZeroWidthAssertionToken(sig)) {
       emitToken({
         containsRepetition: false,
         hasAmbiguousAlternation: false,
@@ -531,9 +521,10 @@ function hasNestedRepetition(
   // Non-goal: complete regex AST support; keep strict enough for config safety checks.
   const flags = options?.flags ?? "";
   const unicode = isUnicodeRegexMode(flags);
+  const unicodeSets = isUnicodeSetsMode(flags);
   const capturingGroups = countCapturingGroups(source);
   return analyzeTokensForNestedRepetition(
-    tokenizePattern(source, unicode, capturingGroups),
+    tokenizePattern(source, unicode, capturingGroups, unicodeSets),
     options?.distinguishDisjointAlternatives === true,
     flags.includes("i"),
     unicode,
@@ -578,27 +569,10 @@ export function compileSafeRegex(source: string, flags = ""): RegExp | null {
   return compileSafeRegexDetailed(source, flags).regex;
 }
 
-function readClassAtom(source: string, index: number): { end: number; sig: string } {
-  let i = index + 1;
-  if (source[i] === "^") {
-    i += 1;
-  }
-  while (i < source.length) {
-    if (source[i] === "\\") {
-      i += 2;
-      continue;
-    }
-    if (source[i] === "]") {
-      return { end: i + 1, sig: source.slice(index, i + 1) };
-    }
-    i += 1;
-  }
-  return { end: source.length, sig: source.slice(index) };
-}
-
 function readGroupAtom(
   source: string,
   index: number,
+  unicodeSets = false,
 ): { end: number; sig: string; zeroWidth: boolean } {
   const prefix = source.slice(index, index + 4);
   const zeroWidth =
@@ -614,7 +588,7 @@ function readGroupAtom(
       continue;
     }
     if (source[i] === "[") {
-      i = readClassAtom(source, i).end;
+      i = readCharClassSig(source, i, unicodeSets).end;
       continue;
     }
     if (source[i] === "(") {
@@ -632,6 +606,7 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
   let i = 0;
   const foldCase = flags.includes("i");
   const unicode = isUnicodeRegexMode(flags);
+  const unicodeSets = isUnicodeSetsMode(flags);
   const capturingGroups = countCapturingGroups(source);
 
   while (i < source.length) {
@@ -655,11 +630,11 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
       sig = atom.sig;
       zeroWidth = isZeroWidthAssertionEscape(sig);
     } else if (ch === "[") {
-      const atom = readClassAtom(source, i);
+      const atom = readCharClassSig(source, i, unicodeSets);
       end = atom.end;
       sig = atom.sig;
     } else if (ch === "(") {
-      const atom = readGroupAtom(source, i);
+      const atom = readGroupAtom(source, i, unicodeSets);
       end = atom.end;
       sig = atom.sig;
       zeroWidth = atom.zeroWidth;

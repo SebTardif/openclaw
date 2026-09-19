@@ -362,4 +362,27 @@ describe("safe regex", () => {
       "unsafe-nested-repetition",
     );
   });
+
+  it("rejects overlapping alternatives hidden by malformed control escapes", () => {
+    expect(compileSafeRegexDetailed("^(\\c|\\\\c\\\\c)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\c|\\\\c\\\\c)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects overlapping alternatives hidden by input-boundary assertions", () => {
+    expect(compileSafeRegexDetailed("^(\\n^a|\\na\\na)+Z", "m").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\n^a|\\na\\na)+Z", "m").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects overlapping nested v-mode character classes", () => {
+    expect(compileSafeRegexDetailed("^([[a]b]|aa)+$", "v").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^([[a]b]|aa)+$", "v").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
 });

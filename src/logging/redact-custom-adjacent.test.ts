@@ -133,4 +133,22 @@ describe("custom adjacent-class redaction", () => {
     });
     expect(output).toContain(secret);
   });
+
+  it("drops malformed control-escape overlapping custom redaction alternatives", () => {
+    const secret = "\\c\\cX";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["(\\c|\\\\c\\\\c)+"],
+    });
+    expect(output).toContain(secret);
+  });
+
+  it("drops multiline-anchor overlapping custom redaction alternatives", () => {
+    const secret = "\na\naZ";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["/(\\n^a|\\na\\na)+Z/m"],
+    });
+    expect(output).toContain(secret);
+  });
 });
