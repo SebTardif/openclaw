@@ -25,6 +25,7 @@ type ParseFrame = {
   lastToken: TokenState | null;
   containsRepetition: boolean;
   hasAlternation: boolean;
+  assertion: boolean;
   branchMinLength: number;
   branchMaxLength: number;
   altMinLength: number | null;
@@ -35,7 +36,7 @@ type ParseFrame = {
 
 type PatternToken =
   | { kind: "simple-token"; sig: string }
-  | { kind: "group-open" }
+  | { kind: "group-open"; assertion: boolean }
   | { kind: "group-close" }
   | { kind: "alternation" }
   | { kind: "quantifier"; quantifier: QuantifierRead };
@@ -65,6 +66,7 @@ function createParseFrame(): ParseFrame {
     lastToken: null,
     containsRepetition: false,
     hasAlternation: false,
+    assertion: false,
     branchMinLength: 0,
     branchMaxLength: 0,
     altMinLength: null,
@@ -174,34 +176,37 @@ function readQuantifier(source: string, index: number): QuantifierRead | null {
 function consumeGroupPrefix(
   source: string,
   openIndex: number,
-): { nextIndex: number; unknown: boolean } {
+): { nextIndex: number; unknown: boolean; assertion: boolean } {
   const question = openIndex + 1;
   if (source[question] !== "?") {
-    return { nextIndex: openIndex + 1, unknown: false };
+    return { nextIndex: openIndex + 1, unknown: false, assertion: false };
   }
   const after = source[question + 1];
-  if (after === ":" || after === "=" || after === "!") {
-    return { nextIndex: question + 2, unknown: false };
+  if (after === ":") {
+    return { nextIndex: question + 2, unknown: false, assertion: false };
+  }
+  if (after === "=" || after === "!") {
+    return { nextIndex: question + 2, unknown: false, assertion: true };
   }
   if (after === "<") {
     const look = source[question + 2];
     if (look === "=" || look === "!") {
-      return { nextIndex: question + 3, unknown: false };
+      return { nextIndex: question + 3, unknown: false, assertion: true };
     }
     const nameEnd = source.indexOf(">", question + 2);
     if (nameEnd !== -1) {
-      return { nextIndex: nameEnd + 1, unknown: false };
+      return { nextIndex: nameEnd + 1, unknown: false, assertion: false };
     }
-    return { nextIndex: question + 1, unknown: true };
+    return { nextIndex: question + 1, unknown: true, assertion: false };
   }
   let i = question + 1;
   while (i < source.length && /[a-zA-Z-]/.test(source[i] ?? "")) {
     i += 1;
   }
   if (source[i] === ":") {
-    return { nextIndex: i + 1, unknown: false };
+    return { nextIndex: i + 1, unknown: false, assertion: false };
   }
-  return { nextIndex: question + 1, unknown: true };
+  return { nextIndex: question + 1, unknown: true, assertion: false };
 }
 
 function tokenizePattern(source: string): PatternToken[] {
@@ -225,8 +230,8 @@ function tokenizePattern(source: string): PatternToken[] {
     }
 
     if (ch === "(") {
-      tokens.push({ kind: "group-open" });
       const prefix = consumeGroupPrefix(source, i);
+      tokens.push({ kind: "group-open", assertion: prefix.assertion });
       if (prefix.unknown) {
         tokens.push({ kind: "simple-token", sig: "." });
       }
@@ -294,13 +299,25 @@ function analyzeTokensForNestedRepetition(
     }
 
     if (token.kind === "group-open") {
-      frames.push(createParseFrame());
+      const frame = createParseFrame();
+      frame.assertion = token.assertion;
+      frames.push(frame);
       continue;
     }
 
     if (token.kind === "group-close") {
       if (frames.length > 1) {
         const frame = frames.pop() as ParseFrame;
+        if (frame.assertion) {
+          emitToken({
+            containsRepetition: frame.containsRepetition,
+            hasAmbiguousAlternation: false,
+            minLength: 0,
+            maxLength: 0,
+            firstAtoms: [],
+          });
+          continue;
+        }
         if (frame.hasAlternation) {
           recordAlternative(frame);
         }
@@ -544,10 +561,12 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
     }
 
     if (unbounded) {
-      if (pending !== null && atomsCanMatchSamePrefix(pending, sig, foldCase)) {
-        return true;
+      if (!zeroWidth) {
+        if (pending !== null && atomsCanMatchSamePrefix(pending, sig, foldCase)) {
+          return true;
+        }
+        pending = sig;
       }
-      pending = sig;
       continue;
     }
     if (!zeroWidth) {

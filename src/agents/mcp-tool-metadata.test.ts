@@ -314,6 +314,58 @@ describe("createMcpJsonSchemaValidator patternProperties preflight", () => {
     expect(validate({ ac: "ok", bbc: "ok" }).valid).toBe(true);
   });
 
+  it("rejects named backreferences on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^(?<x>a)(\\k<x>|aa)+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("rejects class-backspace overlap on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^([\\b]|\\x08\\x08)+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("rejects lookahead-hidden overlapping alternatives on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^((?!b)a|aaaa)+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
+  it("accepts deterministic groups that share a first character on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    const validate = factory.getValidator<{ abac?: string }>({
+      $schema: DRAFT,
+      type: "object",
+      patternProperties: {
+        "^(ab)+(ac)+$": { type: "string" },
+      },
+      additionalProperties: true,
+    });
+    expect(validate({ abac: "ok" }).valid).toBe(true);
+  });
+
   it("compiles empty JSON Schema patternProperties on the MCP entrypoint", () => {
     const factory = createMcpJsonSchemaValidator();
     const validate = factory.getValidator<{ x?: { mode?: string } }>({
