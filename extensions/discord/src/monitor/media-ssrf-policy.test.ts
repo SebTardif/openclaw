@@ -12,11 +12,10 @@ describe("resolveDiscordCdnPolicy", () => {
     expect(resolved.dangerouslyAllowPrivateNetwork).not.toBe(true);
   });
 
-  it("merges caller hostnames without inheriting browser private-network overrides", () => {
+  it("merges caller hostnames without inheriting broad private-network overrides", () => {
     const resolved = resolveDiscordCdnPolicy({
       allowPrivateNetwork: true,
       dangerouslyAllowPrivateNetwork: true,
-      allowIpv6UniqueLocalRange: true,
       hostnameAllowlist: ["assets.example.com"],
       allowedHostnames: ["assets.example.com"],
     });
@@ -28,5 +27,18 @@ describe("resolveDiscordCdnPolicy", () => {
       expect.arrayContaining(["assets.example.com", "cdn.discordapp.com"]),
     );
     expect(resolved.allowedHostnames).toEqual(expect.arrayContaining(["assets.example.com"]));
+  });
+
+  it("preserves caller allowIpv6UniqueLocalRange for fake-ip proxy stacks", () => {
+    const resolved = resolveDiscordCdnPolicy({
+      allowPrivateNetwork: true,
+      dangerouslyAllowPrivateNetwork: true,
+      allowIpv6UniqueLocalRange: true,
+      hostnameAllowlist: ["assets.example.com"],
+    });
+    expect(resolved.allowPrivateNetwork).not.toBe(true);
+    expect(resolved.dangerouslyAllowPrivateNetwork).not.toBe(true);
+    expect(resolved.allowIpv6UniqueLocalRange).toBe(true);
+    expect(resolved.allowRfc2544BenchmarkRange).toBe(true);
   });
 });

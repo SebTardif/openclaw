@@ -38,7 +38,7 @@ export function resolveDiscordCdnPolicy(policy?: SsrFPolicy): SsrFPolicy {
   const {
     allowPrivateNetwork: _allowPrivateNetwork,
     dangerouslyAllowPrivateNetwork: _dangerouslyAllowPrivateNetwork,
-    allowIpv6UniqueLocalRange: _allowIpv6UniqueLocalRange,
+    allowIpv6UniqueLocalRange: callerAllowIpv6UniqueLocalRange,
     hostnameAllowlist: _hostnameAllowlist,
     allowedHostnames: _allowedHostnames,
     allowRfc2544BenchmarkRange: _allowRfc2544BenchmarkRange,
@@ -52,5 +52,9 @@ export function resolveDiscordCdnPolicy(policy?: SsrFPolicy): SsrFPolicy {
     allowRfc2544BenchmarkRange:
       Boolean(DISCORD_MEDIA_SSRF_POLICY.allowRfc2544BenchmarkRange) ||
       Boolean(policy.allowRfc2544BenchmarkRange),
+    // IPv6 fake-ip exception (fc00::/7) is the counterpart to RFC2544, not private LAN.
+    allowIpv6UniqueLocalRange:
+      Boolean(DISCORD_MEDIA_SSRF_POLICY.allowIpv6UniqueLocalRange) ||
+      Boolean(callerAllowIpv6UniqueLocalRange),
   };
 }
