@@ -132,6 +132,12 @@ export function isSignalManagedNativeConnectionUrlForBind(
   if (connectionUrl.protocol !== "http:") {
     return false;
   }
+  // Path-prefixed URLs (http://127.0.0.1:8082/signal) are independent proxies. signal-cli
+  // serves only root /api/v1/*, so inferring or rewriting the daemon onto that path is wrong.
+  const connectionPath = connectionUrl.pathname.replace(/\/+$/, "") || "/";
+  if (connectionPath !== "/") {
+    return false;
+  }
   const connectionPort = connectionUrl.port ? Number.parseInt(connectionUrl.port, 10) : 80;
   const bindPort = transport.httpPort ?? DEFAULT_SIGNAL_MANAGED_NATIVE_PORT;
   if (connectionPort !== bindPort) {

@@ -51,7 +51,7 @@ describe("preferredManagedNativePortFromConnectionUrl", () => {
     ).toBeUndefined();
   });
 
-  it("does not prefer remote, https, or cross-family endpoints", () => {
+  it("does not prefer remote, https, path-prefixed, or cross-family endpoints", () => {
     expect(
       preferredManagedNativePortFromConnectionUrl({
         kind: "managed-native",
@@ -62,6 +62,12 @@ describe("preferredManagedNativePortFromConnectionUrl", () => {
       preferredManagedNativePortFromConnectionUrl({
         kind: "managed-native",
         url: "https://127.0.0.1:8082",
+      }),
+    ).toBeUndefined();
+    expect(
+      preferredManagedNativePortFromConnectionUrl({
+        kind: "managed-native",
+        url: "http://127.0.0.1:8082/signal",
       }),
     ).toBeUndefined();
     expect(
@@ -93,6 +99,15 @@ describe("preferredManagedNativeAllocationPort", () => {
       }),
     ).toBe(8082);
   });
+
+  it("does not use a path-prefixed local proxy URL as the allocation port", () => {
+    expect(
+      preferredManagedNativeAllocationPort({
+        kind: "managed-native",
+        url: "http://127.0.0.1:8082/signal",
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("independentLocalPortFromManagedNativeConnectionUrl", () => {
@@ -118,6 +133,15 @@ describe("independentLocalPortFromManagedNativeConnectionUrl", () => {
         url: "http://signal.example.com:8082",
       }),
     ).toBeUndefined();
+  });
+
+  it("reserves a path-prefixed local proxy URL independently of the daemon bind", () => {
+    expect(
+      independentLocalPortFromManagedNativeConnectionUrl({
+        kind: "managed-native",
+        url: "http://127.0.0.1:8082/signal",
+      }),
+    ).toBe(8082);
   });
 });
 
@@ -164,5 +188,17 @@ describe("assignSignalManagedNativePort", () => {
     );
     expect(next.httpPort).toBe(8080);
     expect(next.url).toBe("http://signal.example.com:8082");
+  });
+
+  it("keeps a path-prefixed proxy URL independent when fallback allocates a different port", () => {
+    const next = assignSignalManagedNativePort(
+      {
+        kind: "managed-native",
+        url: "http://127.0.0.1:8082/signal",
+      },
+      8080,
+    );
+    expect(next.httpPort).toBe(8080);
+    expect(next.url).toBe("http://127.0.0.1:8082/signal");
   });
 });

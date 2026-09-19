@@ -438,6 +438,26 @@ describe("resolveSignalAccount", () => {
     });
   });
 
+  it("does not bind autoStart to a path-prefixed local proxy URL port", () => {
+    const cfg = {
+      channels: {
+        signal: {
+          transport: {
+            kind: "managed-native",
+            url: "http://127.0.0.1:8082/signal",
+          },
+        },
+      },
+    } as never;
+
+    expect(resolveSignalAccount({ cfg }).transport).toMatchObject({
+      kind: "managed-native",
+      baseUrl: "http://127.0.0.1:8082/signal",
+      httpHost: "127.0.0.1",
+      httpPort: 8080,
+    });
+  });
+
   it("prefers explicit httpPort over a divergent local connection URL port", () => {
     const cfg = {
       channels: {

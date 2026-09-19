@@ -405,6 +405,33 @@ describe("signal transport compatibility", () => {
     });
   });
 
+  it("keeps a path-prefixed local httpUrl independent of the migrated managed bind", () => {
+    const result = normalizeCompatibilityConfig({
+      cfg: signalConfig({
+        apiMode: "native",
+        autoStart: true,
+        accounts: {
+          work: {
+            account: "+15555550124",
+            httpUrl: "http://127.0.0.1:8082/signal",
+          },
+        },
+      }),
+    });
+    const reloaded = normalizeCompatibilityConfig({ cfg: result.config });
+
+    expect(result.config.channels?.signal?.accounts?.work?.transport).toMatchObject({
+      kind: "managed-native",
+      url: "http://127.0.0.1:8082/signal",
+      httpPort: 8080,
+    });
+    expect(reloaded.config.channels?.signal?.accounts?.work?.transport).toMatchObject({
+      kind: "managed-native",
+      url: "http://127.0.0.1:8082/signal",
+      httpPort: 8080,
+    });
+  });
+
   it("rewrites a named URL-only httpUrl when another account already claimed 8082", () => {
     const result = normalizeCompatibilityConfig({
       cfg: signalConfig({
