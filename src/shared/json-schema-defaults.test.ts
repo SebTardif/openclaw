@@ -508,6 +508,26 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     expect(result["\u00a0"].mode).toBeUndefined();
   });
 
+  it("skips unparsed alternating groups adjacent to overlapping repetitions", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(a|b)+b+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { abb: {}, aa: {} }) as {
+      abb: { mode?: string };
+      aa: { mode?: string };
+    };
+    expect(result.abb.mode).toBeUndefined();
+    expect(result.aa.mode).toBeUndefined();
+  });
+
   it("skips semantically overlapping adjacent patternProperties", () => {
     const schema = {
       type: "object",

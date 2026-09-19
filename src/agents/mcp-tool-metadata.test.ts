@@ -262,6 +262,19 @@ describe("createMcpJsonSchemaValidator patternProperties preflight", () => {
     ).toThrow(/unsafe patternProperties pattern rejected/);
   });
 
+  it("rejects unparsed alternating groups adjacent to overlapping repetitions on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^(a|b)+b+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
   it("compiles empty JSON Schema patternProperties on the MCP entrypoint", () => {
     const factory = createMcpJsonSchemaValidator();
     const validate = factory.getValidator<{ x?: { mode?: string } }>({

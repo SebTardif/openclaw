@@ -245,7 +245,7 @@ function unwrapSimpleGroup(sig: string): string {
 
 function atomLanguage(sig: string, foldCase: boolean): AtomLanguage {
   const atom = unwrapSimpleGroup(sig);
-  if (!atom || atom === ".") {
+  if (!atom || atom === "." || atom.startsWith("(")) {
     return { kind: "any" };
   }
   if (atom.startsWith("[")) {

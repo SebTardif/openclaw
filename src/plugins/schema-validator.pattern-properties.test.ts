@@ -204,6 +204,22 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("rejects unparsed alternating groups adjacent to overlapping repetitions", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.unparsed-group-adjacent",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(a|b)+b+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { abb: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
   it("applies empty patternProperties defaults on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.empty",

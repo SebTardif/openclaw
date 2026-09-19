@@ -394,7 +394,7 @@ export function compileSafeRegexDetailed(source: string, flags = ""): SafeRegexC
   }
 
   let result: SafeRegexCompileResult;
-  if (hasNestedRepetition(trimmed)) {
+  if (hasNestedRepetition(trimmed, { distinguishDisjointAlternatives: true, flags })) {
     result = { regex: null, source: trimmed, flags, reason: "unsafe-nested-repetition" };
   } else {
     try {
