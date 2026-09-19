@@ -30,4 +30,16 @@ describe("custom adjacent-class redaction", () => {
     });
     expect(output).toContain(secret);
   });
+
+  it("keeps lookahead-prefixed deterministic custom redaction alternatives active", () => {
+    const secret = "corp-ab";
+    const longer = "corp-acde";
+    const output = redactSensitiveText(`id=${secret} also=${longer}`, {
+      mode: "tools",
+      patterns: ["corp-((?=a)ab|acde)+"],
+    });
+    expect(output).not.toContain(secret);
+    expect(output).not.toContain(longer);
+    expect(output).toContain("corp-");
+  });
 });

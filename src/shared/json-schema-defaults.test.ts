@@ -644,6 +644,62 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     expect(result.aaaa.mode).toBeUndefined();
   });
 
+  it("skips braced unicode identity-plus-quantifier without u", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(\\u{2}|u)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { uu: {}, u: {} }) as {
+      uu: { mode?: string };
+      u: { mode?: string };
+    };
+    expect(result.uu.mode).toBeUndefined();
+    expect(result.u.mode).toBeUndefined();
+  });
+
+  it("skips control-escape alternatives that share a decoded prefix", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(\\cA|\\x01\\x01)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { "\x01": {} }) as {
+      "\x01": { mode?: string };
+    };
+    expect(result["\x01"].mode).toBeUndefined();
+  });
+
+  it("skips nested alternative sequences that overlap adjacent groups", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^((ab|cd)e)+(abe)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { abeabe: {} }) as {
+      abeabe: { mode?: string };
+    };
+    expect(result.abeabe.mode).toBeUndefined();
+  });
+
   it("applies defaults through deterministic groups that share a first character", () => {
     const schema = {
       type: "object",

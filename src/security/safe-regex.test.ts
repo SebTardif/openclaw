@@ -211,4 +211,34 @@ describe("safe regex", () => {
     expect(compiled.regex?.test("ababacab")).toBe(false);
     expect(compiled.regex?.test("ab")).toBe(false);
   });
+
+  it("rejects braced unicode escapes that are identity-plus-quantifier without u", () => {
+    expect(compileSafeRegexDetailed("^(\\u{2}|u)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\u{2}|u)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects control-escape alternatives that share a decoded prefix", () => {
+    expect(compileSafeRegexDetailed("^(\\cA|\\x01\\x01)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\cA|\\x01\\x01)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("keeps lookahead-prefixed deterministic custom redaction alternatives", () => {
+    const compiled = compileSafeRegexDetailed("corp-((?=a)ab|acde)+");
+    expect(compiled.reason).toBeNull();
+    expect(compiled.regex?.test("corp-ab")).toBe(true);
+    expect(compiled.regex?.test("corp-acde")).toBe(true);
+    expect(compiled.regex?.test("corp-aa")).toBe(false);
+  });
+
+  it("rejects nested alternatives whose complete sequences overlap adjacent groups", () => {
+    expect(compileJsonSchemaPatternRegexDetailed("^((ab|cd)e)+(abe)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
 });

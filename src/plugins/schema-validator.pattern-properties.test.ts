@@ -330,6 +330,54 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("rejects braced unicode identity-plus-quantifier without u on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.unicode-brace-identity",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\u{2}|u)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { uu: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects control-escape overlap on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.control-escape",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\cA|\\x01\\x01)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "\x01": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects nested alternative sequences that overlap adjacent groups on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.nested-alt-sequence",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^((ab|cd)e)+(abe)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { abeabe: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
   it("accepts deterministic groups that share a first character on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.shared-first-char",
