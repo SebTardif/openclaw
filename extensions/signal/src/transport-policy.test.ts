@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import type { SignalTransportConfig } from "./account-types.js";
 import {
   assignSignalManagedNativePort,
+  independentLocalPortFromManagedNativeConnectionUrl,
+  preferredManagedNativeAllocationPort,
   preferredManagedNativePortFromConnectionUrl,
 } from "./transport-policy.js";
 
@@ -67,6 +69,53 @@ describe("preferredManagedNativePortFromConnectionUrl", () => {
         kind: "managed-native",
         url: "http://[::1]:8082",
         httpHost: "127.0.0.1",
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe("preferredManagedNativeAllocationPort", () => {
+  it("uses explicit httpPort before a local connection URL port", () => {
+    expect(
+      preferredManagedNativeAllocationPort({
+        kind: "managed-native",
+        url: "http://127.0.0.1:8082",
+        httpPort: 9090,
+      }),
+    ).toBe(9090);
+  });
+
+  it("uses a bind-aligned local connection URL when httpPort is omitted", () => {
+    expect(
+      preferredManagedNativeAllocationPort({
+        kind: "managed-native",
+        url: "http://127.0.0.1:8082",
+      }),
+    ).toBe(8082);
+  });
+});
+
+describe("independentLocalPortFromManagedNativeConnectionUrl", () => {
+  it("does not reserve a URL-only local bind as an independent endpoint", () => {
+    expect(
+      independentLocalPortFromManagedNativeConnectionUrl({
+        kind: "managed-native",
+        url: "http://127.0.0.1:8082",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("reserves local HTTPS and remote endpoints independently of the daemon bind", () => {
+    expect(
+      independentLocalPortFromManagedNativeConnectionUrl({
+        kind: "managed-native",
+        url: "https://127.0.0.1:8082",
+      }),
+    ).toBe(8082);
+    expect(
+      independentLocalPortFromManagedNativeConnectionUrl({
+        kind: "managed-native",
+        url: "http://signal.example.com:8082",
       }),
     ).toBeUndefined();
   });

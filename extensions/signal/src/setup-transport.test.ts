@@ -267,6 +267,78 @@ describe("prepareSignalManagedNativeTransport", () => {
     });
   });
 
+  it("prefers a free URL-only local port instead of rewriting it to 8080", () => {
+    const cfg = {
+      channels: {
+        signal: {
+          account: "+15555550123",
+          transport: {
+            kind: "managed-native",
+            url: "http://127.0.0.1:8082",
+          },
+        },
+      },
+    } as const;
+
+    const transport = prepareSignalManagedNativeTransport({
+      cfg: cfg as never,
+      accountId: "default",
+    });
+    const next = writeSignalAccountTransport({
+      cfg: cfg as never,
+      accountId: "default",
+      transport,
+    });
+
+    expect(transport).toEqual({
+      kind: "managed-native",
+      url: "http://127.0.0.1:8082",
+      httpHost: "127.0.0.1",
+      httpPort: 8082,
+    });
+    expect(resolveSignalAccount({ cfg: next, accountId: "default" }).transport).toMatchObject({
+      kind: "managed-native",
+      baseUrl: "http://127.0.0.1:8082",
+      httpPort: 8082,
+    });
+  });
+
+  it("rewrites a URL-only local port when a sibling already reserved it", () => {
+    const cfg = {
+      channels: {
+        signal: {
+          accounts: {
+            sibling: {
+              account: "+15555550123",
+              transport: { kind: "external-native", url: "http://127.0.0.1:8082" },
+            },
+            work: {
+              account: "+15555550124",
+              transport: { kind: "managed-native", url: "http://127.0.0.1:8082" },
+            },
+          },
+        },
+      },
+    } as const;
+
+    const transport = prepareSignalManagedNativeTransport({
+      cfg: cfg as never,
+      accountId: "work",
+    });
+    const next = writeSignalAccountTransport({
+      cfg: cfg as never,
+      accountId: "work",
+      transport,
+    });
+
+    expect(transport.httpPort).not.toBe(8082);
+    expect(transport.url).toBe(`http://127.0.0.1:${transport.httpPort}`);
+    expect(resolveSignalAccount({ cfg: next, accountId: "work" }).transport).toMatchObject({
+      httpPort: transport.httpPort,
+      baseUrl: `http://127.0.0.1:${transport.httpPort}`,
+    });
+  });
+
   it("keeps an aligned managed connection URL on the allocated bind port", () => {
     const cfg = {
       channels: {

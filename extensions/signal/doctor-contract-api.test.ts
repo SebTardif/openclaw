@@ -378,6 +378,61 @@ describe("signal transport compatibility", () => {
     });
   });
 
+  it("keeps a free URL-only local httpUrl as the migrated managed bind", () => {
+    const result = normalizeCompatibilityConfig({
+      cfg: signalConfig({
+        apiMode: "native",
+        autoStart: true,
+        accounts: {
+          work: {
+            account: "+15555550124",
+            httpUrl: "http://127.0.0.1:8082",
+          },
+        },
+      }),
+    });
+    const reloaded = normalizeCompatibilityConfig({ cfg: result.config });
+
+    expect(result.config.channels?.signal?.accounts?.work?.transport).toMatchObject({
+      kind: "managed-native",
+      url: "http://127.0.0.1:8082",
+      httpPort: 8082,
+    });
+    expect(reloaded.config.channels?.signal?.accounts?.work?.transport).toMatchObject({
+      kind: "managed-native",
+      url: "http://127.0.0.1:8082",
+      httpPort: 8082,
+    });
+  });
+
+  it("rewrites a named URL-only httpUrl when another account already claimed 8082", () => {
+    const result = normalizeCompatibilityConfig({
+      cfg: signalConfig({
+        apiMode: "native",
+        autoStart: true,
+        account: "+15555550123",
+        httpUrl: "http://127.0.0.1:8082",
+        accounts: {
+          work: {
+            account: "+15555550124",
+            httpUrl: "http://127.0.0.1:8082",
+          },
+        },
+      }),
+    });
+    const work = result.config.channels?.signal?.accounts?.work?.transport as
+      | { kind?: string; url?: string; httpPort?: number }
+      | undefined;
+
+    expect(result.config.channels?.signal?.transport).toMatchObject({
+      kind: "managed-native",
+      url: "http://127.0.0.1:8082",
+    });
+    expect(work?.kind).toBe("managed-native");
+    expect(work?.httpPort).not.toBe(8082);
+    expect(work?.url).toBe(`http://127.0.0.1:${work?.httpPort}`);
+  });
+
   it("keeps migrated managed connection URLs aligned with reassigned bind ports", () => {
     const result = normalizeCompatibilityConfig({
       cfg: signalConfig({

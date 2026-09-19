@@ -90,6 +90,36 @@ export function preferredManagedNativePortFromConnectionUrl(
   return localPort;
 }
 
+export function preferredManagedNativeAllocationPort(
+  transport: SignalTransportConfig,
+): number | undefined {
+  if (transport.kind !== "managed-native") {
+    return undefined;
+  }
+  if (transport.httpPort !== undefined) {
+    return transport.httpPort;
+  }
+  return preferredManagedNativePortFromConnectionUrl(transport);
+}
+
+export function independentLocalPortFromManagedNativeConnectionUrl(
+  transport: SignalTransportConfig,
+): number | undefined {
+  if (transport.kind !== "managed-native" || !transport.url) {
+    return undefined;
+  }
+  const preferredBindPort = preferredManagedNativePortFromConnectionUrl(transport);
+  const effectiveForBindCheck =
+    preferredBindPort === undefined ? transport : { ...transport, httpPort: preferredBindPort };
+  if (isSignalManagedNativeConnectionUrlForBind(effectiveForBindCheck)) {
+    return undefined;
+  }
+  const localConnectionPort = resolveLocalSignalTransportPort(transport.url);
+  return localConnectionPort !== undefined && isValidSignalManagedNativePort(localConnectionPort)
+    ? localConnectionPort
+    : undefined;
+}
+
 export function isSignalManagedNativeConnectionUrlForBind(
   transport: SignalTransportConfig,
 ): boolean {

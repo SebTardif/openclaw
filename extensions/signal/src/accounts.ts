@@ -14,8 +14,9 @@ import {
   allocateSignalManagedNativePort,
   assignSignalManagedNativePort,
   DEFAULT_SIGNAL_MANAGED_NATIVE_PORT,
+  independentLocalPortFromManagedNativeConnectionUrl,
   isSignalManagedNativeConnectionUrlForBind,
-  preferredManagedNativePortFromConnectionUrl,
+  preferredManagedNativeAllocationPort,
   resolveLocalSignalTransportPort,
 } from "./transport-policy.js";
 import { buildSignalTransportHttpUrl } from "./transport-url.js";
@@ -178,17 +179,10 @@ function resolveSignalManagedNativePort(params: {
       } else {
         implicitManagedAccountIds.push(accountId);
       }
-      // Prefer treating a local connection URL as this account's bind when no
-      // explicit httpPort is set, so autoStart does not bind 8080 while the
-      // client probes a non-default httpUrl port (see #116165).
-      const preferredBindPort = preferredManagedNativePortFromConnectionUrl(transport);
-      const effectiveForBindCheck =
-        preferredBindPort === undefined ? transport : { ...transport, httpPort: preferredBindPort };
-      if (transport.url && !isSignalManagedNativeConnectionUrlForBind(effectiveForBindCheck)) {
-        const localConnectionPort = resolveLocalSignalTransportPort(transport.url);
-        if (localConnectionPort !== undefined) {
-          reservedPorts.add(localConnectionPort);
-        }
+      const independentConnectionPort =
+        independentLocalPortFromManagedNativeConnectionUrl(transport);
+      if (independentConnectionPort !== undefined) {
+        reservedPorts.add(independentConnectionPort);
       }
       continue;
     }
@@ -197,7 +191,7 @@ function resolveSignalManagedNativePort(params: {
 
   for (const accountId of implicitManagedAccountIds) {
     const accountConfig = resolveSignalAccountConfig(params.cfg, accountId);
-    const preferredPort = preferredManagedNativePortFromConnectionUrl(
+    const preferredPort = preferredManagedNativeAllocationPort(
       accountConfig.transport ?? { kind: "managed-native" },
     );
     const port = allocateSignalManagedNativePort({
