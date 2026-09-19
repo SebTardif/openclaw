@@ -1211,9 +1211,7 @@ describe("iMessage monitor last-route updates", () => {
       },
     });
 
-    await vi.waitFor(() => {
-      expect(readChannelAllowFromStoreMock).toHaveBeenCalledTimes(1);
-    });
+    expect(readChannelAllowFromStoreMock).not.toHaveBeenCalled();
     expect(runtimeErrorMock).not.toHaveBeenCalled();
     await vi.waitFor(() => {
       expect(getSessionEntry({ storePath, sessionKey })).toMatchObject({

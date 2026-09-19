@@ -21,6 +21,7 @@ import {
 } from "openclaw/plugin-sdk/channel-outbound";
 import { createChannelPairingChallengeIssuer } from "openclaw/plugin-sdk/channel-pairing";
 import {
+  resolveChannelGroupPolicy,
   resolveChannelGroups,
   resolveChannelGroupsConfigPath,
 } from "openclaw/plugin-sdk/channel-policy";
@@ -358,6 +359,41 @@ async function waitForWatchSubscribeRetryDelay(params: {
     };
     params.abortSignal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function isIMessagePairingStoreRequired(params: {
+  message: IMessagePayload;
+  cfg: OpenClawConfig;
+  accountId: string;
+  dmPolicy: string;
+  groupAllowFrom: string[];
+  allowFrom: string[];
+  allowLegacyConversationAllowFromForGroup?: boolean;
+}): boolean {
+  // Shared ingress skips pairing-store reads for open/allowlist DMs and groups.
+  if (params.dmPolicy === "open" || params.dmPolicy === "allowlist") {
+    return false;
+  }
+  if (params.message.is_group) {
+    return false;
+  }
+  const chatId = params.message.chat_id;
+  if (chatId === undefined || chatId === null) {
+    return true;
+  }
+  const groupAllowFromWithLegacy = mergeIMessageGroupAllowFromWithLegacyChatTargets({
+    groupAllowFrom: params.groupAllowFrom,
+    allowFrom: params.allowFrom,
+    allowLegacyConversationTargets: params.allowLegacyConversationAllowFromForGroup,
+  });
+  const groupListPolicy = resolveChannelGroupPolicy({
+    cfg: params.cfg,
+    channel: "imessage",
+    accountId: params.accountId,
+    groupId: String(chatId),
+    hasGroupAllowFrom: groupAllowFromWithLegacy.length > 0,
+  });
+  return !(groupListPolicy.allowlistEnabled && groupListPolicy.groupConfig);
 }
 
 export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): Promise<void> {
@@ -768,19 +804,17 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
       effectiveAttachmentRoots,
     } = resolveIMessageInboundBodyText(message);
 
-    let storeAllowFrom: string[];
-    try {
-      storeAllowFrom = await readChannelAllowFromStore(
-        "imessage",
-        process.env,
-        accountInfo.accountId,
-      );
-    } catch (err) {
-      // A store I/O failure is not "no paired senders". Substituting [] would
-      // issue pairing challenges to already-paired people.
-      runtime.error?.(`imessage: pairing-store read failed; dropping inbound: ${String(err)}`);
-      throw err;
-    }
+    const storeAllowFrom = isIMessagePairingStoreRequired({
+      message,
+      cfg,
+      accountId: accountInfo.accountId,
+      dmPolicy,
+      groupAllowFrom,
+      allowFrom,
+      allowLegacyConversationAllowFromForGroup,
+    })
+      ? await readChannelAllowFromStore("imessage", process.env, accountInfo.accountId)
+      : [];
     const isQuestionReaction = hasIMessageQuestionReactionTarget({
       accountId: accountInfo.accountId,
       message,

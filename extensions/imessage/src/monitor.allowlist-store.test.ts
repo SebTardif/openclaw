@@ -115,6 +115,77 @@ async function runChannelInboundEventForAllowlistStoreTest(params: RunChannelInb
   return result;
 }
 
+type InboundStoreCase = {
+  guid: string;
+  isGroup?: boolean;
+  chatId?: number;
+  imessage: Record<string, unknown>;
+};
+
+type InboundStoreRuntime = {
+  error: ReturnType<typeof vi.fn>;
+  exit: ReturnType<typeof vi.fn>;
+  log: ReturnType<typeof vi.fn>;
+};
+
+async function runInboundStoreCase(params: {
+  message: InboundStoreCase;
+  runtime?: InboundStoreRuntime;
+}) {
+  const runtime = params.runtime ?? { error: vi.fn(), exit: vi.fn(), log: vi.fn() };
+  const sendClient = {
+    request: vi.fn(async () => ({ guid: "pairing-reply-guid" })),
+    stop: vi.fn(async () => {}),
+  };
+  let onNotification:
+    | ((message: { method: string; params: unknown }) => void | Promise<void>)
+    | undefined;
+  const watchClient = {
+    request: vi.fn(async () => ({ subscription: 1 })),
+    waitForClose: vi.fn(async () => {
+      await onNotification?.({
+        method: "message",
+        params: {
+          message: {
+            id: 1,
+            guid: params.message.guid,
+            chat_id: params.message.chatId ?? 123,
+            chat_identifier: "+15550001111",
+            sender: "+15550001111",
+            is_from_me: false,
+            is_group: params.message.isGroup ?? false,
+            text: "hello from a paired sender",
+            created_at: new Date().toISOString(),
+          },
+        },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    }),
+    stop: vi.fn(async () => {}),
+  };
+  createIMessageRpcClientMock.mockImplementation(async (clientParams) => {
+    if (clientParams?.onNotification) {
+      onNotification = clientParams.onNotification;
+      return watchClient as never;
+    }
+    return sendClient as never;
+  });
+
+  await monitorIMessageProvider({
+    config: {
+      channels: {
+        imessage: params.message.imessage,
+      },
+      messages: { inbound: { debounceMs: 0 } },
+      session: { mainKey: "main" },
+    } as never,
+    runtime,
+  });
+
+  return { runtime, sendClient };
+}
+
 describe("iMessage inbound pairing-store read failures", () => {
   beforeEach(() => {
     vi.spyOn(channelInbound, "runChannelInboundEvent").mockImplementation(
@@ -123,7 +194,7 @@ describe("iMessage inbound pairing-store read failures", () => {
     installIMessageStateRuntimeForTest();
     waitForTransportReadyMock.mockReset().mockResolvedValue(undefined);
     createIMessageRpcClientMock.mockReset();
-    readChannelAllowFromStoreMock.mockReset().mockResolvedValue([]);
+    readChannelAllowFromStoreMock.mockReset().mockRejectedValue(new Error("pairing db locked"));
     upsertChannelPairingRequestMock.mockReset();
     dispatchReplyWithBufferedBlockDispatcherMock.mockClear();
   });
@@ -133,58 +204,11 @@ describe("iMessage inbound pairing-store read failures", () => {
   });
 
   it("fails inbound when the pairing store cannot be read instead of treating the sender as unpaired", async () => {
-    readChannelAllowFromStoreMock.mockRejectedValueOnce(new Error("pairing db locked"));
-    const runtime = { error: vi.fn(), exit: vi.fn(), log: vi.fn() };
-    const sendClient = {
-      request: vi.fn(async () => ({ guid: "pairing-reply-guid" })),
-      stop: vi.fn(async () => {}),
-    };
-    let onNotification:
-      | ((message: { method: string; params: unknown }) => void | Promise<void>)
-      | undefined;
-    const watchClient = {
-      request: vi.fn(async () => ({ subscription: 1 })),
-      waitForClose: vi.fn(async () => {
-        await onNotification?.({
-          method: "message",
-          params: {
-            message: {
-              id: 1,
-              guid: "pairing-store-read-fail-guid-1",
-              chat_id: 123,
-              chat_identifier: "+15550001111",
-              sender: "+15550001111",
-              is_from_me: false,
-              is_group: false,
-              text: "hello from a paired sender",
-              created_at: new Date().toISOString(),
-            },
-          },
-        });
-        await Promise.resolve();
-        await Promise.resolve();
-      }),
-      stop: vi.fn(async () => {}),
-    };
-    createIMessageRpcClientMock.mockImplementation(async (params) => {
-      if (params?.onNotification) {
-        onNotification = params.onNotification;
-        return watchClient as never;
-      }
-      return sendClient as never;
-    });
-
-    await monitorIMessageProvider({
-      config: {
-        channels: {
-          imessage: {
-            dmPolicy: "pairing",
-          },
-        },
-        messages: { inbound: { debounceMs: 0 } },
-        session: { mainKey: "main" },
-      } as never,
-      runtime,
+    const { runtime, sendClient } = await runInboundStoreCase({
+      message: {
+        guid: "pairing-store-read-fail-guid-1",
+        imessage: { dmPolicy: "pairing" },
+      },
     });
 
     await vi.waitFor(() => expect(readChannelAllowFromStoreMock).toHaveBeenCalledTimes(1));
@@ -197,7 +221,42 @@ describe("iMessage inbound pairing-store read failures", () => {
     expect(sendClient.request).not.toHaveBeenCalled();
     expect(dispatchReplyWithBufferedBlockDispatcherMock).not.toHaveBeenCalled();
     expect(runtime.error.mock.calls.flat().map(String).join("\n")).toMatch(
-      /pairing-store read failed|inbound dispatch failed|pairing db locked/i,
+      /inbound dispatch failed|pairing db locked/i,
     );
+  });
+
+  it.each([
+    {
+      name: "open DM",
+      guid: "pairing-store-open-dm-guid-1",
+      imessage: { dmPolicy: "open", allowFrom: ["*"] },
+    },
+    {
+      name: "configured allowlist DM",
+      guid: "pairing-store-allowlist-dm-guid-1",
+      imessage: { dmPolicy: "allowlist", allowFrom: ["+15550001111"] },
+    },
+    {
+      name: "admitted group",
+      guid: "pairing-store-group-guid-1",
+      isGroup: true,
+      imessage: { dmPolicy: "pairing", groupPolicy: "open" },
+    },
+  ])("admits $name while the pairing store is unreadable", async (testCase) => {
+    const { runtime, sendClient } = await runInboundStoreCase({
+      message: {
+        guid: testCase.guid,
+        isGroup: testCase.isGroup,
+        imessage: testCase.imessage,
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(dispatchReplyWithBufferedBlockDispatcherMock).toHaveBeenCalledTimes(1),
+    );
+    expect(readChannelAllowFromStoreMock).not.toHaveBeenCalled();
+    expect(upsertChannelPairingRequestMock).not.toHaveBeenCalled();
+    expect(sendClient.request).not.toHaveBeenCalled();
+    expect(runtime.error).not.toHaveBeenCalled();
   });
 });
