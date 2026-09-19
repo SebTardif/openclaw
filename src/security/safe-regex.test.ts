@@ -289,4 +289,25 @@ describe("safe regex", () => {
     expect(compiled.regex?.test("corp-BCD")).toBe(true);
     expect(compiled.regex?.test("corp-xyz")).toBe(false);
   });
+
+  it("rejects overlapping alternatives hidden by zero-width word boundaries", () => {
+    expect(compileSafeRegexDetailed("^(a\\Bb|abab)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^(a\\Bb|abab)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects overlapping alternatives after a legacy octal leftover literal", () => {
+    expect(compileSafeRegexDetailed("^(\\1414c|a4ca4c)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\1414c|a4ca4c)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects overlapping alternatives inside inline case-flag groups", () => {
+    expect(compileSafeRegexDetailed("^((?i:a)|AA)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^((?i:a)|AA)+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
 });

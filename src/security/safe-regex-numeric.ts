@@ -60,3 +60,64 @@ export function escapeHasUnknownConsumedLength(
   }
   return classifyNumericEscape(body, options).kind === "backref";
 }
+
+export function isZeroWidthAssertionEscape(sig: string): boolean {
+  return sig === "\\b" || sig === "\\B";
+}
+
+function readLegacyOctalEnd(source: string, index: number): number {
+  const first = source[index + 1];
+  if (first === undefined || first < "0" || first > "7") {
+    return index + 1;
+  }
+  const maxDigits = first <= "3" ? 3 : 2;
+  let end = index + 2;
+  let taken = 1;
+  while (taken < maxDigits && end < source.length) {
+    const digit = source[end];
+    if (digit === undefined || digit < "0" || digit > "7") {
+      break;
+    }
+    end += 1;
+    taken += 1;
+  }
+  return end;
+}
+
+export function readNumericEscapeAtom(
+  source: string,
+  index: number,
+  options: { unicode?: boolean; capturingGroups?: number } = {},
+): { end: number; sig: string } {
+  if (source[index] !== "\\") {
+    return { end: index + 1, sig: source[index] ?? "" };
+  }
+  const next = source[index + 1];
+  if (next === undefined || next < "0" || next > "9") {
+    return { end: index + 2, sig: source.slice(index, index + 2) };
+  }
+  let end = index + 2;
+  while (end < source.length) {
+    const digit = source[end];
+    if (digit === undefined || digit < "0" || digit > "9") {
+      break;
+    }
+    end += 1;
+  }
+  const fullSig = source.slice(index, end);
+  if (options.unicode === true) {
+    return { end, sig: fullSig };
+  }
+  const classified = classifyNumericEscape(fullSig.slice(1), {
+    unicode: false,
+    capturingGroups: options.capturingGroups,
+  });
+  if (classified.kind === "backref") {
+    return { end, sig: fullSig };
+  }
+  const octalEnd = readLegacyOctalEnd(source, index);
+  if (octalEnd > index + 1) {
+    return { end: octalEnd, sig: source.slice(index, octalEnd) };
+  }
+  return { end: index + 2, sig: source.slice(index, index + 2) };
+}

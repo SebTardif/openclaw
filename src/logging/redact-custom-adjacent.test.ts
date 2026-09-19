@@ -52,4 +52,31 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain(secret);
     expect(output).toContain("corp-");
   });
+
+  it("drops word-boundary overlapping custom redaction alternatives", () => {
+    const secret = "ababX";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["(a\\Bb|abab)+"],
+    });
+    expect(output).toContain(secret);
+  });
+
+  it("drops leftover-octal overlapping custom redaction alternatives", () => {
+    const secret = "a4ca4cX";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["(\\1414c|a4ca4c)+"],
+    });
+    expect(output).toContain(secret);
+  });
+
+  it("drops inline case-flag overlapping custom redaction alternatives", () => {
+    const secret = "AAX";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["((?i:a)|AA)+"],
+    });
+    expect(output).toContain(secret);
+  });
 });

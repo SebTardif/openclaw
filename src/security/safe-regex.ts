@@ -9,7 +9,10 @@ import {
   sequenceHasUnknownLength,
   UNKNOWN_LENGTH_ATOM,
 } from "./safe-regex-atoms.js";
-import { escapeHasUnknownConsumedLength } from "./safe-regex-numeric.js";
+import {
+  escapeHasUnknownConsumedLength,
+  isZeroWidthAssertionEscape,
+} from "./safe-regex-numeric.js";
 
 type QuantifierRead = {
   consumed: number;
@@ -30,6 +33,7 @@ type ParseFrame = {
   containsRepetition: boolean;
   hasAlternation: boolean;
   assertion: boolean;
+  modifierUnknown: boolean;
   branchMinLength: number;
   branchMaxLength: number;
   altMinLength: number | null;
@@ -40,7 +44,7 @@ type ParseFrame = {
 
 type PatternToken =
   | { kind: "simple-token"; sig: string }
-  | { kind: "group-open"; assertion: boolean }
+  | { kind: "group-open"; assertion: boolean; modifierUnknown: boolean }
   | { kind: "group-close" }
   | { kind: "alternation" }
   | { kind: "quantifier"; quantifier: QuantifierRead };
@@ -71,6 +75,7 @@ function createParseFrame(): ParseFrame {
     containsRepetition: false,
     hasAlternation: false,
     assertion: false,
+    modifierUnknown: false,
     branchMinLength: 0,
     branchMaxLength: 0,
     altMinLength: null,
@@ -218,47 +223,47 @@ function readQuantifier(source: string, index: number): QuantifierRead | null {
 function consumeGroupPrefix(
   source: string,
   openIndex: number,
-): { nextIndex: number; unknown: boolean; assertion: boolean } {
+): { nextIndex: number; unknown: boolean; assertion: boolean; modifierUnknown: boolean } {
   const question = openIndex + 1;
   if (source[question] !== "?") {
-    return { nextIndex: openIndex + 1, unknown: false, assertion: false };
+    return { nextIndex: openIndex + 1, unknown: false, assertion: false, modifierUnknown: false };
   }
   const after = source[question + 1];
   if (after === ":") {
-    return { nextIndex: question + 2, unknown: false, assertion: false };
+    return { nextIndex: question + 2, unknown: false, assertion: false, modifierUnknown: false };
   }
   if (after === "=" || after === "!") {
-    return { nextIndex: question + 2, unknown: false, assertion: true };
+    return { nextIndex: question + 2, unknown: false, assertion: true, modifierUnknown: false };
   }
   if (after === "<") {
     const look = source[question + 2];
     if (look === "=" || look === "!") {
-      return { nextIndex: question + 3, unknown: false, assertion: true };
+      return { nextIndex: question + 3, unknown: false, assertion: true, modifierUnknown: false };
     }
     const nameEnd = source.indexOf(">", question + 2);
     if (nameEnd !== -1) {
-      return { nextIndex: nameEnd + 1, unknown: false, assertion: false };
+      return { nextIndex: nameEnd + 1, unknown: false, assertion: false, modifierUnknown: false };
     }
-    return { nextIndex: question + 1, unknown: true, assertion: false };
+    return { nextIndex: question + 1, unknown: true, assertion: false, modifierUnknown: false };
   }
   let i = question + 1;
   while (i < source.length && /[a-zA-Z-]/.test(source[i] ?? "")) {
     i += 1;
   }
   if (source[i] === ":") {
-    return { nextIndex: i + 1, unknown: false, assertion: false };
+    return { nextIndex: i + 1, unknown: false, assertion: false, modifierUnknown: true };
   }
-  return { nextIndex: question + 1, unknown: true, assertion: false };
+  return { nextIndex: question + 1, unknown: true, assertion: false, modifierUnknown: true };
 }
 
-function tokenizePattern(source: string, unicode = false): PatternToken[] {
+function tokenizePattern(source: string, unicode = false, capturingGroups = 0): PatternToken[] {
   const tokens: PatternToken[] = [];
 
   for (let i = 0; i < source.length; i += 1) {
     const ch = source[i];
 
     if (ch === "\\") {
-      const atom = readCompleteEscapeAtom(source, i, { unicode });
+      const atom = readCompleteEscapeAtom(source, i, { unicode, capturingGroups });
       tokens.push({ kind: "simple-token", sig: atom.sig });
       i = atom.end - 1;
       continue;
@@ -273,7 +278,11 @@ function tokenizePattern(source: string, unicode = false): PatternToken[] {
 
     if (ch === "(") {
       const prefix = consumeGroupPrefix(source, i);
-      tokens.push({ kind: "group-open", assertion: prefix.assertion });
+      tokens.push({
+        kind: "group-open",
+        assertion: prefix.assertion,
+        modifierUnknown: prefix.modifierUnknown,
+      });
       if (prefix.unknown) {
         tokens.push({ kind: "simple-token", sig: "." });
       }
@@ -337,6 +346,16 @@ function analyzeTokensForNestedRepetition(
       });
       return;
     }
+    if (isZeroWidthAssertionEscape(sig)) {
+      emitToken({
+        containsRepetition: false,
+        hasAmbiguousAlternation: false,
+        minLength: 0,
+        maxLength: 0,
+        sequences: [],
+      });
+      return;
+    }
     emitToken({
       containsRepetition: false,
       hasAmbiguousAlternation: false,
@@ -355,6 +374,7 @@ function analyzeTokensForNestedRepetition(
     if (token.kind === "group-open") {
       const frame = createParseFrame();
       frame.assertion = token.assertion;
+      frame.modifierUnknown = token.modifierUnknown;
       frames.push(frame);
       continue;
     }
@@ -386,7 +406,11 @@ function analyzeTokensForNestedRepetition(
           frame.altMinLength !== null &&
           frame.altMaxLength !== null &&
           frame.altMinLength !== frame.altMaxLength;
-        const groupSequences = frame.hasAlternation ? frame.altSequences : frame.branchSequences;
+        const groupSequences = frame.modifierUnknown
+          ? unknownLengthSequences()
+          : frame.hasAlternation
+            ? frame.altSequences
+            : frame.branchSequences;
         const overlapping =
           sequencesHaveUnknownLength(groupSequences) ||
           alternativeSequencesOverlap(groupSequences, foldCase, unicode, capturingGroups);
@@ -506,7 +530,7 @@ function hasNestedRepetition(
   const unicode = isUnicodeRegexMode(flags);
   const capturingGroups = countCapturingGroups(source);
   return analyzeTokensForNestedRepetition(
-    tokenizePattern(source, unicode),
+    tokenizePattern(source, unicode, capturingGroups),
     options?.distinguishDisjointAlternatives === true,
     flags.includes("i"),
     unicode,
@@ -623,9 +647,10 @@ function hasAdjacentUnboundedTwins(source: string, flags = ""): boolean {
     let sig = ch ?? "";
     let zeroWidth = false;
     if (ch === "\\") {
-      const atom = readCompleteEscapeAtom(source, i, { unicode });
+      const atom = readCompleteEscapeAtom(source, i, { unicode, capturingGroups });
       end = atom.end;
       sig = atom.sig;
+      zeroWidth = isZeroWidthAssertionEscape(sig);
     } else if (ch === "[") {
       const atom = readClassAtom(source, i);
       end = atom.end;
