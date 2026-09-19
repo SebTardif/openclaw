@@ -233,6 +233,11 @@ describe("exec allowlist matching", () => {
       const fixedWidthDisjoint = { pattern: "/usr/bin/python3", argPattern: "^(ab|ac)+$" };
       const mixedDisjoint = { pattern: "/usr/bin/python3", argPattern: "^(ab|[c]d)+$" };
       const mixedOverlap = { pattern: "/usr/bin/python3", argPattern: "^(ab|[a]b)+$" };
+      const octalOverlap = {
+        pattern: "/usr/bin/python3",
+        argPattern: String.raw`^(\141\x61|aaaa)+$`,
+      };
+      const groupedDisjoint = { pattern: "/usr/bin/python3", argPattern: "^((ab)|(cd))+$" };
 
       expect(matchAllowlist([duplicate], resolution, ["python3", "aaaa"])).toBeNull();
       expect(matchAllowlist([overlapping], resolution, ["python3", "aaaa"])).toBeNull();
@@ -242,6 +247,10 @@ describe("exec allowlist matching", () => {
       );
       expect(matchAllowlist([mixedDisjoint], resolution, ["python3", "abcd"])).toBe(mixedDisjoint);
       expect(matchAllowlist([mixedOverlap], resolution, ["python3", "abab"])).toBeNull();
+      expect(matchAllowlist([octalOverlap], resolution, ["python3", "aaaa"])).toBeNull();
+      expect(matchAllowlist([groupedDisjoint], resolution, ["python3", "abcd"])).toBe(
+        groupedDisjoint,
+      );
     });
 
     it("falls back to an explicit path-only sibling when an argPattern is rejected", () => {

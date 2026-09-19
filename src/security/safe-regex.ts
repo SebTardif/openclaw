@@ -11,6 +11,7 @@ import {
 import {
   readEscapeAtomEnd,
   readFixedLengthAlternativeAtoms,
+  readUnambiguousOctalEscape,
   tokenizePattern,
   type PatternToken,
 } from "./safe-regex-tokens.js";
@@ -142,7 +143,7 @@ function readScalarEscape(
     const cp = Number.parseInt(source.slice(index + 2, index + 4), 16);
     return { value: String.fromCharCode(cp), nextIndex: index + 4 };
   }
-  return null;
+  return readUnambiguousOctalEscape(source, index, unicodeMode);
 }
 
 function readAlternativeLiteral(

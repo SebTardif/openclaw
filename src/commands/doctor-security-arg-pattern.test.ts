@@ -295,6 +295,7 @@ describe("doctor security exec argPattern repair", () => {
 
   it("keeps disjoint mixed equal-length alternatives and still removes nested repetition", async () => {
     const mixed = { pattern: "/bin/mixed", argPattern: "^(ab|[c]d)+$" };
+    const grouped = { pattern: "/bin/grouped", argPattern: "^((ab)|(cd))+$" };
     const approvals = {
       version: 1,
       agents: {
@@ -302,6 +303,7 @@ describe("doctor security exec argPattern repair", () => {
           allowlist: [
             { pattern: "/bin/unsafe", argPattern: "(a+)+$" },
             mixed,
+            grouped,
             { pattern: "/bin/safe", argPattern: "^safe$" },
           ],
         },
@@ -323,6 +325,7 @@ describe("doctor security exec argPattern repair", () => {
       expect(findings).toHaveLength(1);
       expect(findings[0]?.message).toContain("/bin/unsafe");
       expect(findings.some((finding) => finding.message.includes("/bin/mixed"))).toBe(false);
+      expect(findings.some((finding) => finding.message.includes("/bin/grouped"))).toBe(false);
 
       const repaired = await check!.repair?.(context, findings);
       expect(repaired?.changes).toEqual([
@@ -332,6 +335,7 @@ describe("doctor security exec argPattern repair", () => {
       const remaining = loadExecApprovals().agents?.main?.allowlist ?? [];
       expect(remaining.map(({ pattern, argPattern }) => ({ pattern, argPattern }))).toEqual([
         mixed,
+        grouped,
         { pattern: "/bin/safe", argPattern: "^safe$" },
       ]);
     });

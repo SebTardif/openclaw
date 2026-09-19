@@ -371,7 +371,43 @@ var OpenClawExecArgPattern = (() => {
     if (kind === "x" && /^[0-9a-fA-F]{2}/.test(source.slice(afterKind, afterKind + 2))) {
       return afterKind + 1;
     }
+    const octal = readLegacyOctalEscape(source, backslashIndex, unicodeMode);
+    if (octal) {
+      return octal.nextIndex - 1;
+    }
     return backslashIndex + 1;
+  }
+  function readLegacyOctalEscape(source, index, unicodeMode) {
+    if (unicodeMode || source[index] !== "\\") {
+      return null;
+    }
+    const kind = source[index + 1];
+    if (kind === void 0 || kind < "0" || kind > "7") {
+      return null;
+    }
+    let end = index + 1;
+    for (let extra = 0; extra < 2; extra += 1) {
+      const next = source[end + 1];
+      if (next === void 0 || next < "0" || next > "7") {
+        break;
+      }
+      end += 1;
+    }
+    return {
+      value: String.fromCharCode(Number.parseInt(source.slice(index + 1, end + 1), 8)),
+      nextIndex: end + 1
+    };
+  }
+  function readUnambiguousOctalEscape(source, index, unicodeMode) {
+    const octal = readLegacyOctalEscape(source, index, unicodeMode);
+    if (!octal) {
+      return null;
+    }
+    const digits = source.slice(index + 1, octal.nextIndex);
+    if (digits.length < 3 && !digits.startsWith("0")) {
+      return null;
+    }
+    return octal;
   }
   function tokenizePattern(source, flags = "") {
     const tokens = [];
@@ -428,6 +464,117 @@ var OpenClawExecArgPattern = (() => {
     return tokens;
   }
   var ZERO_WIDTH_SIMPLE_ATOMS = /* @__PURE__ */ new Set(["^", "$", "\\b", "\\B"]);
+  var NAMED_CHAR_ESCAPES = {
+    "\\n": "\n",
+    "\\t": "	",
+    "\\r": "\r",
+    "\\f": "\f",
+    "\\v": "\v"
+  };
+  function isLookaroundGroupPrefix(source, contentStart) {
+    const prefix = source.slice(0, contentStart);
+    return prefix.endsWith("?=") || prefix.endsWith("?!") || prefix.endsWith("?<=") || prefix.endsWith("?<!");
+  }
+  function findMatchingGroupClose(tokens, openIndex) {
+    let depth = 0;
+    for (let index = openIndex; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (!token) {
+        return -1;
+      }
+      if (token.kind === "group-open") {
+        depth += 1;
+      } else if (token.kind === "group-close") {
+        depth -= 1;
+        if (depth === 0) {
+          return index;
+        }
+      }
+    }
+    return -1;
+  }
+  function decodeFixedWidthSimpleToken(source, unicodeMode) {
+    if (!source.startsWith("\\")) {
+      return source;
+    }
+    if (/^\\x[0-9a-fA-F]{2}$/.test(source)) {
+      return String.fromCharCode(Number.parseInt(source.slice(2), 16));
+    }
+    if (/^\\u[0-9a-fA-F]{4}$/.test(source)) {
+      return String.fromCharCode(Number.parseInt(source.slice(2), 16));
+    }
+    if (unicodeMode && /^\\u\{[0-9a-fA-F]{1,6}\}$/.test(source)) {
+      const cp = Number.parseInt(source.slice(3, -1), 16);
+      if (!Number.isFinite(cp) || cp < 0 || cp > 1114111) {
+        return null;
+      }
+      return String.fromCodePoint(cp);
+    }
+    const octal = readUnambiguousOctalEscape(source, 0, unicodeMode);
+    if (octal && octal.nextIndex === source.length) {
+      return octal.value;
+    }
+    const named = NAMED_CHAR_ESCAPES[source];
+    if (named !== void 0) {
+      return named;
+    }
+    if (source.length === 2) {
+      const escaped = source[1];
+      if (escaped !== void 0 && !/[0-9A-Za-z]/.test(escaped)) {
+        return escaped;
+      }
+    }
+    if (/^\\[dDsSwW]$/.test(source) || source.startsWith("\\p{") || source.startsWith("\\P{")) {
+      return source;
+    }
+    return null;
+  }
+  function collectFixedLengthAtoms(source, unicodeMode) {
+    const tokens = tokenizePattern(source, unicodeMode ? "u" : "");
+    const atoms = [];
+    for (let index = 0; index < tokens.length; ) {
+      const token = tokens[index];
+      if (!token) {
+        return null;
+      }
+      if (token.kind === "quantifier" || token.kind === "alternation" || token.kind === "group-close") {
+        return null;
+      }
+      if (token.kind === "group-open") {
+        const closeIndex = findMatchingGroupClose(tokens, index);
+        const close = tokens[closeIndex];
+        if (closeIndex < 0 || !close || close.kind !== "group-close") {
+          return null;
+        }
+        const contentStart = token.contentStart;
+        if (isLookaroundGroupPrefix(source, contentStart)) {
+          index = closeIndex + 1;
+          continue;
+        }
+        const interior = source.slice(contentStart, close.start);
+        if (interior) {
+          const inner = collectFixedLengthAtoms(interior, unicodeMode);
+          if (!inner) {
+            return null;
+          }
+          atoms.push(...inner);
+        }
+        index = closeIndex + 1;
+        continue;
+      }
+      if (ZERO_WIDTH_SIMPLE_ATOMS.has(token.source)) {
+        index += 1;
+        continue;
+      }
+      const decoded = decodeFixedWidthSimpleToken(token.source, unicodeMode);
+      if (decoded === null) {
+        return null;
+      }
+      atoms.push(decoded);
+      index += 1;
+    }
+    return atoms.length > 0 ? atoms : null;
+  }
   function readFixedLengthAlternativeAtoms(source, unicodeMode = false) {
     let body = source;
     if (body.startsWith("^")) {
@@ -439,18 +586,7 @@ var OpenClawExecArgPattern = (() => {
     if (!body) {
       return null;
     }
-    const tokens = tokenizePattern(body, unicodeMode ? "u" : "");
-    const atoms = [];
-    for (const token of tokens) {
-      if (token.kind !== "simple-token") {
-        return null;
-      }
-      if (ZERO_WIDTH_SIMPLE_ATOMS.has(token.source)) {
-        continue;
-      }
-      atoms.push(token.source);
-    }
-    return atoms.length > 0 ? atoms : null;
+    return collectFixedLengthAtoms(body, unicodeMode);
   }
 
   // src/security/safe-regex.ts
@@ -521,7 +657,7 @@ var OpenClawExecArgPattern = (() => {
       const cp = Number.parseInt(source.slice(index + 2, index + 4), 16);
       return { value: String.fromCharCode(cp), nextIndex: index + 4 };
     }
-    return null;
+    return readUnambiguousOctalEscape(source, index, unicodeMode);
   }
   function readAlternativeLiteral(source, unicodeMode = false) {
     let value = "";

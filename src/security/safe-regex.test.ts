@@ -39,6 +39,9 @@ describe("safe regex", () => {
     ["(ab|[c]d)+$", RegExp],
     ["corp-(ab|[c]d)+", RegExp],
     ["^(ab|[a]b)+$", null],
+    [String.raw`^(\141\x61|aaaa)+$`, null],
+    ["^((ab)|(cd))+$", RegExp],
+    ["corp-((ab)|(cd))+", RegExp],
     // Disjoint unequal-length alts under + are not ReDoS (not length-diff alone).
     ["(a|bc)+$", RegExp],
     ["^(?:a|bc)+$", RegExp],
@@ -269,6 +272,39 @@ describe("safe regex", () => {
     expect(compileSafeRegexForExec(grouped).regex).toBeInstanceOf(RegExp);
     expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegexForExec("(aa|a.)+$").regex).toBeNull();
+  });
+
+  it("rejects overlapping octal and hex alternatives of unequal native width", () => {
+    // No-flag \141 is octal `a`; \x61 is hex `a`. Native language is (aa|aaaa)+.
+    const overlapping = String.raw`^(\141\x61|aaaa)+$`;
+    const tokens = tokenizePattern(overlapping).filter((token) => token.kind === "simple-token");
+    expect(tokens.map((token) => token.source)).toEqual([
+      "^",
+      String.raw`\141`,
+      String.raw`\x61`,
+      "a",
+      "a",
+      "a",
+      "a",
+      "$",
+    ]);
+    expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(overlapping)).toBeNull();
+    expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
+  });
+
+  it("accepts disjoint capturing-group alternatives of equal consumed length", () => {
+    const grouped = "^((ab)|(cd))+$";
+    const redaction = "corp-((ab)|(cd))+";
+    expect(compileSafeRegexDetailed(grouped).reason).toBeNull();
+    expect(compileSafeRegex(grouped)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(grouped).regex).toBeInstanceOf(RegExp);
+    const compiled = expectCompiledRegex(grouped);
+    expect(compiled.test("abcd")).toBe(true);
+    expect(compiled.test("cdab")).toBe(true);
+    expect(compileSafeRegexDetailed(redaction).reason).toBeNull();
+    expect(compileSafeRegex(redaction)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(redaction).regex).toBeInstanceOf(RegExp);
   });
 
   it("treats braced unicode escapes as identity plus quantifier without u/v", () => {

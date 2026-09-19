@@ -102,6 +102,14 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain("corp-abcd");
     expect(output).not.toContain("abcd");
   });
+
+  it("still masks corp-((ab)|(cd))+ capturing-group alternatives", () => {
+    const output = redactSensitiveText("id=corp-abcd", {
+      patterns: ["corp-((ab)|(cd))+"],
+    });
+    expect(output).not.toContain("corp-abcd");
+    expect(output).not.toContain("abcd");
+  });
 });
 
 describe("registered exact secret values", () => {
