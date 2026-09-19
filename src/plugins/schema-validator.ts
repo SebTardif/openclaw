@@ -520,19 +520,11 @@ export function validateJsonSchemaValue(params: {
     }
     const unsafePattern = findUnsafePatternProperty(params.schema);
     if (unsafePattern) {
-      const message = sanitizeTerminalText(
-        `unsafe patternProperties pattern rejected before validation at ${unsafePattern}`,
+      throw new Error(
+        sanitizeTerminalText(
+          `unsafe patternProperties pattern rejected before validation at ${unsafePattern}`,
+        ),
       );
-      return {
-        ok: false,
-        errors: [
-          {
-            path: "<root>",
-            message,
-            text: message,
-          },
-        ],
-      };
     }
   }
   const schemaFingerprint =
