@@ -736,6 +736,44 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     expect(result.abcabc.mode).toBeUndefined();
   });
 
+  it("skips backreferences that hide overlapping consumed lengths", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(ab)(\\1c|abcabc)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { ababcabc: {} }) as {
+      ababcabc: { mode?: string };
+    };
+    expect(result.ababcabc.mode).toBeUndefined();
+  });
+
+  it("applies defaults through disjoint octal alternatives", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(\\141|BCD)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "keep" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { aBCD: {}, zzzz: {} }) as {
+      aBCD: { mode?: string };
+      zzzz: { mode?: string };
+    };
+    expect(result.aBCD.mode).toBe("keep");
+    expect(result.zzzz.mode).toBeUndefined();
+  });
+
   it("applies defaults through deterministic groups that share a first character", () => {
     const schema = {
       type: "object",
