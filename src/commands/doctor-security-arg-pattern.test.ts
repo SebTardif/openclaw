@@ -296,6 +296,9 @@ describe("doctor security exec argPattern repair", () => {
   it("keeps disjoint mixed equal-length alternatives and still removes nested repetition", async () => {
     const mixed = { pattern: "/bin/mixed", argPattern: "^(ab|[c]d)+$" };
     const grouped = { pattern: "/bin/grouped", argPattern: "^((ab)|(cd))+$" };
+    const escapedDot = { pattern: "/bin/escaped-dot", argPattern: String.raw`^(\.a|[b]a)+$` };
+    const hexDollar = { pattern: "/bin/hex-dollar", argPattern: String.raw`^(\x24a|[$]a)+$` };
+    const highOctal = { pattern: "/bin/high-octal", argPattern: String.raw`^(\400| 0)+$` };
     const approvals = {
       version: 1,
       agents: {
@@ -304,6 +307,9 @@ describe("doctor security exec argPattern repair", () => {
             { pattern: "/bin/unsafe", argPattern: "(a+)+$" },
             mixed,
             grouped,
+            escapedDot,
+            hexDollar,
+            highOctal,
             { pattern: "/bin/safe", argPattern: "^safe$" },
           ],
         },
@@ -322,20 +328,24 @@ describe("doctor security exec argPattern repair", () => {
         cfg: {} as OpenClawConfig,
       };
       const findings = await check!.detect(context);
-      expect(findings).toHaveLength(1);
-      expect(findings[0]?.message).toContain("/bin/unsafe");
+      expect(findings).toHaveLength(3);
+      expect(findings.some((finding) => finding.message.includes("/bin/unsafe"))).toBe(true);
+      expect(findings.some((finding) => finding.message.includes("/bin/hex-dollar"))).toBe(true);
+      expect(findings.some((finding) => finding.message.includes("/bin/high-octal"))).toBe(true);
       expect(findings.some((finding) => finding.message.includes("/bin/mixed"))).toBe(false);
       expect(findings.some((finding) => finding.message.includes("/bin/grouped"))).toBe(false);
+      expect(findings.some((finding) => finding.message.includes("/bin/escaped-dot"))).toBe(false);
 
       const repaired = await check!.repair?.(context, findings);
       expect(repaired?.changes).toEqual([
-        expect.stringContaining("Removed 1 rejected exec approval entry"),
+        expect.stringContaining("Removed 3 rejected exec approval entries"),
       ]);
 
       const remaining = loadExecApprovals().agents?.main?.allowlist ?? [];
       expect(remaining.map(({ pattern, argPattern }) => ({ pattern, argPattern }))).toEqual([
         mixed,
         grouped,
+        escapedDot,
         { pattern: "/bin/safe", argPattern: "^safe$" },
       ]);
     });

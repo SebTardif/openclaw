@@ -238,6 +238,18 @@ describe("exec allowlist matching", () => {
         argPattern: String.raw`^(\141\x61|aaaa)+$`,
       };
       const groupedDisjoint = { pattern: "/usr/bin/python3", argPattern: "^((ab)|(cd))+$" };
+      const hexDollarOverlap = {
+        pattern: "/usr/bin/python3",
+        argPattern: String.raw`^(\x24a|[$]a)+$`,
+      };
+      const escapedDotDisjoint = {
+        pattern: "/usr/bin/python3",
+        argPattern: String.raw`^(\.a|[b]a)+$`,
+      };
+      const highOctalOverlap = {
+        pattern: "/usr/bin/python3",
+        argPattern: String.raw`^(\400| 0)+$`,
+      };
 
       expect(matchAllowlist([duplicate], resolution, ["python3", "aaaa"])).toBeNull();
       expect(matchAllowlist([overlapping], resolution, ["python3", "aaaa"])).toBeNull();
@@ -251,6 +263,11 @@ describe("exec allowlist matching", () => {
       expect(matchAllowlist([groupedDisjoint], resolution, ["python3", "abcd"])).toBe(
         groupedDisjoint,
       );
+      expect(matchAllowlist([hexDollarOverlap], resolution, ["python3", "$a$a"])).toBeNull();
+      expect(matchAllowlist([escapedDotDisjoint], resolution, ["python3", ".aba"])).toBe(
+        escapedDotDisjoint,
+      );
+      expect(matchAllowlist([highOctalOverlap], resolution, ["python3", " 0 0"])).toBeNull();
     });
 
     it("falls back to an explicit path-only sibling when an argPattern is rejected", () => {

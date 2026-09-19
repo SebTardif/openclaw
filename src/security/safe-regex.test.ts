@@ -42,6 +42,9 @@ describe("safe regex", () => {
     [String.raw`^(\141\x61|aaaa)+$`, null],
     ["^((ab)|(cd))+$", RegExp],
     ["corp-((ab)|(cd))+", RegExp],
+    [String.raw`^(\x24a|[$]a)+$`, null],
+    [String.raw`corp-(\.a|[b]a)+`, RegExp],
+    [String.raw`^(\400| 0)+$`, null],
     // Disjoint unequal-length alts under + are not ReDoS (not length-diff alone).
     ["(a|bc)+$", RegExp],
     ["^(?:a|bc)+$", RegExp],
@@ -305,6 +308,37 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(redaction).reason).toBeNull();
     expect(compileSafeRegex(redaction)).toBeInstanceOf(RegExp);
     expect(compileSafeRegexForExec(redaction).regex).toBeInstanceOf(RegExp);
+  });
+
+  it("treats decoded scalars as literals during equal-length overlap compare", () => {
+    // \x24 is `$`. Re-parsed as regex source, `$` is an end-anchor and the
+    // two `$a` languages look disjoint even though both match `$a`.
+    const hexDollar = String.raw`^(\x24a|[$]a)+$`;
+    expect(compileSafeRegexDetailed(hexDollar).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(hexDollar)).toBeNull();
+    expect(compileSafeRegexForExec(hexDollar).regex).toBeNull();
+    // `\.` is a literal dot. Re-parsed as regex source, `.` is a wildcard
+    // and the disjoint `.a` vs `ba` pair is dropped from redaction.
+    const escapedDot = String.raw`corp-(\.a|[b]a)+`;
+    expect(compileSafeRegexDetailed(escapedDot).reason).toBeNull();
+    expect(compileSafeRegex(escapedDot)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(escapedDot).regex).toBeInstanceOf(RegExp);
+    const compiled = expectCompiledRegex(String.raw`^(\.a|[b]a)+$`);
+    expect(compiled.test(".aba")).toBe(true);
+    expect(compiled.test("ba.a")).toBe(true);
+  });
+
+  it("limits octal escapes that start with 4-7 to two digits", () => {
+    // JS reads `\400` as `\40` (space) plus literal `0`, same language as ` 0`.
+    const overlapping = String.raw`^(\400| 0)+$`;
+    const tokens = tokenizePattern(overlapping).filter((token) => token.kind === "simple-token");
+    expect(tokens.map((token) => token.source)).toEqual(["^", String.raw`\40`, "0", " ", "0", "$"]);
+    expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(overlapping)).toBeNull();
+    expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
+    expect(tokenizePattern(String.raw`\141`).map((token) => token.source)).toEqual([
+      String.raw`\141`,
+    ]);
   });
 
   it("treats braced unicode escapes as identity plus quantifier without u/v", () => {

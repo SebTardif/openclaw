@@ -101,6 +101,24 @@
       "pattern": "^(ab)*(ab)*$",
       "accept": false,
       "argument": "abab"
+    },
+    {
+      "id": "hex-dollar-class-overlap",
+      "pattern": "^(\\x24a|[$]a)+$",
+      "accept": false,
+      "argument": "$a$a"
+    },
+    {
+      "id": "escaped-dot-class-disjoint",
+      "pattern": "^(\\.a|[b]a)+$",
+      "accept": true,
+      "argument": ".aba"
+    },
+    {
+      "id": "high-octal-space-overlap",
+      "pattern": "^(\\400| 0)+$",
+      "accept": false,
+      "argument": " 0 0"
     }
   ]
 }

@@ -140,6 +140,7 @@ export function readEscapeAtomEnd(
 
 /**
  * Non-unicode `\141` is one octal atom (`a`), not `\1` plus leftover digits.
+ * First digit 4-7 stops at two digits, so `\400` is `\40` plus literal `0`.
  * Unicode mode forbids octal; those stay one-char escapes / backrefs.
  */
 function readLegacyOctalEscape(
@@ -155,7 +156,8 @@ function readLegacyOctalEscape(
     return null;
   }
   let end = index + 1;
-  for (let extra = 0; extra < 2; extra += 1) {
+  const maxExtra = kind <= "3" ? 2 : 1;
+  for (let extra = 0; extra < maxExtra; extra += 1) {
     const next = source[end + 1];
     if (next === undefined || next < "0" || next > "7") {
       break;
@@ -169,8 +171,9 @@ function readLegacyOctalEscape(
 }
 
 /**
- * Octal that cannot be a backref: 3 digits (`\141`) or a `\0` form.
- * Single `\1`..`\7` stay unproven so `(a)(\1|aa)+` remains overlapping.
+ * Octal that cannot be a backref: 3 digits (`\141`), a `\0` form, or
+ * two digits starting with 4-7 (`\40`). Single `\1`..`\7` stay unproven
+ * so `(a)(\1|aa)+` remains overlapping.
  */
 export function readUnambiguousOctalEscape(
   source: string,
@@ -182,7 +185,10 @@ export function readUnambiguousOctalEscape(
     return null;
   }
   const digits = source.slice(index + 1, octal.nextIndex);
-  if (digits.length < 3 && !digits.startsWith("0")) {
+  const first = digits[0];
+  const twoDigitHighOctal =
+    digits.length === 2 && first !== undefined && first >= "4" && first <= "7";
+  if (digits.length < 3 && !digits.startsWith("0") && !twoDigitHighOctal) {
     return null;
   }
   return octal;
@@ -290,39 +296,56 @@ function findMatchingGroupClose(tokens: readonly PatternToken[], openIndex: numb
   return -1;
 }
 
+function escapeDecodedLiteral(value: string): string {
+  let escaped = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (code === undefined) {
+      continue;
+    }
+    if (code < 0x80) {
+      escaped += `\\x${code.toString(16).padStart(2, "0")}`;
+      continue;
+    }
+    escaped += `\\u{${code.toString(16)}}`;
+  }
+  return escaped;
+}
+
 /**
  * One consumed character for overlap compare, or null when width is unproven
- * (backref, incomplete escape). Decoded scalars compare as their character.
+ * (backref, incomplete escape). Decoded scalars are emitted as `\xNN`
+ * / `\u{hex}` so `$` and `.` stay literals during overlap probing.
  */
 function decodeFixedWidthSimpleToken(source: string, unicodeMode: boolean): string | null {
   if (!source.startsWith("\\")) {
     return source;
   }
   if (/^\\x[0-9a-fA-F]{2}$/.test(source)) {
-    return String.fromCharCode(Number.parseInt(source.slice(2), 16));
+    return escapeDecodedLiteral(String.fromCharCode(Number.parseInt(source.slice(2), 16)));
   }
   if (/^\\u[0-9a-fA-F]{4}$/.test(source)) {
-    return String.fromCharCode(Number.parseInt(source.slice(2), 16));
+    return escapeDecodedLiteral(String.fromCharCode(Number.parseInt(source.slice(2), 16)));
   }
   if (unicodeMode && /^\\u\{[0-9a-fA-F]{1,6}\}$/.test(source)) {
     const cp = Number.parseInt(source.slice(3, -1), 16);
     if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) {
       return null;
     }
-    return String.fromCodePoint(cp);
+    return escapeDecodedLiteral(String.fromCodePoint(cp));
   }
   const octal = readUnambiguousOctalEscape(source, 0, unicodeMode);
   if (octal && octal.nextIndex === source.length) {
-    return octal.value;
+    return escapeDecodedLiteral(octal.value);
   }
   const named = NAMED_CHAR_ESCAPES[source];
   if (named !== undefined) {
-    return named;
+    return escapeDecodedLiteral(named);
   }
   if (source.length === 2) {
     const escaped = source[1];
     if (escaped !== undefined && !/[0-9A-Za-z]/.test(escaped)) {
-      return escaped;
+      return escapeDecodedLiteral(escaped);
     }
   }
   if (/^\\[dDsSwW]$/.test(source) || source.startsWith("\\p{") || source.startsWith("\\P{")) {
