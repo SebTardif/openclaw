@@ -1,6 +1,7 @@
 // Performs lightweight safe-regex checks for user-supplied patterns.
 import { expectDefined } from "@openclaw/normalization-core";
 import { pruneMapToMaxSize } from "../infra/map-size.js";
+import { hasAdjacentUnboundedTwins } from "./safe-regex-adjacent.js";
 type QuantifierRead = {
   consumed: number;
   minRepeat: number;
@@ -12,6 +13,7 @@ type TokenState = {
   hasAmbiguousAlternation: boolean;
   minLength: number;
   maxLength: number;
+  firstAtom: string;
 };
 
 type ParseFrame = {
@@ -22,10 +24,12 @@ type ParseFrame = {
   branchMaxLength: number;
   altMinLength: number | null;
   altMaxLength: number | null;
+  branchFirstAtom: string | null;
+  altFirstAtoms: string[];
 };
 
 type PatternToken =
-  | { kind: "simple-token" }
+  | { kind: "simple-token"; sig: string }
   | { kind: "group-open" }
   | { kind: "group-close" }
   | { kind: "alternation" }
@@ -60,6 +64,8 @@ function createParseFrame(): ParseFrame {
     branchMaxLength: 0,
     altMinLength: null,
     altMaxLength: null,
+    branchFirstAtom: null,
+    altFirstAtoms: [],
   };
 }
 
@@ -78,6 +84,8 @@ function multiplyLength(length: number, factor: number): number {
 }
 
 function recordAlternative(frame: ParseFrame): void {
+  frame.altFirstAtoms.push(frame.branchFirstAtom ?? "");
+  frame.branchFirstAtom = null;
   if (frame.altMinLength === null || frame.altMaxLength === null) {
     frame.altMinLength = frame.branchMinLength;
     frame.altMaxLength = frame.branchMaxLength;
@@ -85,6 +93,62 @@ function recordAlternative(frame: ParseFrame): void {
   }
   frame.altMinLength = Math.min(frame.altMinLength, frame.branchMinLength);
   frame.altMaxLength = Math.max(frame.altMaxLength, frame.branchMaxLength);
+}
+
+function atomsCanMatchSamePrefix(left: string, right: string): boolean {
+  if (left === right || !left || !right) {
+    return true;
+  }
+  if (left === "." || right === ".") {
+    return true;
+  }
+  if (left.startsWith("[") || right.startsWith("[")) {
+    return true;
+  }
+  if (left.startsWith("\\") || right.startsWith("\\")) {
+    return true;
+  }
+  return false;
+}
+
+function firstAtomsOverlap(atoms: readonly string[]): boolean {
+  if (atoms.length < 2) {
+    return false;
+  }
+  for (let i = 0; i < atoms.length; i += 1) {
+    const left = atoms[i];
+    if (left === undefined) {
+      continue;
+    }
+    for (let j = i + 1; j < atoms.length; j += 1) {
+      const right = atoms[j];
+      if (right === undefined) {
+        continue;
+      }
+      if (atomsCanMatchSamePrefix(left, right)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function readCharClassSig(source: string, index: number): { end: number; sig: string } {
+  let i = index + 1;
+  if (source[i] === "^") {
+    i += 1;
+  }
+  while (i < source.length) {
+    if (source[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    if (source[i] === "]") {
+      return { end: i + 1, sig: source.slice(index, i + 1) };
+    }
+    i += 1;
+  }
+  return { end: source.length, sig: source.slice(index) };
 }
 
 function readQuantifier(source: string, index: number): QuantifierRead | null {
@@ -138,31 +202,24 @@ function readQuantifier(source: string, index: number): QuantifierRead | null {
 
 function tokenizePattern(source: string): PatternToken[] {
   const tokens: PatternToken[] = [];
-  let inCharClass = false;
 
   for (let i = 0; i < source.length; i += 1) {
     const ch = source[i];
 
-    if (inCharClass) {
-      if (ch === "\\") {
-        i += 1;
-        continue;
-      }
-      if (ch === "]") {
-        inCharClass = false;
-      }
-      continue;
-    }
-
     if (ch === "\\") {
-      i += 1;
-      tokens.push({ kind: "simple-token" });
+      const next = source[i + 1];
+      const sig = next === undefined ? "\\" : source.slice(i, i + 2);
+      if (next !== undefined) {
+        i += 1;
+      }
+      tokens.push({ kind: "simple-token", sig });
       continue;
     }
 
     if (ch === "[") {
-      inCharClass = true;
-      tokens.push({ kind: "simple-token" });
+      const atom = readCharClassSig(source, i);
+      tokens.push({ kind: "simple-token", sig: atom.sig });
+      i = atom.end - 1;
       continue;
     }
 
@@ -188,13 +245,16 @@ function tokenizePattern(source: string): PatternToken[] {
       continue;
     }
 
-    tokens.push({ kind: "simple-token" });
+    tokens.push({ kind: "simple-token", sig: ch ?? "" });
   }
 
   return tokens;
 }
 
-function analyzeTokensForNestedRepetition(tokens: PatternToken[]): boolean {
+function analyzeTokensForNestedRepetition(
+  tokens: PatternToken[],
+  distinguishDisjointAlternatives = false,
+): boolean {
   const frames: ParseFrame[] = [createParseFrame()];
 
   const emitToken = (token: TokenState) => {
@@ -203,22 +263,26 @@ function analyzeTokensForNestedRepetition(tokens: PatternToken[]): boolean {
     if (token.containsRepetition) {
       frame.containsRepetition = true;
     }
+    if (frame.branchFirstAtom === null) {
+      frame.branchFirstAtom = token.firstAtom;
+    }
     frame.branchMinLength = addLength(frame.branchMinLength, token.minLength);
     frame.branchMaxLength = addLength(frame.branchMaxLength, token.maxLength);
   };
 
-  const emitSimpleToken = () => {
+  const emitSimpleToken = (sig: string) => {
     emitToken({
       containsRepetition: false,
       hasAmbiguousAlternation: false,
       minLength: 1,
       maxLength: 1,
+      firstAtom: sig,
     });
   };
 
   for (const token of tokens) {
     if (token.kind === "simple-token") {
-      emitSimpleToken();
+      emitSimpleToken(token.sig);
       continue;
     }
 
@@ -239,15 +303,24 @@ function analyzeTokensForNestedRepetition(tokens: PatternToken[]): boolean {
         const groupMaxLength = frame.hasAlternation
           ? (frame.altMaxLength ?? 0)
           : frame.branchMaxLength;
+        const lengthAmbiguous =
+          frame.hasAlternation &&
+          frame.altMinLength !== null &&
+          frame.altMaxLength !== null &&
+          frame.altMinLength !== frame.altMaxLength;
+        const firstAtom = frame.hasAlternation
+          ? firstAtomsOverlap(frame.altFirstAtoms)
+            ? "."
+            : (frame.altFirstAtoms[0] ?? "")
+          : (frame.branchFirstAtom ?? "");
         emitToken({
           containsRepetition: frame.containsRepetition,
-          hasAmbiguousAlternation:
-            frame.hasAlternation &&
-            frame.altMinLength !== null &&
-            frame.altMaxLength !== null &&
-            frame.altMinLength !== frame.altMaxLength,
+          hasAmbiguousAlternation: distinguishDisjointAlternatives
+            ? lengthAmbiguous && firstAtomsOverlap(frame.altFirstAtoms)
+            : lengthAmbiguous,
           minLength: groupMinLength,
           maxLength: groupMaxLength,
+          firstAtom,
         });
       }
       continue;
@@ -319,10 +392,16 @@ export function testRegexWithBoundedInput(
   return testRegexFromStart(regex, input.slice(-maxWindow));
 }
 
-function hasNestedRepetition(source: string): boolean {
+function hasNestedRepetition(
+  source: string,
+  options?: { distinguishDisjointAlternatives?: boolean },
+): boolean {
   // Conservative parser: tokenize first, then check if repeated tokens/groups are repeated again.
   // Non-goal: complete regex AST support; keep strict enough for config safety checks.
-  return analyzeTokensForNestedRepetition(tokenizePattern(source));
+  return analyzeTokensForNestedRepetition(
+    tokenizePattern(source),
+    options?.distinguishDisjointAlternatives === true,
+  );
 }
 
 export function compileSafeRegexDetailed(source: string, flags = ""): SafeRegexCompileResult {
@@ -360,4 +439,42 @@ export function compileSafeRegexDetailed(source: string, flags = ""): SafeRegexC
 
 export function compileSafeRegex(source: string, flags = ""): RegExp | null {
   return compileSafeRegexDetailed(source, flags).regex;
+}
+
+export function compileJsonSchemaPatternRegex(source: string, flags = ""): RegExp | null {
+  return compileJsonSchemaPatternRegexDetailed(source, flags).regex;
+}
+
+/** Exact-source compile for JSON Schema patternProperties (do not trim). */
+export function compileJsonSchemaPatternRegexDetailed(
+  source: string,
+  flags = "",
+): SafeRegexCompileResult {
+  const cacheKey = `schema::${flags}::${source}`;
+  if (safeRegexCache.has(cacheKey)) {
+    return (
+      safeRegexCache.get(cacheKey) ?? {
+        regex: null,
+        source,
+        flags,
+        reason: "invalid-regex",
+      }
+    );
+  }
+  let result: SafeRegexCompileResult;
+  if (
+    hasNestedRepetition(source, { distinguishDisjointAlternatives: true }) ||
+    hasAdjacentUnboundedTwins(source, flags)
+  ) {
+    result = { regex: null, source, flags, reason: "unsafe-nested-repetition" };
+  } else {
+    try {
+      result = { regex: new RegExp(source, flags), source, flags, reason: null };
+    } catch {
+      result = { regex: null, source, flags, reason: "invalid-regex" };
+    }
+  }
+  safeRegexCache.set(cacheKey, result);
+  pruneMapToMaxSize(safeRegexCache, SAFE_REGEX_CACHE_MAX);
+  return result;
 }
