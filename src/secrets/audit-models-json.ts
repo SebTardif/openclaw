@@ -6,7 +6,8 @@ import {
 } from "../agents/model-auth-markers.js";
 import { normalizeProviderId } from "../agents/model-selection.js";
 import { normalizeProviderMapKeys } from "../agents/models-config.merge.js";
-import { coerceSecretRef, type SecretRef } from "../config/types.secrets.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { coerceSecretRef, resolveSecretInputRef } from "../config/types.secrets.js";
 import { isLikelySensitiveModelProviderHeaderName } from "./model-provider-header-policy.js";
 import { isNonEmptyString, isRecord } from "./shared.js";
 import { readJsonObjectIfExists } from "./storage-scan.js";
@@ -20,28 +21,53 @@ type ModelsJsonAuditFinding = {
   provider?: string;
 };
 
-type ConfigRefAssignment = {
-  path: string;
-  ref: SecretRef;
-  provider?: string;
-  /** Registry target id (must be models.providers.*.apiKey for marker ownership). */
-  targetId?: string;
-};
-
-/** Only model-provider apiKey registry targets own models.json env markers. */
-const MODELS_PROVIDER_API_KEY_TARGET_ID = "models.providers.*.apiKey";
+type ModelsProviders = NonNullable<OpenClawConfig["models"]>["providers"];
+type SourceProviderConfig = NonNullable<ModelsProviders>[string];
+type SecretDefaults = NonNullable<NonNullable<OpenClawConfig["secrets"]>["defaults"]>;
 
 /**
  * models.json persists env SecretRefs as bare env-name markers (for example
  * "FACTCHAT_API_KEY"), not only the built-in known-marker list. Accept those
- * only when models.providers.<id>.apiKey owns the same env SecretRef id.
+ * only when the writer-winning models.providers entry owns the same env id.
  * talk.providers / talk.realtime.providers with the same provider+env id must
  * not suppress a plaintext models.json finding.
  */
+function normalizeSourceProviderLookup(
+  providers: ModelsProviders | undefined,
+): Record<string, SourceProviderConfig> {
+  if (!providers) {
+    return {};
+  }
+  const validProviders = Object.fromEntries(
+    Object.entries(providers).filter(([, provider]) => isRecord(provider)),
+  ) as Record<string, SourceProviderConfig>; // SAFETY: isRecord keeps object providers; keys are unchanged.
+  // Writer collision rule: exact canonical spelling wins over aliases.
+  return normalizeProviderMapKeys(validProviders);
+}
+
+function resolveOwnedEnvApiKeyMarker(
+  sourceProvider: SourceProviderConfig | undefined,
+  defaults: SecretDefaults | undefined,
+): string | undefined {
+  if (!sourceProvider) {
+    return undefined;
+  }
+  const { ref } = resolveSecretInputRef({
+    value: sourceProvider.apiKey,
+    defaults,
+  });
+  if (!ref || ref.source !== "env") {
+    return undefined;
+  }
+  const marker = ref.id.trim();
+  return marker || undefined;
+}
+
 function isConfigOwnedEnvApiKeyMarker(params: {
   providerId: string;
   marker: string;
-  refAssignments: readonly ConfigRefAssignment[];
+  sourceProvidersByKey: Record<string, SourceProviderConfig>;
+  secretDefaults?: SecretDefaults;
 }): boolean {
   const marker = params.marker.trim();
   if (!marker) {
@@ -51,23 +77,10 @@ function isConfigOwnedEnvApiKeyMarker(params: {
   if (!providerKey) {
     return false;
   }
-  const ownedByRawKey: Record<string, string> = {};
-  for (const assignment of params.refAssignments) {
-    if (assignment.targetId !== MODELS_PROVIDER_API_KEY_TARGET_ID) {
-      continue;
-    }
-    if (!assignment.provider) {
-      continue;
-    }
-    if (assignment.ref.source !== "env") {
-      continue;
-    }
-    ownedByRawKey[assignment.provider] = assignment.ref.id.trim();
-  }
-  // Writer emits only the canonical-key winner (exact spelling over aliases,
-  // later alias if no canonical). Losing aliases must not suppress PLAINTEXT_FOUND.
-  const ownedByCanonicalKey = normalizeProviderMapKeys(ownedByRawKey);
-  return ownedByCanonicalKey[providerKey] === marker;
+  return (
+    resolveOwnedEnvApiKeyMarker(params.sourceProvidersByKey[providerKey], params.secretDefaults) ===
+    marker
+  );
 }
 
 /** Collect models.json findings for plaintext credentials and unresolved SecretRef objects. */
@@ -75,7 +88,8 @@ export function collectModelsJsonSecrets(params: {
   modelsJsonPath: string;
   maxBytes: number;
   filesScanned: Set<string>;
-  refAssignments: readonly ConfigRefAssignment[];
+  sourceProviders?: ModelsProviders;
+  secretDefaults?: SecretDefaults;
   addFinding: (finding: ModelsJsonAuditFinding) => void;
 }): void {
   if (!fs.existsSync(params.modelsJsonPath)) {
@@ -100,6 +114,7 @@ export function collectModelsJsonSecrets(params: {
   if (!parsed || !isRecord(parsed.providers)) {
     return;
   }
+  const sourceProvidersByKey = normalizeSourceProviderLookup(params.sourceProviders);
   for (const [providerId, providerValue] of Object.entries(parsed.providers)) {
     if (!isRecord(providerValue)) {
       continue;
@@ -120,7 +135,8 @@ export function collectModelsJsonSecrets(params: {
       !isConfigOwnedEnvApiKeyMarker({
         providerId,
         marker: apiKey,
-        refAssignments: params.refAssignments,
+        sourceProvidersByKey,
+        secretDefaults: params.secretDefaults,
       })
     ) {
       params.addFinding({

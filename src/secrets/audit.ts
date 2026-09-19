@@ -587,7 +587,8 @@ export async function runSecretsAudit(
         modelsJsonPath,
         maxBytes: MAX_AUDIT_MODELS_JSON_BYTES,
         filesScanned: collector.filesScanned,
-        refAssignments: collector.refAssignments,
+        sourceProviders: config.models?.providers,
+        secretDefaults: defaults,
         addFinding: (finding) => addFinding(collector, finding),
       });
     }

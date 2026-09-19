@@ -310,6 +310,166 @@ describe("secrets audit models.json env-marker ownership", () => {
 
   it.each([
     {
+      name: "canonical file then alias",
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "file", provider: "default", id: "/openai/apiKey" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+    {
+      name: "alias then canonical file",
+      providers: {
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "file", provider: "default", id: "/openai/apiKey" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+    {
+      name: "canonical store then alias",
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "store", provider: "default", id: "STORED_OPENAI_KEY" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+    {
+      name: "alias then canonical store",
+      providers: {
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "store", provider: "default", id: "STORED_OPENAI_KEY" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+    {
+      name: "canonical literal then alias",
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: "sk-canonical-literal",
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+    {
+      name: "alias then canonical literal",
+      providers: {
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: "sk-canonical-literal",
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+    {
+      name: "canonical absent apiKey then alias",
+      providers: {
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+    {
+      name: "alias then canonical absent apiKey",
+      providers: {
+        OpenAI: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          apiKey: { source: "env", provider: "default", id: "LOSING_ENV" },
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+        openai: {
+          baseUrl: "https://api.openai.com/v1",
+          api: "openai-completions",
+          models: [{ id: "gpt-5", name: "gpt-5" }],
+        },
+      },
+    },
+  ])(
+    "does not treat a losing alias env marker as owned when the canonical winner is non-env ($name)",
+    async ({ providers }) => {
+      await writeJsonFile(fixture.configPath, {
+        models: { providers },
+      });
+      await writeJsonFile(fixture.modelsPath, {
+        providers: {
+          openai: {
+            baseUrl: "https://api.openai.com/v1",
+            api: "openai-completions",
+            apiKey: "LOSING_ENV",
+            models: [{ id: "gpt-5", name: "gpt-5" }],
+          },
+        },
+      });
+
+      const report = await runSecretsAudit({ env: fixture.env });
+      expectModelsFinding(report, {
+        code: "PLAINTEXT_FOUND",
+        jsonPath: "providers.openai.apiKey",
+      });
+    },
+  );
+
+  it.each([
+    {
       name: "alias then canonical",
       providers: {
         OpenAI: {
