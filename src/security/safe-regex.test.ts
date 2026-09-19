@@ -385,4 +385,20 @@ describe("safe regex", () => {
       "unsafe-nested-repetition",
     );
   });
+
+  it("rejects equal-length overlapping alternatives that carry lookaround assertions", () => {
+    expect(compileSafeRegexDetailed("^(a|a(?=a))+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^(a|a(?=a))+$").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects overlapping v-mode string-class alternatives", () => {
+    expect(compileSafeRegexDetailed("^([\\q{cd}]a|cdacda)+$", "v").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^([\\q{cd}]a|cdacda)+$", "v").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
 });
