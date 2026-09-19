@@ -904,4 +904,22 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     };
     expect(result.aaa.mode).toBeUndefined();
   });
+
+  it("skips equal-length lookaround overlapping alternatives", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(a|a(?=a))+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { aaaa: {} }) as {
+      aaaa: { mode?: string };
+    };
+    expect(result.aaaa.mode).toBeUndefined();
+  });
 });

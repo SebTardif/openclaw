@@ -4,6 +4,7 @@ import { pruneMapToMaxSize } from "../infra/map-size.js";
 import {
   alternativeSequencesOverlap,
   atomsCanMatchSamePrefix,
+  classHasUnknownConsumedLength,
   isUnicodeRegexMode,
   readCompleteEscapeAtom,
   sequenceHasUnknownLength,
@@ -27,6 +28,7 @@ type QuantifierRead = {
 type TokenState = {
   containsRepetition: boolean;
   hasAmbiguousAlternation: boolean;
+  hasAssertion: boolean;
   minLength: number;
   maxLength: number;
   sequences: string[][];
@@ -37,6 +39,7 @@ type ParseFrame = {
   containsRepetition: boolean;
   hasAlternation: boolean;
   assertion: boolean;
+  hasAssertion: boolean;
   modifierUnknown: boolean;
   branchMinLength: number;
   branchMaxLength: number;
@@ -79,6 +82,7 @@ function createParseFrame(): ParseFrame {
     containsRepetition: false,
     hasAlternation: false,
     assertion: false,
+    hasAssertion: false,
     modifierUnknown: false,
     branchMinLength: 0,
     branchMaxLength: 0,
@@ -312,6 +316,7 @@ function analyzeTokensForNestedRepetition(
   foldCase = false,
   unicode = false,
   capturingGroups = 0,
+  unicodeSets = false,
 ): boolean {
   const frames: ParseFrame[] = [createParseFrame()];
 
@@ -321,6 +326,9 @@ function analyzeTokensForNestedRepetition(
     if (token.containsRepetition) {
       frame.containsRepetition = true;
     }
+    if (token.hasAssertion) {
+      frame.hasAssertion = true;
+    }
     if (token.sequences.length > 0) {
       frame.branchSequences = concatTokenSequences(frame.branchSequences, token.sequences);
     }
@@ -329,10 +337,14 @@ function analyzeTokensForNestedRepetition(
   };
 
   const emitSimpleToken = (sig: string) => {
-    if (escapeHasUnknownConsumedLength(sig, { unicode, capturingGroups })) {
+    if (
+      escapeHasUnknownConsumedLength(sig, { unicode, capturingGroups }) ||
+      classHasUnknownConsumedLength(sig, unicodeSets)
+    ) {
       emitToken({
         containsRepetition: false,
         hasAmbiguousAlternation: false,
+        hasAssertion: false,
         minLength: 0,
         maxLength: Number.POSITIVE_INFINITY,
         sequences: unknownLengthSequences(),
@@ -343,6 +355,7 @@ function analyzeTokensForNestedRepetition(
       emitToken({
         containsRepetition: false,
         hasAmbiguousAlternation: false,
+        hasAssertion: true,
         minLength: 0,
         maxLength: 0,
         sequences: [],
@@ -352,6 +365,7 @@ function analyzeTokensForNestedRepetition(
     emitToken({
       containsRepetition: false,
       hasAmbiguousAlternation: false,
+      hasAssertion: false,
       minLength: 1,
       maxLength: 1,
       sequences: [[sig]],
@@ -379,6 +393,7 @@ function analyzeTokensForNestedRepetition(
           emitToken({
             containsRepetition: frame.containsRepetition,
             hasAmbiguousAlternation: false,
+            hasAssertion: true,
             minLength: 0,
             maxLength: 0,
             sequences: [],
@@ -410,8 +425,9 @@ function analyzeTokensForNestedRepetition(
         emitToken({
           containsRepetition: frame.containsRepetition,
           hasAmbiguousAlternation: distinguishDisjointAlternatives
-            ? lengthAmbiguous && overlapping
+            ? overlapping && (lengthAmbiguous || frame.hasAssertion)
             : lengthAmbiguous,
+          hasAssertion: frame.hasAssertion,
           minLength: groupMinLength,
           maxLength: groupMaxLength,
           sequences: groupSequences.length > 0 ? groupSequences : [[""]],
@@ -529,6 +545,7 @@ function hasNestedRepetition(
     flags.includes("i"),
     unicode,
     capturingGroups,
+    unicodeSets,
   );
 }
 

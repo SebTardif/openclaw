@@ -561,6 +561,19 @@ describe("createMcpJsonSchemaValidator patternProperties preflight", () => {
     ).toThrow(/unsafe patternProperties pattern rejected/);
   });
 
+  it("rejects equal-length lookaround overlapping alternatives on the MCP entrypoint", () => {
+    const factory = createMcpJsonSchemaValidator();
+    expect(() =>
+      factory.getValidator({
+        $schema: DRAFT,
+        type: "object",
+        patternProperties: {
+          "^(a|a(?=a))+$": { type: "string" },
+        },
+      }),
+    ).toThrow(/unsafe patternProperties pattern rejected/);
+  });
+
   it("accepts deterministic groups that share a first character on the MCP entrypoint", () => {
     const factory = createMcpJsonSchemaValidator();
     const validate = factory.getValidator<{ abac?: string }>({

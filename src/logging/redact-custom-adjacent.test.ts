@@ -151,4 +151,13 @@ describe("custom adjacent-class redaction", () => {
     });
     expect(output).toContain(secret);
   });
+
+  it("drops equal-length lookaround overlapping custom redaction alternatives", () => {
+    const secret = "aaaaX";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["(a|a(?=a))+"],
+    });
+    expect(output).toContain(secret);
+  });
 });

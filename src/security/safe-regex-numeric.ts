@@ -227,7 +227,12 @@ function isUnicodePropertyName(value: string): boolean {
 export function readCompleteEscapeAtom(
   source: string,
   index: number,
-  options: { unicode?: boolean; capturingGroups?: number; inClass?: boolean } = {},
+  options: {
+    unicode?: boolean;
+    capturingGroups?: number;
+    inClass?: boolean;
+    unicodeSets?: boolean;
+  } = {},
 ): { end: number; sig: string } {
   if (source[index] !== "\\") {
     return { end: index + 1, sig: source[index] ?? "" };
@@ -235,6 +240,17 @@ export function readCompleteEscapeAtom(
   const next = source[index + 1];
   if (next === undefined) {
     return { end: index + 1, sig: "\\" };
+  }
+  if (
+    options.inClass &&
+    (options.unicodeSets || options.unicode) &&
+    next === "q" &&
+    source[index + 2] === "{"
+  ) {
+    const close = source.indexOf("}", index + 3);
+    if (close !== -1) {
+      return { end: close + 1, sig: source.slice(index, close + 1) };
+    }
   }
   if (options.unicode && (next === "p" || next === "P")) {
     if (source[index + 2] === "{") {

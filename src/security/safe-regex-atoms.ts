@@ -152,7 +152,11 @@ function readClassAtom(
   if (index + 1 >= end) {
     return { next: index + 1, lang: singleton("\\", foldCase) };
   }
-  const esc = readCompleteEscapeAtom(source, index, { unicode, inClass: true });
+  const esc = readCompleteEscapeAtom(source, index, {
+    unicode,
+    inClass: true,
+    unicodeSets: unicode,
+  });
   if (esc.end > end) {
     return {
       next: index + 2,
@@ -160,6 +164,40 @@ function readClassAtom(
     };
   }
   return { next: esc.end, lang: escapeLanguage(esc.sig, foldCase, true, unicode) };
+}
+
+export function classHasUnknownConsumedLength(sig: string, unicodeSets: boolean): boolean {
+  if (!unicodeSets || !sig.startsWith("[")) {
+    return false;
+  }
+  const end = sig.endsWith("]") ? sig.length - 1 : sig.length;
+  let i = 1;
+  if (sig[i] === "^") {
+    i += 1;
+  }
+  while (i < end) {
+    if (sig[i] === "\\") {
+      const next = sig[i + 1];
+      if (next === "q" && sig[i + 2] === "{") {
+        return true;
+      }
+      if ((next === "p" || next === "P") && sig[i + 2] === "{") {
+        return true;
+      }
+      i += next === undefined ? 1 : 2;
+      continue;
+    }
+    if (sig[i] === "[") {
+      const nested = readCharClassSig(sig, i, true);
+      if (classHasUnknownConsumedLength(nested.sig, true)) {
+        return true;
+      }
+      i = nested.end;
+      continue;
+    }
+    i += 1;
+  }
+  return false;
 }
 
 function classBodyHasNestedSet(sig: string, start: number, end: number): boolean {
@@ -186,6 +224,9 @@ function classBodyHasNestedSet(sig: string, start: number, end: number): boolean
 
 function classLanguage(sig: string, foldCase: boolean, unicode = false): AtomLanguage {
   if (!sig.startsWith("[") || !sig.endsWith("]")) {
+    return { kind: "any" };
+  }
+  if (classHasUnknownConsumedLength(sig, unicode)) {
     return { kind: "any" };
   }
   const end = sig.length - 1;
