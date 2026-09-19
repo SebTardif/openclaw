@@ -20,7 +20,7 @@ export async function readIMessageInboundStoreAllowFrom(params: {
   return await readChannelAllowFromStore("imessage", params.env ?? process.env, params.accountId);
 }
 
-export function isIMessagePairingStoreRequired(params: {
+function isIMessagePairingStoreRequired(params: {
   message: IMessagePayload;
   cfg: OpenClawConfig;
   accountId: string;
