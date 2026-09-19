@@ -46,13 +46,16 @@ export function classifyNumericEscape(
 
 export function escapeHasUnknownConsumedLength(
   sig: string,
-  options: { unicode?: boolean; capturingGroups?: number } = {},
+  options: { unicode?: boolean; capturingGroups?: number; unicodeSets?: boolean } = {},
 ): boolean {
   if (!sig.startsWith("\\")) {
     return false;
   }
   const body = sig.slice(1);
   if (body.startsWith("k<")) {
+    return true;
+  }
+  if (options.unicodeSets && isStringUnicodePropertyEscape(sig)) {
     return true;
   }
   if (!/^[0-9]+$/.test(body)) {
@@ -222,6 +225,30 @@ function readPairedUnicodeEscape(
 
 function isUnicodePropertyName(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*(?:=[A-Za-z0-9_-]+)?$/.test(value);
+}
+
+// v-mode string properties match code-point sequences, not one character.
+const STRING_UNICODE_PROPERTIES = new Set([
+  "Basic_Emoji",
+  "Emoji_Keycap_Sequence",
+  "RGI_Emoji_Modifier_Sequence",
+  "RGI_Emoji_Flag_Sequence",
+  "RGI_Emoji_Tag_Sequence",
+  "RGI_Emoji_ZWJ_Sequence",
+  "RGI_Emoji",
+]);
+
+function isStringUnicodePropertyEscape(sig: string): boolean {
+  if (!sig.startsWith("\\p{") && !sig.startsWith("\\P{")) {
+    return false;
+  }
+  if (!sig.endsWith("}")) {
+    return false;
+  }
+  const name = sig.slice(3, -1);
+  const eq = name.indexOf("=");
+  const bare = eq === -1 ? name : name.slice(0, eq);
+  return STRING_UNICODE_PROPERTIES.has(bare);
 }
 
 export function readCompleteEscapeAtom(

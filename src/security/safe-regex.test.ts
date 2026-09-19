@@ -401,4 +401,14 @@ describe("safe regex", () => {
       "unsafe-nested-repetition",
     );
   });
+
+  it("rejects overlapping standalone v-mode string-property alternatives", () => {
+    expect(compileSafeRegexDetailed("^(\\p{RGI_Emoji_Flag_Sequence}a|🇺🇸a🇺🇸a)+$", "v").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(
+      compileJsonSchemaPatternRegexDetailed("^(\\p{RGI_Emoji_Flag_Sequence}a|🇺🇸a🇺🇸a)+$", "v")
+        .reason,
+    ).toBe("unsafe-nested-repetition");
+  });
 });
