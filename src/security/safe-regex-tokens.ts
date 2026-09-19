@@ -93,6 +93,7 @@ export function readEscapeAtomEnd(
   source: string,
   backslashIndex: number,
   unicodeMode = false,
+  captureCount = 0,
 ): number {
   if (backslashIndex + 1 >= source.length) {
     return backslashIndex;
@@ -130,12 +131,49 @@ export function readEscapeAtomEnd(
     return afterKind + 1;
   }
 
+  const backref = readDecimalBackref(source, backslashIndex, captureCount);
+  if (backref) {
+    return backref.nextIndex - 1;
+  }
+
   const octal = readLegacyOctalEscape(source, backslashIndex, unicodeMode);
   if (octal) {
     return octal.nextIndex - 1;
   }
 
   return backslashIndex + 1;
+}
+
+/**
+ * Decimal `\1`..`\k` is a backref when k <= capturing groups. `\0` is never
+ * a backref. Consume the full digit run so `\400` stays one atom when group
+ * 400 exists, instead of two-digit octal `\40` plus leftover `0`.
+ */
+function readDecimalBackref(
+  source: string,
+  index: number,
+  captureCount: number,
+): { nextIndex: number } | null {
+  if (captureCount <= 0 || source[index] !== "\\") {
+    return null;
+  }
+  const first = source[index + 1];
+  if (first === undefined || first < "1" || first > "9") {
+    return null;
+  }
+  let end = index + 1;
+  while (end + 1 < source.length) {
+    const next = source[end + 1];
+    if (next === undefined || next < "0" || next > "9") {
+      break;
+    }
+    end += 1;
+  }
+  const n = Number.parseInt(source.slice(index + 1, end + 1), 10);
+  if (!Number.isFinite(n) || n > captureCount) {
+    return null;
+  }
+  return { nextIndex: end + 1 };
 }
 
 /**
@@ -179,7 +217,11 @@ export function readUnambiguousOctalEscape(
   source: string,
   index: number,
   unicodeMode: boolean,
+  captureCount = 0,
 ): { value: string; nextIndex: number } | null {
+  if (readDecimalBackref(source, index, captureCount)) {
+    return null;
+  }
   const octal = readLegacyOctalEscape(source, index, unicodeMode);
   if (!octal) {
     return null;
@@ -194,15 +236,92 @@ export function readUnambiguousOctalEscape(
   return octal;
 }
 
-export function tokenizePattern(source: string, flags = ""): PatternToken[] {
+/**
+ * Decode a single \uXXXX / \xXX / \u{...} / unambiguous octal escape at
+ * `index` (points at backslash). Numeric backrefs stay unproven.
+ */
+export function readScalarEscape(
+  source: string,
+  index: number,
+  unicodeMode = false,
+  captureCount = 0,
+): { value: string; nextIndex: number } | null {
+  if (source[index] !== "\\") {
+    return null;
+  }
+  const kind = source[index + 1];
+  if (kind === "u" && source[index + 2] === "{") {
+    if (!unicodeMode) {
+      return null;
+    }
+    const close = source.indexOf("}", index + 3);
+    if (close < 0) {
+      return null;
+    }
+    const hex = source.slice(index + 3, close);
+    if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) {
+      return null;
+    }
+    const cp = Number.parseInt(hex, 16);
+    if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) {
+      return null;
+    }
+    return { value: String.fromCodePoint(cp), nextIndex: close + 1 };
+  }
+  if (kind === "u" && /^[0-9a-fA-F]{4}/.test(source.slice(index + 2, index + 6))) {
+    const cp = Number.parseInt(source.slice(index + 2, index + 6), 16);
+    return { value: String.fromCodePoint(cp), nextIndex: index + 6 };
+  }
+  if (kind === "x" && /^[0-9a-fA-F]{2}/.test(source.slice(index + 2, index + 4))) {
+    const cp = Number.parseInt(source.slice(index + 2, index + 4), 16);
+    return { value: String.fromCharCode(cp), nextIndex: index + 4 };
+  }
+  return readUnambiguousOctalEscape(source, index, unicodeMode, captureCount);
+}
+
+function isCapturingGroupOpen(source: string, contentStart: number): boolean {
+  let open = contentStart - 1;
+  while (open >= 0 && source[open] !== "(") {
+    open -= 1;
+  }
+  if (open < 0) {
+    return false;
+  }
+  if (source[open + 1] !== "?") {
+    return true;
+  }
+  const marker = source[open + 2];
+  if (marker === ":" || marker === "=" || marker === "!") {
+    return false;
+  }
+  if (marker === "<" && (source[open + 3] === "=" || source[open + 3] === "!")) {
+    return false;
+  }
+  return true;
+}
+
+export function countCapturingGroups(source: string, tokens: readonly PatternToken[]): number {
+  let count = 0;
+  for (const token of tokens) {
+    if (token.kind === "group-open" && isCapturingGroupOpen(source, token.contentStart)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function tokenizePatternWithCaptures(
+  source: string,
+  unicodeMode: boolean,
+  captureCount: number,
+): PatternToken[] {
   const tokens: PatternToken[] = [];
-  const unicodeMode = flags.includes("u") || flags.includes("v");
 
   for (let i = 0; i < source.length; i += 1) {
     const ch = source[i];
 
     if (ch === "\\") {
-      const end = readEscapeAtomEnd(source, i, unicodeMode);
+      const end = readEscapeAtomEnd(source, i, unicodeMode, captureCount);
       tokens.push({ kind: "simple-token", source: source.slice(i, end + 1) });
       i = end;
       continue;
@@ -256,6 +375,19 @@ export function tokenizePattern(source: string, flags = ""): PatternToken[] {
   }
 
   return tokens;
+}
+
+export function tokenizePattern(source: string, flags = "", captureCount?: number): PatternToken[] {
+  const unicodeMode = flags.includes("u") || flags.includes("v");
+  if (captureCount === undefined) {
+    const firstPass = tokenizePatternWithCaptures(source, unicodeMode, 0);
+    const counted = countCapturingGroups(source, firstPass);
+    if (counted === 0) {
+      return firstPass;
+    }
+    return tokenizePatternWithCaptures(source, unicodeMode, counted);
+  }
+  return tokenizePatternWithCaptures(source, unicodeMode, captureCount);
 }
 
 const ZERO_WIDTH_SIMPLE_ATOMS = new Set(["^", "$", "\\b", "\\B"]);
@@ -317,7 +449,11 @@ function escapeDecodedLiteral(value: string): string {
  * (backref, incomplete escape). Decoded scalars are emitted as `\xNN`
  * / `\u{hex}` so `$` and `.` stay literals during overlap probing.
  */
-function decodeFixedWidthSimpleToken(source: string, unicodeMode: boolean): string | null {
+function decodeFixedWidthSimpleToken(
+  source: string,
+  unicodeMode: boolean,
+  captureCount: number,
+): string | null {
   if (!source.startsWith("\\")) {
     return source;
   }
@@ -334,7 +470,7 @@ function decodeFixedWidthSimpleToken(source: string, unicodeMode: boolean): stri
     }
     return escapeDecodedLiteral(String.fromCodePoint(cp));
   }
-  const octal = readUnambiguousOctalEscape(source, 0, unicodeMode);
+  const octal = readUnambiguousOctalEscape(source, 0, unicodeMode, captureCount);
   if (octal && octal.nextIndex === source.length) {
     return escapeDecodedLiteral(octal.value);
   }
@@ -354,8 +490,12 @@ function decodeFixedWidthSimpleToken(source: string, unicodeMode: boolean): stri
   return null;
 }
 
-function collectFixedLengthAtoms(source: string, unicodeMode: boolean): string[] | null {
-  const tokens = tokenizePattern(source, unicodeMode ? "u" : "");
+function collectFixedLengthAtoms(
+  source: string,
+  unicodeMode: boolean,
+  captureCount: number,
+): string[] | null {
+  const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
   const atoms: string[] = [];
   for (let index = 0; index < tokens.length;) {
     const token = tokens[index];
@@ -382,7 +522,7 @@ function collectFixedLengthAtoms(source: string, unicodeMode: boolean): string[]
       }
       const interior = source.slice(contentStart, close.start);
       if (interior) {
-        const inner = collectFixedLengthAtoms(interior, unicodeMode);
+        const inner = collectFixedLengthAtoms(interior, unicodeMode, captureCount);
         if (!inner) {
           return null;
         }
@@ -395,7 +535,7 @@ function collectFixedLengthAtoms(source: string, unicodeMode: boolean): string[]
       index += 1;
       continue;
     }
-    const decoded = decodeFixedWidthSimpleToken(token.source, unicodeMode);
+    const decoded = decodeFixedWidthSimpleToken(token.source, unicodeMode, captureCount);
     if (decoded === null) {
       return null;
     }
@@ -406,22 +546,38 @@ function collectFixedLengthAtoms(source: string, unicodeMode: boolean): string[]
 }
 
 /**
+ * Drop unescaped start/end anchors only. `a\$` must keep the literal dollar.
+ */
+export function stripAlternativeAnchors(source: string): string {
+  let start = 0;
+  let end = source.length;
+  if (source[start] === "^") {
+    start += 1;
+  }
+  if (end > start && source[end - 1] === "$") {
+    let slashes = 0;
+    for (let i = end - 2; i >= start && source[i] === "\\"; i -= 1) {
+      slashes += 1;
+    }
+    if (slashes % 2 === 0) {
+      end -= 1;
+    }
+  }
+  return source.slice(start, end);
+}
+
+/**
  * Fixed-length atom sequence for one alternative, or null when a
  * quantifier, unknown-width atom, or unproven group makes length unknown.
  */
 export function readFixedLengthAlternativeAtoms(
   source: string,
   unicodeMode = false,
+  captureCount = 0,
 ): string[] | null {
-  let body = source;
-  if (body.startsWith("^")) {
-    body = body.slice(1);
-  }
-  if (body.endsWith("$") && body.length > 0) {
-    body = body.slice(0, -1);
-  }
+  const body = stripAlternativeAnchors(source);
   if (!body) {
     return null;
   }
-  return collectFixedLengthAtoms(body, unicodeMode);
+  return collectFixedLengthAtoms(body, unicodeMode, captureCount);
 }

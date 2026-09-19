@@ -9,9 +9,11 @@ import {
   shouldRejectAdjacentOverlap,
 } from "./safe-regex-adjacent.js";
 import {
+  countCapturingGroups,
   readEscapeAtomEnd,
   readFixedLengthAlternativeAtoms,
-  readUnambiguousOctalEscape,
+  readScalarEscape,
+  stripAlternativeAnchors,
   tokenizePattern,
   type PatternToken,
 } from "./safe-regex-tokens.js";
@@ -104,51 +106,10 @@ function escapeRegExpLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/**
- * Decode a single \uXXXX / \xXX / \u{...} escape at `index` (points at backslash).
- * Returns the code point string and next index, or null if not a known scalar escape.
- */
-function readScalarEscape(
-  source: string,
-  index: number,
-  unicodeMode = false,
-): { value: string; nextIndex: number } | null {
-  if (source[index] !== "\\") {
-    return null;
-  }
-  const kind = source[index + 1];
-  if (kind === "u" && source[index + 2] === "{") {
-    if (!unicodeMode) {
-      return null;
-    }
-    const close = source.indexOf("}", index + 3);
-    if (close < 0) {
-      return null;
-    }
-    const hex = source.slice(index + 3, close);
-    if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) {
-      return null;
-    }
-    const cp = Number.parseInt(hex, 16);
-    if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) {
-      return null;
-    }
-    return { value: String.fromCodePoint(cp), nextIndex: close + 1 };
-  }
-  if (kind === "u" && /^[0-9a-fA-F]{4}/.test(source.slice(index + 2, index + 6))) {
-    const cp = Number.parseInt(source.slice(index + 2, index + 6), 16);
-    return { value: String.fromCodePoint(cp), nextIndex: index + 6 };
-  }
-  if (kind === "x" && /^[0-9a-fA-F]{2}/.test(source.slice(index + 2, index + 4))) {
-    const cp = Number.parseInt(source.slice(index + 2, index + 4), 16);
-    return { value: String.fromCharCode(cp), nextIndex: index + 4 };
-  }
-  return readUnambiguousOctalEscape(source, index, unicodeMode);
-}
-
 function readAlternativeLiteral(
   source: string,
   unicodeMode = false,
+  captureCount = 0,
 ): { kind: "broad" } | { kind: "literal"; value: string } {
   let value = "";
   for (let index = 0; index < source.length; index += 1) {
@@ -157,7 +118,7 @@ function readAlternativeLiteral(
       continue;
     }
     if (ch === "\\") {
-      const scalar = readScalarEscape(source, index, unicodeMode);
+      const scalar = readScalarEscape(source, index, unicodeMode, captureCount);
       if (scalar) {
         value += scalar.value;
         index = scalar.nextIndex - 1;
@@ -193,7 +154,7 @@ function readAlternativeLiteral(
   return value.length === 0 ? { kind: "broad" } : { kind: "literal", value };
 }
 
-function isSingleTokenAlternative(source: string, unicodeMode = false): boolean {
+function isSingleTokenAlternative(source: string, unicodeMode = false, captureCount = 0): boolean {
   // True for one char, one escape, or one char-class after anchors.
   // Used so unions like ([\w]|[-.])+ are not treated as nested ReDoS.
   let tokens = 0;
@@ -204,7 +165,7 @@ function isSingleTokenAlternative(source: string, unicodeMode = false): boolean 
     }
     if (ch === "\\") {
       tokens += 1;
-      index = readEscapeAtomEnd(source, index, unicodeMode);
+      index = readEscapeAtomEnd(source, index, unicodeMode, captureCount);
       if (tokens > 1) {
         return false;
       }
@@ -258,9 +219,10 @@ function alternativesMayOverlap(
   ignoreCase: boolean,
   failClosedUnprobedUnicode: boolean,
   unicodeMode = false,
+  captureCount = 0,
 ): boolean {
-  const leftLit = readAlternativeLiteral(left, unicodeMode);
-  const rightLit = readAlternativeLiteral(right, unicodeMode);
+  const leftLit = readAlternativeLiteral(left, unicodeMode, captureCount);
+  const rightLit = readAlternativeLiteral(right, unicodeMode, captureCount);
   if (leftLit.kind === "literal" && rightLit.kind === "literal") {
     const a = leftLit.value;
     const b = rightLit.value;
@@ -280,11 +242,14 @@ function alternativesMayOverlap(
   }
   // Single-token unions (class/escape/literal) are safe only when proven
   // disjoint. Overlapping classes like \w|\d still admit unbounded ambiguity.
-  if (isSingleTokenAlternative(left, unicodeMode) && isSingleTokenAlternative(right, unicodeMode)) {
+  if (
+    isSingleTokenAlternative(left, unicodeMode, captureCount) &&
+    isSingleTokenAlternative(right, unicodeMode, captureCount)
+  ) {
     return singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode);
   }
-  const leftAtoms = readFixedLengthAlternativeAtoms(left, unicodeMode);
-  const rightAtoms = readFixedLengthAlternativeAtoms(right, unicodeMode);
+  const leftAtoms = readFixedLengthAlternativeAtoms(left, unicodeMode, captureCount);
+  const rightAtoms = readFixedLengthAlternativeAtoms(right, unicodeMode, captureCount);
   if (leftAtoms && rightAtoms) {
     // Equal consumed length: disjoint mixed alts such as ab|[c]d are safe.
     return mixedEqualLengthSequencesOverlap(
@@ -299,31 +264,19 @@ function alternativesMayOverlap(
   return true;
 }
 
-function stripAlternativeAnchors(source: string): string {
-  let start = 0;
-  let end = source.length;
-  if (source[start] === "^") {
-    start += 1;
-  }
-  if (end > start && source[end - 1] === "$") {
-    end -= 1;
-  }
-  return source.slice(start, end);
-}
-
 /**
  * Probe whether two single-token alternatives can match the same character.
  * Fail closed on compile errors or unknown shapes.
  */
 
 /** True if an alternative may match outside the finite ASCII+probe set. */
-function alternativeHasUnprobedNonAscii(source: string): boolean {
+function alternativeHasUnprobedNonAscii(source: string, captureCount = 0): boolean {
   const body = stripAlternativeAnchors(source);
   // Decode known scalar escapes so \u0061 stays ASCII-probed (disjoint a|b).
   let decoded = "";
   for (let index = 0; index < body.length; index += 1) {
     if (body[index] === "\\") {
-      const scalar = readScalarEscape(body, index);
+      const scalar = readScalarEscape(body, index, false, captureCount);
       if (scalar) {
         decoded += scalar.value;
         index = scalar.nextIndex - 1;
@@ -424,6 +377,7 @@ function recordAlternative(
   ignoreCase: boolean,
   failClosedUnprobedUnicode: boolean,
   unicodeMode: boolean,
+  captureCount: number,
 ): void {
   const branchSource = source.slice(frame.branchStart, branchEnd);
   if (
@@ -434,6 +388,7 @@ function recordAlternative(
         ignoreCase,
         failClosedUnprobedUnicode,
         unicodeMode,
+        captureCount,
       ),
     )
   ) {
@@ -455,11 +410,12 @@ function adjacentPairOverlaps(
   right: string,
   ignoreCase: boolean,
   unicodeMode = false,
+  captureCount = 0,
 ): boolean {
   return (
-    isSingleTokenAlternative(left, unicodeMode) &&
-    isSingleTokenAlternative(right, unicodeMode) &&
-    alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode)
+    isSingleTokenAlternative(left, unicodeMode, captureCount) &&
+    isSingleTokenAlternative(right, unicodeMode, captureCount) &&
+    alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode, captureCount)
   );
 }
 
@@ -469,9 +425,10 @@ function analyzeTokensForNestedRepetition(
   ignoreCase: boolean,
   failClosedUnprobedUnicode: boolean,
   unicodeMode: boolean,
+  captureCount: number,
 ): boolean {
   const pairOverlaps = (left: string, right: string, ignoreCaseFlag: boolean) =>
-    adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode);
+    adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode, captureCount);
   const frames: ParseFrame[] = [createParseFrame()];
 
   const emitToken = (token: TokenState) => {
@@ -550,6 +507,7 @@ function analyzeTokensForNestedRepetition(
             ignoreCase,
             failClosedUnprobedUnicode,
             unicodeMode,
+            captureCount,
           );
         }
         const groupMinLength = frame.hasAlternation
@@ -623,6 +581,7 @@ function analyzeTokensForNestedRepetition(
         ignoreCase,
         failClosedUnprobedUnicode,
         unicodeMode,
+        captureCount,
       );
       frame.branchStart = token.end;
       frame.branchMinLength = 0;
@@ -721,12 +680,14 @@ function hasUnsafeRepetition(
   // Conservative parser: tokenize first, then check if repeated tokens/groups are repeated again.
   // Non-goal: complete regex AST support; keep strict enough for config safety checks.
   const unicodeMode = flags.includes("u") || flags.includes("v");
+  const tokens = tokenizePattern(source, flags);
   return analyzeTokensForNestedRepetition(
     source,
-    tokenizePattern(source, flags),
+    tokens,
     flags.includes("i"),
     failClosedUnprobedUnicode,
     unicodeMode,
+    countCapturingGroups(source, tokens),
   );
 }
 

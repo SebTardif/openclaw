@@ -118,6 +118,14 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain("corp-.aba");
     expect(output).not.toContain(".aba");
   });
+
+  it("still masks corp-(a\\$|b[!])+ escaped-dollar mixed alternatives", () => {
+    const output = redactSensitiveText("id=corp-a$b!", {
+      patterns: [String.raw`corp-(a\$|b[!])+`],
+    });
+    expect(output).not.toContain("corp-a$b!");
+    expect(output).not.toContain("a$b!");
+  });
 });
 
 describe("registered exact secret values", () => {

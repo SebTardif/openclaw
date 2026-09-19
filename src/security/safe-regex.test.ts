@@ -341,6 +341,37 @@ describe("safe regex", () => {
     ]);
   });
 
+  it("rejects numeric backrefs that the two-digit octal rule would decode as space", () => {
+    // 39 empty groups + (a) makes \40 a backref to `a`, so (\40b|abab)+ is (ab|abab)+.
+    const twoDigit = `^${"()".repeat(39)}(a)(\\40b|abab)+$`;
+    expect(compileSafeRegexDetailed(twoDigit).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(twoDigit)).toBeNull();
+    expect(compileSafeRegexForExec(twoDigit).regex).toBeNull();
+    // 140 empty groups + (a) makes \141 a backref, not octal `a`.
+    const threeDigit = `^${"()".repeat(140)}(a)(\\141b|abab)+$`;
+    expect(compileSafeRegexDetailed(threeDigit).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(threeDigit)).toBeNull();
+    expect(compileSafeRegexForExec(threeDigit).regex).toBeNull();
+    expect(compileSafeRegexDetailed(String.raw`corp-(\141|BCD)+`).reason).toBeNull();
+  });
+
+  it("preserves escaped dollars when stripping alternative anchors", () => {
+    const redaction = String.raw`corp-(a\$|b[!])+`;
+    const grouped = String.raw`^(a\$|b[!])+$`;
+    expect(compileSafeRegexDetailed(redaction).reason).toBeNull();
+    expect(compileSafeRegex(redaction)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(redaction).regex).toBeInstanceOf(RegExp);
+    const compiled = expectCompiledRegex(grouped);
+    expect(compiled.test("a$b!")).toBe(true);
+    expect(compiled.test("b!a$")).toBe(true);
+    expect(compileSafeRegexDetailed(String.raw`^(\$|[$])+$`).reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileSafeRegexDetailed(String.raw`^(\x24a|[$]a)+$`).reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
   it("treats braced unicode escapes as identity plus quantifier without u/v", () => {
     expect(compileSafeRegexDetailed(String.raw`^(\u{2}|u)+$`).reason).toBe(
       "unsafe-nested-repetition",

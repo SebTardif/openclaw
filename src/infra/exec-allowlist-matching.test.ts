@@ -250,6 +250,18 @@ describe("exec allowlist matching", () => {
         pattern: "/usr/bin/python3",
         argPattern: String.raw`^(\400| 0)+$`,
       };
+      const twoDigitBackrefOverlap = {
+        pattern: "/usr/bin/python3",
+        argPattern: `^${"()".repeat(39)}(a)(\\40b|abab)+$`,
+      };
+      const threeDigitBackrefOverlap = {
+        pattern: "/usr/bin/python3",
+        argPattern: `^${"()".repeat(140)}(a)(\\141b|abab)+$`,
+      };
+      const escapedDollarDisjoint = {
+        pattern: "/usr/bin/python3",
+        argPattern: String.raw`^(a\$|b[!])+$`,
+      };
 
       expect(matchAllowlist([duplicate], resolution, ["python3", "aaaa"])).toBeNull();
       expect(matchAllowlist([overlapping], resolution, ["python3", "aaaa"])).toBeNull();
@@ -268,6 +280,15 @@ describe("exec allowlist matching", () => {
         escapedDotDisjoint,
       );
       expect(matchAllowlist([highOctalOverlap], resolution, ["python3", " 0 0"])).toBeNull();
+      expect(
+        matchAllowlist([twoDigitBackrefOverlap], resolution, ["python3", "aababab"]),
+      ).toBeNull();
+      expect(
+        matchAllowlist([threeDigitBackrefOverlap], resolution, ["python3", "aababab"]),
+      ).toBeNull();
+      expect(matchAllowlist([escapedDollarDisjoint], resolution, ["python3", "a$b!"])).toBe(
+        escapedDollarDisjoint,
+      );
     });
 
     it("falls back to an explicit path-only sibling when an argPattern is rejected", () => {

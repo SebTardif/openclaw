@@ -339,7 +339,7 @@ var OpenClawExecArgPattern = (() => {
   function isUnicodePropertyName(interior) {
     return /^[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?$/.test(interior);
   }
-  function readEscapeAtomEnd(source, backslashIndex, unicodeMode = false) {
+  function readEscapeAtomEnd(source, backslashIndex, unicodeMode = false, captureCount = 0) {
     if (backslashIndex + 1 >= source.length) {
       return backslashIndex;
     }
@@ -371,11 +371,37 @@ var OpenClawExecArgPattern = (() => {
     if (kind === "x" && /^[0-9a-fA-F]{2}/.test(source.slice(afterKind, afterKind + 2))) {
       return afterKind + 1;
     }
+    const backref = readDecimalBackref(source, backslashIndex, captureCount);
+    if (backref) {
+      return backref.nextIndex - 1;
+    }
     const octal = readLegacyOctalEscape(source, backslashIndex, unicodeMode);
     if (octal) {
       return octal.nextIndex - 1;
     }
     return backslashIndex + 1;
+  }
+  function readDecimalBackref(source, index, captureCount) {
+    if (captureCount <= 0 || source[index] !== "\\") {
+      return null;
+    }
+    const first = source[index + 1];
+    if (first === void 0 || first < "1" || first > "9") {
+      return null;
+    }
+    let end = index + 1;
+    while (end + 1 < source.length) {
+      const next = source[end + 1];
+      if (next === void 0 || next < "0" || next > "9") {
+        break;
+      }
+      end += 1;
+    }
+    const n = Number.parseInt(source.slice(index + 1, end + 1), 10);
+    if (!Number.isFinite(n) || n > captureCount) {
+      return null;
+    }
+    return { nextIndex: end + 1 };
   }
   function readLegacyOctalEscape(source, index, unicodeMode) {
     if (unicodeMode || source[index] !== "\\") {
@@ -399,7 +425,10 @@ var OpenClawExecArgPattern = (() => {
       nextIndex: end + 1
     };
   }
-  function readUnambiguousOctalEscape(source, index, unicodeMode) {
+  function readUnambiguousOctalEscape(source, index, unicodeMode, captureCount = 0) {
+    if (readDecimalBackref(source, index, captureCount)) {
+      return null;
+    }
     const octal = readLegacyOctalEscape(source, index, unicodeMode);
     if (!octal) {
       return null;
@@ -412,13 +441,74 @@ var OpenClawExecArgPattern = (() => {
     }
     return octal;
   }
-  function tokenizePattern(source, flags = "") {
+  function readScalarEscape(source, index, unicodeMode = false, captureCount = 0) {
+    if (source[index] !== "\\") {
+      return null;
+    }
+    const kind = source[index + 1];
+    if (kind === "u" && source[index + 2] === "{") {
+      if (!unicodeMode) {
+        return null;
+      }
+      const close = source.indexOf("}", index + 3);
+      if (close < 0) {
+        return null;
+      }
+      const hex = source.slice(index + 3, close);
+      if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) {
+        return null;
+      }
+      const cp = Number.parseInt(hex, 16);
+      if (!Number.isFinite(cp) || cp < 0 || cp > 1114111) {
+        return null;
+      }
+      return { value: String.fromCodePoint(cp), nextIndex: close + 1 };
+    }
+    if (kind === "u" && /^[0-9a-fA-F]{4}/.test(source.slice(index + 2, index + 6))) {
+      const cp = Number.parseInt(source.slice(index + 2, index + 6), 16);
+      return { value: String.fromCodePoint(cp), nextIndex: index + 6 };
+    }
+    if (kind === "x" && /^[0-9a-fA-F]{2}/.test(source.slice(index + 2, index + 4))) {
+      const cp = Number.parseInt(source.slice(index + 2, index + 4), 16);
+      return { value: String.fromCharCode(cp), nextIndex: index + 4 };
+    }
+    return readUnambiguousOctalEscape(source, index, unicodeMode, captureCount);
+  }
+  function isCapturingGroupOpen(source, contentStart) {
+    let open = contentStart - 1;
+    while (open >= 0 && source[open] !== "(") {
+      open -= 1;
+    }
+    if (open < 0) {
+      return false;
+    }
+    if (source[open + 1] !== "?") {
+      return true;
+    }
+    const marker = source[open + 2];
+    if (marker === ":" || marker === "=" || marker === "!") {
+      return false;
+    }
+    if (marker === "<" && (source[open + 3] === "=" || source[open + 3] === "!")) {
+      return false;
+    }
+    return true;
+  }
+  function countCapturingGroups(source, tokens) {
+    let count = 0;
+    for (const token of tokens) {
+      if (token.kind === "group-open" && isCapturingGroupOpen(source, token.contentStart)) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+  function tokenizePatternWithCaptures(source, unicodeMode, captureCount) {
     const tokens = [];
-    const unicodeMode = flags.includes("u") || flags.includes("v");
     for (let i = 0; i < source.length; i += 1) {
       const ch = source[i];
       if (ch === "\\") {
-        const end = readEscapeAtomEnd(source, i, unicodeMode);
+        const end = readEscapeAtomEnd(source, i, unicodeMode, captureCount);
         tokens.push({ kind: "simple-token", source: source.slice(i, end + 1) });
         i = end;
         continue;
@@ -466,6 +556,18 @@ var OpenClawExecArgPattern = (() => {
     }
     return tokens;
   }
+  function tokenizePattern(source, flags = "", captureCount) {
+    const unicodeMode = flags.includes("u") || flags.includes("v");
+    if (captureCount === void 0) {
+      const firstPass = tokenizePatternWithCaptures(source, unicodeMode, 0);
+      const counted = countCapturingGroups(source, firstPass);
+      if (counted === 0) {
+        return firstPass;
+      }
+      return tokenizePatternWithCaptures(source, unicodeMode, counted);
+    }
+    return tokenizePatternWithCaptures(source, unicodeMode, captureCount);
+  }
   var ZERO_WIDTH_SIMPLE_ATOMS = /* @__PURE__ */ new Set(["^", "$", "\\b", "\\B"]);
   var NAMED_CHAR_ESCAPES = {
     "\\n": "\n",
@@ -511,7 +613,7 @@ var OpenClawExecArgPattern = (() => {
     }
     return escaped;
   }
-  function decodeFixedWidthSimpleToken(source, unicodeMode) {
+  function decodeFixedWidthSimpleToken(source, unicodeMode, captureCount) {
     if (!source.startsWith("\\")) {
       return source;
     }
@@ -528,7 +630,7 @@ var OpenClawExecArgPattern = (() => {
       }
       return escapeDecodedLiteral(String.fromCodePoint(cp));
     }
-    const octal = readUnambiguousOctalEscape(source, 0, unicodeMode);
+    const octal = readUnambiguousOctalEscape(source, 0, unicodeMode, captureCount);
     if (octal && octal.nextIndex === source.length) {
       return escapeDecodedLiteral(octal.value);
     }
@@ -547,8 +649,8 @@ var OpenClawExecArgPattern = (() => {
     }
     return null;
   }
-  function collectFixedLengthAtoms(source, unicodeMode) {
-    const tokens = tokenizePattern(source, unicodeMode ? "u" : "");
+  function collectFixedLengthAtoms(source, unicodeMode, captureCount) {
+    const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
     const atoms = [];
     for (let index = 0; index < tokens.length; ) {
       const token = tokens[index];
@@ -571,7 +673,7 @@ var OpenClawExecArgPattern = (() => {
         }
         const interior = source.slice(contentStart, close.start);
         if (interior) {
-          const inner = collectFixedLengthAtoms(interior, unicodeMode);
+          const inner = collectFixedLengthAtoms(interior, unicodeMode, captureCount);
           if (!inner) {
             return null;
           }
@@ -584,7 +686,7 @@ var OpenClawExecArgPattern = (() => {
         index += 1;
         continue;
       }
-      const decoded = decodeFixedWidthSimpleToken(token.source, unicodeMode);
+      const decoded = decodeFixedWidthSimpleToken(token.source, unicodeMode, captureCount);
       if (decoded === null) {
         return null;
       }
@@ -593,18 +695,29 @@ var OpenClawExecArgPattern = (() => {
     }
     return atoms.length > 0 ? atoms : null;
   }
-  function readFixedLengthAlternativeAtoms(source, unicodeMode = false) {
-    let body = source;
-    if (body.startsWith("^")) {
-      body = body.slice(1);
+  function stripAlternativeAnchors(source) {
+    let start = 0;
+    let end = source.length;
+    if (source[start] === "^") {
+      start += 1;
     }
-    if (body.endsWith("$") && body.length > 0) {
-      body = body.slice(0, -1);
+    if (end > start && source[end - 1] === "$") {
+      let slashes = 0;
+      for (let i = end - 2; i >= start && source[i] === "\\"; i -= 1) {
+        slashes += 1;
+      }
+      if (slashes % 2 === 0) {
+        end -= 1;
+      }
     }
+    return source.slice(start, end);
+  }
+  function readFixedLengthAlternativeAtoms(source, unicodeMode = false, captureCount = 0) {
+    const body = stripAlternativeAnchors(source);
     if (!body) {
       return null;
     }
-    return collectFixedLengthAtoms(body, unicodeMode);
+    return collectFixedLengthAtoms(body, unicodeMode, captureCount);
   }
 
   // src/security/safe-regex.ts
@@ -644,40 +757,7 @@ var OpenClawExecArgPattern = (() => {
   function escapeRegExpLiteral(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
-  function readScalarEscape(source, index, unicodeMode = false) {
-    if (source[index] !== "\\") {
-      return null;
-    }
-    const kind = source[index + 1];
-    if (kind === "u" && source[index + 2] === "{") {
-      if (!unicodeMode) {
-        return null;
-      }
-      const close = source.indexOf("}", index + 3);
-      if (close < 0) {
-        return null;
-      }
-      const hex = source.slice(index + 3, close);
-      if (!/^[0-9a-fA-F]{1,6}$/.test(hex)) {
-        return null;
-      }
-      const cp = Number.parseInt(hex, 16);
-      if (!Number.isFinite(cp) || cp < 0 || cp > 1114111) {
-        return null;
-      }
-      return { value: String.fromCodePoint(cp), nextIndex: close + 1 };
-    }
-    if (kind === "u" && /^[0-9a-fA-F]{4}/.test(source.slice(index + 2, index + 6))) {
-      const cp = Number.parseInt(source.slice(index + 2, index + 6), 16);
-      return { value: String.fromCodePoint(cp), nextIndex: index + 6 };
-    }
-    if (kind === "x" && /^[0-9a-fA-F]{2}/.test(source.slice(index + 2, index + 4))) {
-      const cp = Number.parseInt(source.slice(index + 2, index + 4), 16);
-      return { value: String.fromCharCode(cp), nextIndex: index + 4 };
-    }
-    return readUnambiguousOctalEscape(source, index, unicodeMode);
-  }
-  function readAlternativeLiteral(source, unicodeMode = false) {
+  function readAlternativeLiteral(source, unicodeMode = false, captureCount = 0) {
     let value = "";
     for (let index = 0; index < source.length; index += 1) {
       const ch = source[index];
@@ -685,7 +765,7 @@ var OpenClawExecArgPattern = (() => {
         continue;
       }
       if (ch === "\\") {
-        const scalar = readScalarEscape(source, index, unicodeMode);
+        const scalar = readScalarEscape(source, index, unicodeMode, captureCount);
         if (scalar) {
           value += scalar.value;
           index = scalar.nextIndex - 1;
@@ -710,7 +790,7 @@ var OpenClawExecArgPattern = (() => {
     }
     return value.length === 0 ? { kind: "broad" } : { kind: "literal", value };
   }
-  function isSingleTokenAlternative(source, unicodeMode = false) {
+  function isSingleTokenAlternative(source, unicodeMode = false, captureCount = 0) {
     let tokens = 0;
     for (let index = 0; index < source.length; index += 1) {
       const ch = source[index];
@@ -719,7 +799,7 @@ var OpenClawExecArgPattern = (() => {
       }
       if (ch === "\\") {
         tokens += 1;
-        index = readEscapeAtomEnd(source, index, unicodeMode);
+        index = readEscapeAtomEnd(source, index, unicodeMode, captureCount);
         if (tokens > 1) {
           return false;
         }
@@ -757,9 +837,9 @@ var OpenClawExecArgPattern = (() => {
     }
     return tokens === 1;
   }
-  function alternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode, unicodeMode = false) {
-    const leftLit = readAlternativeLiteral(left, unicodeMode);
-    const rightLit = readAlternativeLiteral(right, unicodeMode);
+  function alternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode, unicodeMode = false, captureCount = 0) {
+    const leftLit = readAlternativeLiteral(left, unicodeMode, captureCount);
+    const rightLit = readAlternativeLiteral(right, unicodeMode, captureCount);
     if (leftLit.kind === "literal" && rightLit.kind === "literal") {
       const a = leftLit.value;
       const b = rightLit.value;
@@ -774,11 +854,11 @@ var OpenClawExecArgPattern = (() => {
         return true;
       }
     }
-    if (isSingleTokenAlternative(left, unicodeMode) && isSingleTokenAlternative(right, unicodeMode)) {
+    if (isSingleTokenAlternative(left, unicodeMode, captureCount) && isSingleTokenAlternative(right, unicodeMode, captureCount)) {
       return singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode);
     }
-    const leftAtoms = readFixedLengthAlternativeAtoms(left, unicodeMode);
-    const rightAtoms = readFixedLengthAlternativeAtoms(right, unicodeMode);
+    const leftAtoms = readFixedLengthAlternativeAtoms(left, unicodeMode, captureCount);
+    const rightAtoms = readFixedLengthAlternativeAtoms(right, unicodeMode, captureCount);
     if (leftAtoms && rightAtoms) {
       return mixedEqualLengthSequencesOverlap(
         leftAtoms,
@@ -790,23 +870,12 @@ var OpenClawExecArgPattern = (() => {
     }
     return true;
   }
-  function stripAlternativeAnchors(source) {
-    let start = 0;
-    let end = source.length;
-    if (source[start] === "^") {
-      start += 1;
-    }
-    if (end > start && source[end - 1] === "$") {
-      end -= 1;
-    }
-    return source.slice(start, end);
-  }
-  function alternativeHasUnprobedNonAscii(source) {
+  function alternativeHasUnprobedNonAscii(source, captureCount = 0) {
     const body = stripAlternativeAnchors(source);
     let decoded = "";
     for (let index = 0; index < body.length; index += 1) {
       if (body[index] === "\\") {
-        const scalar = readScalarEscape(body, index);
+        const scalar = readScalarEscape(body, index, false, captureCount);
         if (scalar) {
           decoded += scalar.value;
           index = scalar.nextIndex - 1;
@@ -876,7 +945,7 @@ var OpenClawExecArgPattern = (() => {
     }
     return false;
   }
-  function recordAlternative(frame, source, branchEnd, ignoreCase, failClosedUnprobedUnicode, unicodeMode) {
+  function recordAlternative(frame, source, branchEnd, ignoreCase, failClosedUnprobedUnicode, unicodeMode, captureCount) {
     const branchSource = source.slice(frame.branchStart, branchEnd);
     if (frame.alternativeSources.some(
       (alternative) => alternativesMayOverlap(
@@ -884,7 +953,8 @@ var OpenClawExecArgPattern = (() => {
         branchSource,
         ignoreCase,
         failClosedUnprobedUnicode,
-        unicodeMode
+        unicodeMode,
+        captureCount
       )
     )) {
       frame.hasOverlappingAlternative = true;
@@ -898,11 +968,11 @@ var OpenClawExecArgPattern = (() => {
     frame.altMinLength = Math.min(frame.altMinLength, frame.branchMinLength);
     frame.altMaxLength = Math.max(frame.altMaxLength, frame.branchMaxLength);
   }
-  function adjacentPairOverlaps(left, right, ignoreCase, unicodeMode = false) {
-    return isSingleTokenAlternative(left, unicodeMode) && isSingleTokenAlternative(right, unicodeMode) && alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode);
+  function adjacentPairOverlaps(left, right, ignoreCase, unicodeMode = false, captureCount = 0) {
+    return isSingleTokenAlternative(left, unicodeMode, captureCount) && isSingleTokenAlternative(right, unicodeMode, captureCount) && alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode, captureCount);
   }
-  function analyzeTokensForNestedRepetition(source, tokens, ignoreCase, failClosedUnprobedUnicode, unicodeMode) {
-    const pairOverlaps = (left, right, ignoreCaseFlag) => adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode);
+  function analyzeTokensForNestedRepetition(source, tokens, ignoreCase, failClosedUnprobedUnicode, unicodeMode, captureCount) {
+    const pairOverlaps = (left, right, ignoreCaseFlag) => adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode, captureCount);
     const frames = [createParseFrame()];
     const emitToken = (token) => {
       const frame = expectDefined(frames[frames.length - 1], "frames entry at frames.length 1");
@@ -973,7 +1043,8 @@ var OpenClawExecArgPattern = (() => {
               token.start,
               ignoreCase,
               failClosedUnprobedUnicode,
-              unicodeMode
+              unicodeMode,
+              captureCount
             );
           }
           const groupMinLength = frame2.hasAlternation ? frame2.altMinLength ?? 0 : frame2.branchMinLength;
@@ -1024,7 +1095,8 @@ var OpenClawExecArgPattern = (() => {
           token.start,
           ignoreCase,
           failClosedUnprobedUnicode,
-          unicodeMode
+          unicodeMode,
+          captureCount
         );
         frame2.branchStart = token.end;
         frame2.branchMinLength = 0;
@@ -1078,12 +1150,14 @@ var OpenClawExecArgPattern = (() => {
   }
   function hasUnsafeRepetition(source, flags, failClosedUnprobedUnicode) {
     const unicodeMode = flags.includes("u") || flags.includes("v");
+    const tokens = tokenizePattern(source, flags);
     return analyzeTokensForNestedRepetition(
       source,
-      tokenizePattern(source, flags),
+      tokens,
       flags.includes("i"),
       failClosedUnprobedUnicode,
-      unicodeMode
+      unicodeMode,
+      countCapturingGroups(source, tokens)
     );
   }
   function compileSafeRegexDetailedImpl(source, flags, failClosedUnprobedUnicode) {

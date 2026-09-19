@@ -299,6 +299,15 @@ describe("doctor security exec argPattern repair", () => {
     const escapedDot = { pattern: "/bin/escaped-dot", argPattern: String.raw`^(\.a|[b]a)+$` };
     const hexDollar = { pattern: "/bin/hex-dollar", argPattern: String.raw`^(\x24a|[$]a)+$` };
     const highOctal = { pattern: "/bin/high-octal", argPattern: String.raw`^(\400| 0)+$` };
+    const escapedDollar = { pattern: "/bin/escaped-dollar", argPattern: String.raw`^(a\$|b[!])+$` };
+    const twoDigitBackref = {
+      pattern: "/bin/two-digit-backref",
+      argPattern: `^${"()".repeat(39)}(a)(\\40b|abab)+$`,
+    };
+    const threeDigitBackref = {
+      pattern: "/bin/three-digit-backref",
+      argPattern: `^${"()".repeat(140)}(a)(\\141b|abab)+$`,
+    };
     const approvals = {
       version: 1,
       agents: {
@@ -308,8 +317,11 @@ describe("doctor security exec argPattern repair", () => {
             mixed,
             grouped,
             escapedDot,
+            escapedDollar,
             hexDollar,
             highOctal,
+            twoDigitBackref,
+            threeDigitBackref,
             { pattern: "/bin/safe", argPattern: "^safe$" },
           ],
         },
@@ -328,17 +340,26 @@ describe("doctor security exec argPattern repair", () => {
         cfg: {} as OpenClawConfig,
       };
       const findings = await check!.detect(context);
-      expect(findings).toHaveLength(3);
+      expect(findings).toHaveLength(5);
       expect(findings.some((finding) => finding.message.includes("/bin/unsafe"))).toBe(true);
       expect(findings.some((finding) => finding.message.includes("/bin/hex-dollar"))).toBe(true);
       expect(findings.some((finding) => finding.message.includes("/bin/high-octal"))).toBe(true);
+      expect(findings.some((finding) => finding.message.includes("/bin/two-digit-backref"))).toBe(
+        true,
+      );
+      expect(findings.some((finding) => finding.message.includes("/bin/three-digit-backref"))).toBe(
+        true,
+      );
       expect(findings.some((finding) => finding.message.includes("/bin/mixed"))).toBe(false);
       expect(findings.some((finding) => finding.message.includes("/bin/grouped"))).toBe(false);
       expect(findings.some((finding) => finding.message.includes("/bin/escaped-dot"))).toBe(false);
+      expect(findings.some((finding) => finding.message.includes("/bin/escaped-dollar"))).toBe(
+        false,
+      );
 
       const repaired = await check!.repair?.(context, findings);
       expect(repaired?.changes).toEqual([
-        expect.stringContaining("Removed 3 rejected exec approval entries"),
+        expect.stringContaining("Removed 5 rejected exec approval entries"),
       ]);
 
       const remaining = loadExecApprovals().agents?.main?.allowlist ?? [];
@@ -346,6 +367,7 @@ describe("doctor security exec argPattern repair", () => {
         mixed,
         grouped,
         escapedDot,
+        escapedDollar,
         { pattern: "/bin/safe", argPattern: "^safe$" },
       ]);
     });

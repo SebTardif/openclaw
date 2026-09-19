@@ -34,7 +34,7 @@
       "id": "unicode-property-alias-adjacent",
       "pattern": "\\p{Script=Arabic}*\\p{sc=Arab}*",
       "accept": false,
-      "argument": "ااا"
+      "argument": "\u0627\u0627\u0627"
     },
     {
       "id": "overlapping-unions",
@@ -119,6 +119,24 @@
       "pattern": "^(\\400| 0)+$",
       "accept": false,
       "argument": " 0 0"
+    },
+    {
+      "id": "two-digit-backref-overlap",
+      "pattern": "^()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()(a)(\\40b|abab)+$",
+      "accept": false,
+      "argument": "aababab"
+    },
+    {
+      "id": "three-digit-backref-overlap",
+      "pattern": "^()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()()(a)(\\141b|abab)+$",
+      "accept": false,
+      "argument": "aababab"
+    },
+    {
+      "id": "escaped-dollar-class-disjoint",
+      "pattern": "^(a\\$|b[!])+$",
+      "accept": true,
+      "argument": "a$b!"
     }
   ]
 }
