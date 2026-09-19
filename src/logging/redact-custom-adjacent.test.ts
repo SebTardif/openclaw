@@ -106,4 +106,31 @@ describe("custom adjacent-class redaction", () => {
     });
     expect(output).toContain(secret);
   });
+
+  it("drops overlapping astral class-range custom redaction alternatives", () => {
+    const secret = "😀😀X";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["/([😀-🙏]|😀😀)+/u"],
+    });
+    expect(output).toContain(secret);
+  });
+
+  it("drops overlapping escaped surrogate-pair custom redaction alternatives", () => {
+    const secret = "😀😀X";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["/(\\uD83D\\uDE00|😀😀)+/u"],
+    });
+    expect(output).toContain(secret);
+  });
+
+  it("drops overlapping astral case-folding custom redaction alternatives", () => {
+    const secret = "𐐨𐐨X";
+    const output = redactSensitiveText(`id=${secret}`, {
+      mode: "tools",
+      patterns: ["/([𐐀]|𐐨𐐨)+/iu"],
+    });
+    expect(output).toContain(secret);
+  });
 });

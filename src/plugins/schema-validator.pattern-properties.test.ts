@@ -522,6 +522,38 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("rejects overlapping astral class ranges on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.astral-class-range",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^([😀-🙏]|😀😀)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "😀": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects overlapping escaped surrogate pairs on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.escaped-surrogate-pair",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\uD83D\\uDE00|😀😀)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { "😀": "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
   it("accepts deterministic groups that share a first character on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.shared-first-char",
