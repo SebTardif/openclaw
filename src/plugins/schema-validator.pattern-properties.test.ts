@@ -378,6 +378,38 @@ describe("schema validator patternProperties screening", () => {
     ).toThrow(/unsafe patternProperties/i);
   });
 
+  it("rejects octal-escape overlapping alternatives on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.octal-escape",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^(\\141|aaaa)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { a: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
+  it("rejects collapsed overlapping sequences on the plugin entrypoint", () => {
+    expect(() =>
+      validateJsonSchemaValue({
+        cacheKey: "schema-validator.pattern-properties.collapsed-sequence",
+        schema: {
+          type: "object",
+          patternProperties: {
+            "^((ab|[a]b)c|abcabc)+$": { type: "string" },
+          },
+          additionalProperties: true,
+        },
+        value: { abcabc: "keep" },
+      }),
+    ).toThrow(/unsafe patternProperties/i);
+  });
+
   it("accepts deterministic groups that share a first character on the plugin entrypoint", () => {
     const result = validateJsonSchemaValue({
       cacheKey: "schema-validator.pattern-properties.shared-first-char",

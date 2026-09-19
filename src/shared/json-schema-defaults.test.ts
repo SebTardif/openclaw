@@ -700,6 +700,42 @@ describe("applyJsonSchemaDefaults patternProperties safety", () => {
     expect(result.abeabe.mode).toBeUndefined();
   });
 
+  it("skips octal-escape alternatives that share a decoded prefix", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^(\\141|aaaa)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { a: {} }) as {
+      a: { mode?: string };
+    };
+    expect(result.a.mode).toBeUndefined();
+  });
+
+  it("skips collapsed overlapping sequences that keep consumed length", () => {
+    const schema = {
+      type: "object",
+      patternProperties: {
+        "^((ab|[a]b)c|abcabc)+$": {
+          type: "object",
+          properties: {
+            mode: { type: "string", default: "applied" },
+          },
+        },
+      },
+    };
+    const result = applyJsonSchemaDefaults(schema, { abcabc: {} }) as {
+      abcabc: { mode?: string };
+    };
+    expect(result.abcabc.mode).toBeUndefined();
+  });
+
   it("applies defaults through deterministic groups that share a first character", () => {
     const schema = {
       type: "object",
