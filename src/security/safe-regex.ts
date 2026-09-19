@@ -338,7 +338,7 @@ function analyzeTokensForNestedRepetition(
 
   const emitSimpleToken = (sig: string) => {
     if (
-      escapeHasUnknownConsumedLength(sig, { unicode, capturingGroups }) ||
+      escapeHasUnknownConsumedLength(sig, { unicode, capturingGroups, unicodeSets }) ||
       classHasUnknownConsumedLength(sig, unicodeSets)
     ) {
       emitToken({
