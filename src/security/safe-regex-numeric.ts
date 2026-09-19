@@ -102,6 +102,85 @@ export function parseHexChar(hex: string): string | null {
   return String.fromCodePoint(code);
 }
 
+function isHighSurrogateCode(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogateCode(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+export function decodeUnicodeEscapeChars(sig: string): string | null {
+  if (!sig.startsWith("\\u")) {
+    return null;
+  }
+  if (sig[2] === "{") {
+    return sig.endsWith("}") ? parseHexChar(sig.slice(3, -1)) : null;
+  }
+  const first = parseHexChar(sig.slice(2, 6));
+  if (!first) {
+    return null;
+  }
+  if (sig.length === 6) {
+    return first;
+  }
+  if (sig.length === 12 && sig.startsWith("\\u", 6)) {
+    const second = parseHexChar(sig.slice(8, 12));
+    if (second && isSurrogatePairAtom(`${first}${second}`)) {
+      return `${first}${second}`;
+    }
+  }
+  return null;
+}
+
+export function expandCodePointRange(from: string, to: string): string[] | null {
+  const fromCp = from.codePointAt(0);
+  const toCp = to.codePointAt(0);
+  if (fromCp === undefined || toCp === undefined || fromCp > toCp) {
+    return null;
+  }
+  if (String.fromCodePoint(fromCp) !== from || String.fromCodePoint(toCp) !== to) {
+    return null;
+  }
+  if (toCp - fromCp > 0xffff) {
+    return null;
+  }
+  const chars: string[] = [];
+  for (let code = fromCp; code <= toCp; code += 1) {
+    chars.push(String.fromCodePoint(code));
+  }
+  return chars;
+}
+
+function readPairedUnicodeEscape(
+  source: string,
+  index: number,
+): { end: number; sig: string } | null {
+  const firstHex = source.slice(index + 2, index + 6);
+  if (firstHex.length !== 4) {
+    return null;
+  }
+  const first = parseHexChar(firstHex);
+  const firstCode = first?.charCodeAt(0);
+  if (firstCode === undefined || !isHighSurrogateCode(firstCode)) {
+    return null;
+  }
+  const pairIndex = index + 6;
+  if (source[pairIndex] !== "\\" || source[pairIndex + 1] !== "u") {
+    return null;
+  }
+  const secondHex = source.slice(pairIndex + 2, pairIndex + 6);
+  if (secondHex.length !== 4) {
+    return null;
+  }
+  const second = parseHexChar(secondHex);
+  const secondCode = second?.charCodeAt(0);
+  if (secondCode === undefined || !isLowSurrogateCode(secondCode)) {
+    return null;
+  }
+  return { end: pairIndex + 6, sig: source.slice(index, pairIndex + 6) };
+}
+
 function isUnicodePropertyName(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*(?:=[A-Za-z0-9_-]+)?$/.test(value);
 }
@@ -134,6 +213,12 @@ export function readCompleteEscapeAtom(
   }
   const unicodeHex = source.slice(index + 2, index + 6);
   if (next === "u" && unicodeHex.length === 4 && parseHexChar(unicodeHex)) {
+    if (options.unicode) {
+      const paired = readPairedUnicodeEscape(source, index);
+      if (paired) {
+        return paired;
+      }
+    }
     return { end: index + 6, sig: source.slice(index, index + 6) };
   }
   const hex = source.slice(index + 2, index + 4);

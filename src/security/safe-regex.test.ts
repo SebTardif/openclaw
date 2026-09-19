@@ -337,4 +337,29 @@ describe("safe regex", () => {
       "unsafe-nested-repetition",
     );
   });
+
+  it("rejects overlapping astral class ranges compared in code-point units", () => {
+    expect(compileSafeRegexDetailed("^([😀-🙏]|😀😀)+$", "u").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^([😀-🙏]|😀😀)+$", "u").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects overlapping escaped surrogate-pair alternatives", () => {
+    expect(compileSafeRegexDetailed("^(\\uD83D\\uDE00|😀😀)+$", "u").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+    expect(compileJsonSchemaPatternRegexDetailed("^(\\uD83D\\uDE00|😀😀)+$", "u").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects overlapping astral class atoms under Unicode case folding", () => {
+    expect(compileSafeRegexDetailed("^([𐐀]|𐐨𐐨)+$", "iu").reason).toBe("unsafe-nested-repetition");
+    expect(compileJsonSchemaPatternRegexDetailed("^([𐐀]|𐐨𐐨)+$", "iu").reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
 });

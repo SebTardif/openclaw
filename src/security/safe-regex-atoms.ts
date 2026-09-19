@@ -1,6 +1,8 @@
 // Compares regex atom languages for schema-pattern ReDoS screening.
 import {
   classifyNumericEscape,
+  decodeUnicodeEscapeChars,
+  expandCodePointRange,
   isSurrogatePairAtom,
   parseHexChar,
   readCompleteEscapeAtom,
@@ -23,7 +25,7 @@ function foldedChars(chars: Iterable<string>, foldCase: boolean): Set<string> {
   const out = new Set<string>();
   for (const ch of chars) {
     out.add(ch);
-    if (foldCase && ch.length === 1) {
+    if (foldCase && ch) {
       out.add(ch.toLowerCase());
       out.add(ch.toUpperCase());
     }
@@ -91,13 +93,15 @@ function escapeLanguage(
     const ch = parseHexChar(body.slice(1));
     return ch ? singleton(ch, foldCase) : { kind: "any" };
   }
-  if (body.startsWith("u") && body.length === 5) {
-    const ch = parseHexChar(body.slice(1));
-    return ch ? singleton(ch, foldCase) : { kind: "any" };
-  }
-  if (body.startsWith("u{") && body.endsWith("}")) {
-    const ch = parseHexChar(body.slice(2, -1));
-    return ch ? singleton(ch, foldCase) : { kind: "any" };
+  if (body.startsWith("u")) {
+    const ch = decodeUnicodeEscapeChars(sig);
+    if (ch) {
+      return singleton(ch, foldCase);
+    }
+    if (body.length === 1) {
+      return singleton(body, foldCase);
+    }
+    return { kind: "any" };
   }
   if (body.startsWith("p") || body.startsWith("P")) {
     return { kind: "any" };
@@ -178,11 +182,15 @@ function classLanguage(sig: string, foldCase: boolean, unicode = false): AtomLan
       const right = readClassAtom(sig, left.next + 1, end, foldCase, unicode);
       const from = singleChar(left.lang);
       const to = right ? singleChar(right.lang) : null;
-      if (!right || from === null || to === null || from > to) {
+      if (!right || from === null || to === null) {
         return { kind: "any" };
       }
-      for (let code = from.charCodeAt(0); code <= to.charCodeAt(0); code += 1) {
-        chars.add(String.fromCharCode(code));
+      const expanded = expandCodePointRange(from, to);
+      if (!expanded) {
+        return { kind: "any" };
+      }
+      for (const ch of expanded) {
+        chars.add(ch);
       }
       i = right.next;
       continue;
