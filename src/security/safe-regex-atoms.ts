@@ -1,5 +1,4 @@
 // Compares regex atom languages for schema-pattern ReDoS screening.
-import { classBodyHasNestedSet } from "./safe-regex-class-nest.js";
 import {
   classifyNumericEscape,
   decodeUnicodeEscapeChars,
@@ -201,6 +200,24 @@ export function classHasUnknownConsumedLength(sig: string, unicodeSets: boolean)
   return false;
 }
 
+function classBodyHasNestedSet(sig: string, start: number, end: number): boolean {
+  let seenOpen = false;
+  for (let i = start; i < end; i += 1) {
+    if (sig[i] === "\\") {
+      i += 1;
+      continue;
+    }
+    if (sig[i] === "[") {
+      seenOpen = true;
+      continue;
+    }
+    if (seenOpen && sig[i] === "]") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function classLanguage(sig: string, foldCase: boolean, unicode = false): AtomLanguage {
   if (!sig.startsWith("[") || !sig.endsWith("]")) {
     return { kind: "any" };
@@ -388,10 +405,6 @@ function firstAtomSig(source: string, unicode: boolean): string {
   return "";
 }
 
-function emptyLanguage(): AtomLanguage {
-  return { kind: "chars", chars: new Set() };
-}
-
 const MAX_SEQUENCE_SET = 32;
 
 export const UNKNOWN_LENGTH_ATOM = "\0*";
@@ -400,12 +413,9 @@ export function sequenceHasUnknownLength(seq: readonly string[]): boolean {
   return seq.includes(UNKNOWN_LENGTH_ATOM);
 }
 
-function unknownSequence(): AtomLanguage[] {
-  return [{ kind: "any" }];
-}
-
+const UNKNOWN_SEQ: AtomLanguage[] = [{ kind: "any" }];
 function unknownSequences(): AtomLanguage[][] {
-  return [unknownSequence()];
+  return [UNKNOWN_SEQ];
 }
 
 function cartesianConcat(left: AtomLanguage[][], right: AtomLanguage[][]): AtomLanguage[][] {
@@ -413,7 +423,6 @@ function cartesianConcat(left: AtomLanguage[][], right: AtomLanguage[][]): AtomL
     return left;
   }
   if (left.length === 0) {
-    // Bound atoms per sequence. The 32-set cap does not bound one long literal.
     return right.map((seq) => seq.slice(0, MAX_SEQUENCE_SET));
   }
   if (left.every((seq) => seq.length >= MAX_SEQUENCE_SET)) {
@@ -504,7 +513,7 @@ function collectSequences(
     for (const alternative of splitTopLevelAlternatives(inner)) {
       const seqs = sequencesFromSource(alternative, foldCase, depth, unicode, capturingGroups);
       for (const seq of seqs) {
-        out.push(seq.length > 0 ? seq : unknownSequence());
+        out.push(seq.length > 0 ? seq : UNKNOWN_SEQ);
         if (out.length > MAX_SEQUENCE_SET) {
           return unknownSequences();
         }
@@ -526,7 +535,7 @@ function collectSequences(
     return [[singleton(sig, foldCase)]];
   }
   const seqs = sequencesFromSource(sig, foldCase, depth, unicode, capturingGroups);
-  return seqs.map((seq) => (seq.length > 0 ? seq : unknownSequence()));
+  return seqs.map((seq) => (seq.length > 0 ? seq : UNKNOWN_SEQ));
 }
 
 function sequencesOverlap(left: readonly AtomLanguage[], right: readonly AtomLanguage[]): boolean {
@@ -583,7 +592,7 @@ function groupPrefixLanguage(
     return { kind: "any" };
   }
   if (isAssertionGroup(sig)) {
-    return emptyLanguage();
+    return { kind: "chars", chars: new Set() };
   }
   const inner = stripOuterGroup(sig);
   if (inner === null) {
@@ -614,7 +623,7 @@ function atomLanguageAtDepth(
     return { kind: "any" };
   }
   if (isAssertionGroup(atom)) {
-    return emptyLanguage();
+    return { kind: "chars", chars: new Set() };
   }
   if (atom.startsWith("(")) {
     return groupPrefixLanguage(atom, foldCase, depth, unicode, capturingGroups);
