@@ -302,6 +302,18 @@ describe("doctor security exec argPattern repair", () => {
       pattern: "/bin/property-identity",
       argPattern: String.raw`^(\p{L}a|p\{L\}ap\{L\}a)+$`,
     };
+    const eAcuteOverlap = {
+      pattern: "/bin/e-acute",
+      argPattern: String.raw`^(\u00E9a|[é]a)+$`,
+    };
+    const truncatedOverlap = {
+      pattern: "/bin/truncated-overlap",
+      argPattern: `^([a]${"a".repeat(32)}|[a]${"a".repeat(32)}[a]${"a".repeat(32)})+$`,
+    };
+    const seventeenWay = {
+      pattern: "/bin/seventeen-way",
+      argPattern: "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$",
+    };
     const approvals = {
       version: 1,
       agents: {
@@ -310,6 +322,9 @@ describe("doctor security exec argPattern repair", () => {
             { pattern: "/bin/unsafe", argPattern: "(a+)+$" },
             longDisjoint,
             propertyIdentity,
+            eAcuteOverlap,
+            truncatedOverlap,
+            seventeenWay,
             { pattern: "/bin/safe", argPattern: "^safe$" },
           ],
         },
@@ -328,23 +343,31 @@ describe("doctor security exec argPattern repair", () => {
         cfg: {} as OpenClawConfig,
       };
       const findings = await check!.detect(context);
-      expect(findings).toHaveLength(2);
+      expect(findings).toHaveLength(4);
       expect(findings.some((finding) => finding.message.includes("/bin/unsafe"))).toBe(true);
       expect(findings.some((finding) => finding.message.includes("/bin/property-identity"))).toBe(
+        true,
+      );
+      expect(findings.some((finding) => finding.message.includes("/bin/e-acute"))).toBe(true);
+      expect(findings.some((finding) => finding.message.includes("/bin/truncated-overlap"))).toBe(
         true,
       );
       expect(findings.some((finding) => finding.message.includes("/bin/long-disjoint"))).toBe(
         false,
       );
+      expect(findings.some((finding) => finding.message.includes("/bin/seventeen-way"))).toBe(
+        false,
+      );
 
       const repaired = await check!.repair?.(context, findings);
       expect(repaired?.changes).toEqual([
-        expect.stringContaining("Removed 2 rejected exec approval entries"),
+        expect.stringContaining("Removed 4 rejected exec approval entries"),
       ]);
 
       const remaining = loadExecApprovals().agents?.main?.allowlist ?? [];
       expect(remaining.map(({ pattern, argPattern }) => ({ pattern, argPattern }))).toEqual([
         longDisjoint,
+        seventeenWay,
         { pattern: "/bin/safe", argPattern: "^safe$" },
       ]);
     });

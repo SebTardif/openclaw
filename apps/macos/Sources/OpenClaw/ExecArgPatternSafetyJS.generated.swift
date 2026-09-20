@@ -64,214 +64,6 @@ var OpenClawExecArgPattern = (() => {
     }
   }
 
-  // src/security/safe-regex-adjacent.ts
-  function isZeroWidthAtom(language) {
-    return language === "" || language === "^" || language === "$" || language === "\\b" || language === "\\B" || language === "(?:)" || language === "(?=)" || language === "(?!)" || language === "(?<=)" || language === "(?<!)";
-  }
-  function isZeroWidthLanguage(language, alternatives) {
-    return isZeroWidthAtom(language) || alternatives.every((alt) => isZeroWidthAtom(alt));
-  }
-  function unionPendingAlts(left, right) {
-    const seen = new Set(left);
-    const out = [...left];
-    for (const alt of right) {
-      if (!seen.has(alt)) {
-        seen.add(alt);
-        out.push(alt);
-      }
-    }
-    return out;
-  }
-  function nextPendingAdjacentAlts(previous, newAlts, minRepeat, maxRepeat, isZeroWidth) {
-    if (isZeroWidth) {
-      return previous;
-    }
-    if (maxRepeat === null && newAlts.length > 0) {
-      if (minRepeat === 0 && previous) {
-        return unionPendingAlts(previous, newAlts);
-      }
-      return [...newAlts];
-    }
-    if (minRepeat === 0) {
-      return previous;
-    }
-    return null;
-  }
-  function isLookaroundPrefix(source, contentStart) {
-    const prefix = source.slice(Math.max(0, contentStart - 4), contentStart);
-    return prefix.endsWith("?=") || prefix.endsWith("?!") || prefix.endsWith("?<=") || prefix.endsWith("?<!");
-  }
-  function walkRegexSource(source, visit) {
-    let depth = 0;
-    let inClass = false;
-    for (let index = 0; index < source.length; index += 1) {
-      const ch = source[index];
-      if (ch === void 0) {
-        continue;
-      }
-      if (ch === "\\") {
-        index += 1;
-        continue;
-      }
-      if (inClass) {
-        if (ch === "]") {
-          inClass = false;
-        }
-        continue;
-      }
-      if (ch === "[") {
-        inClass = true;
-        continue;
-      }
-      if (ch === "(") {
-        depth += 1;
-        visit(ch, index, depth);
-        continue;
-      }
-      if (ch === ")") {
-        depth -= 1;
-        if (depth < 0) {
-          return false;
-        }
-        visit(ch, index, depth);
-        continue;
-      }
-      visit(ch, index, depth);
-    }
-    return depth === 0;
-  }
-  function isSingleWrappingGroup(source) {
-    if (source.length < 2 || source[0] !== "(" || source[source.length - 1] !== ")") {
-      return false;
-    }
-    let closedEarly = false;
-    const balanced = walkRegexSource(source, (ch, index, depth) => {
-      if (ch === ")" && depth === 0 && index !== source.length - 1) {
-        closedEarly = true;
-      }
-    });
-    return balanced && !closedEarly;
-  }
-  function tryUnwrapOuterGroup(source) {
-    if (!isSingleWrappingGroup(source)) {
-      return null;
-    }
-    if (source.startsWith("(?=") || source.startsWith("(?!") || source.startsWith("(?<=")) {
-      return null;
-    }
-    if (source.startsWith("(?:")) {
-      return source.slice(3, -1);
-    }
-    if (source.startsWith("(?")) {
-      return null;
-    }
-    return source.slice(1, -1);
-  }
-  function splitTopLevelAlternatives(source) {
-    const cuts = [];
-    walkRegexSource(source, (ch, index, depth) => {
-      if (ch === "|" && depth === 0) {
-        cuts.push(index);
-      }
-    });
-    if (cuts.length === 0) {
-      return [source];
-    }
-    const parts = [];
-    let start = 0;
-    for (const cut of cuts) {
-      parts.push(source.slice(start, cut));
-      start = cut + 1;
-    }
-    parts.push(source.slice(start));
-    return parts;
-  }
-  function flattenAlternatives(alternatives) {
-    const out = [];
-    const seen = /* @__PURE__ */ new Set();
-    const visit = (raw) => {
-      let current = raw;
-      for (let depth = 0; depth < 8; depth += 1) {
-        const inner = tryUnwrapOuterGroup(current);
-        if (inner === null) {
-          break;
-        }
-        current = inner;
-      }
-      const parts = splitTopLevelAlternatives(current);
-      if (parts.length > 1) {
-        for (const part of parts) {
-          visit(part);
-        }
-        return;
-      }
-      if (!seen.has(current)) {
-        seen.add(current);
-        out.push(current);
-      }
-    };
-    for (const alternative of alternatives) {
-      visit(alternative);
-    }
-    return out.length > 0 ? out : [""];
-  }
-  function sameAlternativeSet(left, right) {
-    if (left.length !== right.length) {
-      return false;
-    }
-    const sortedLeft = [...left].toSorted();
-    const sortedRight = [...right].toSorted();
-    return sortedLeft.every((alt, index) => alt === sortedRight[index]);
-  }
-  function isCharacterClassAlternative(source) {
-    let body = source;
-    if (body.startsWith("^")) {
-      body = body.slice(1);
-    }
-    if (body.endsWith("$")) {
-      body = body.slice(0, -1);
-    }
-    return body.startsWith("[") && body.endsWith("]") && body.length >= 2;
-  }
-  function shouldRejectAdjacentOverlap(leftAlts, rightAlts, ignoreCase, failClosedUnprobedUnicode, singleTokenPairOverlaps) {
-    if (!adjacentRepeatsOverlap(leftAlts, rightAlts, ignoreCase, singleTokenPairOverlaps)) {
-      return false;
-    }
-    if (!failClosedUnprobedUnicode && sameAlternativeSet(leftAlts, rightAlts) && leftAlts.every((alt) => isCharacterClassAlternative(alt))) {
-      return false;
-    }
-    return true;
-  }
-  function adjacentRepeatsOverlap(leftAlts, rightAlts, ignoreCase, singleTokenPairOverlaps) {
-    const leftFlat = flattenAlternatives(leftAlts);
-    const rightFlat = flattenAlternatives(rightAlts);
-    for (const left of leftFlat) {
-      for (const right of rightFlat) {
-        if (left === right) {
-          return true;
-        }
-        if (singleTokenPairOverlaps(left, right, ignoreCase)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-  function mixedSequencesOverlap(leftAtoms, rightAtoms, ignoreCase, failClosedUnprobedUnicode, singleTokenPairOverlaps) {
-    const sharedLength = Math.min(leftAtoms.length, rightAtoms.length);
-    for (let index = 0; index < sharedLength; index += 1) {
-      const leftAtom = leftAtoms[index];
-      const rightAtom = rightAtoms[index];
-      if (leftAtom === void 0 || rightAtom === void 0) {
-        return true;
-      }
-      if (!singleTokenPairOverlaps(leftAtom, rightAtom, ignoreCase, failClosedUnprobedUnicode)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
   // src/security/safe-regex-tokens.ts
   function readGroupContentStart(source, index) {
     if (source[index + 1] !== "?") {
@@ -599,18 +391,29 @@ var OpenClawExecArgPattern = (() => {
     }
     return -1;
   }
-  function escapeDecodedLiteral(value) {
+  function escapeDecodedLiteral(value, unicodeMode) {
     let escaped = "";
     for (const ch of value) {
       const code = ch.codePointAt(0);
       if (code === void 0) {
         continue;
       }
-      if (code < 128) {
+      if (code < 256) {
         escaped += `\\x${code.toString(16).padStart(2, "0")}`;
         continue;
       }
-      escaped += `\\u{${code.toString(16)}}`;
+      if (code < 65536) {
+        escaped += `\\u${code.toString(16).padStart(4, "0")}`;
+        continue;
+      }
+      if (unicodeMode) {
+        escaped += `\\u{${code.toString(16)}}`;
+        continue;
+      }
+      const units = String.fromCodePoint(code);
+      for (let index = 0; index < units.length; index += 1) {
+        escaped += `\\u${units.charCodeAt(index).toString(16).padStart(4, "0")}`;
+      }
     }
     return escaped;
   }
@@ -619,33 +422,39 @@ var OpenClawExecArgPattern = (() => {
       return source;
     }
     if (/^\\x[0-9a-fA-F]{2}$/.test(source)) {
-      return escapeDecodedLiteral(String.fromCharCode(Number.parseInt(source.slice(2), 16)));
+      return escapeDecodedLiteral(
+        String.fromCharCode(Number.parseInt(source.slice(2), 16)),
+        unicodeMode
+      );
     }
     if (/^\\u[0-9a-fA-F]{4}$/.test(source)) {
-      return escapeDecodedLiteral(String.fromCharCode(Number.parseInt(source.slice(2), 16)));
+      return escapeDecodedLiteral(
+        String.fromCharCode(Number.parseInt(source.slice(2), 16)),
+        unicodeMode
+      );
     }
     if (unicodeMode && /^\\u\{[0-9a-fA-F]{1,6}\}$/.test(source)) {
       const cp = Number.parseInt(source.slice(3, -1), 16);
       if (!Number.isFinite(cp) || cp < 0 || cp > 1114111) {
         return null;
       }
-      return escapeDecodedLiteral(String.fromCodePoint(cp));
+      return escapeDecodedLiteral(String.fromCodePoint(cp), unicodeMode);
     }
     const octal = readUnambiguousOctalEscape(source, 0, unicodeMode, captureCount);
     if (octal && octal.nextIndex === source.length) {
-      return escapeDecodedLiteral(octal.value);
+      return escapeDecodedLiteral(octal.value, unicodeMode);
     }
     const named = NAMED_CHAR_ESCAPES[source];
     if (named !== void 0) {
-      return escapeDecodedLiteral(named);
+      return escapeDecodedLiteral(named, unicodeMode);
     }
     if (source.length === 2) {
       const escaped = source[1];
       if (escaped !== void 0 && !/[0-9A-Za-z]/.test(escaped)) {
-        return escapeDecodedLiteral(escaped);
+        return escapeDecodedLiteral(escaped, unicodeMode);
       }
       if (!unicodeMode && (source === "\\p" || source === "\\P") && escaped !== void 0) {
-        return escapeDecodedLiteral(escaped);
+        return escapeDecodedLiteral(escaped, unicodeMode);
       }
     }
     if (/^\\[dDsSwW]$/.test(source) || source.startsWith("\\p{") || source.startsWith("\\P{")) {
@@ -660,8 +469,9 @@ var OpenClawExecArgPattern = (() => {
     if (rightSeq.atoms.length < leftSeq.atoms.length) {
       return rightSeq.complete;
     }
-    return leftSeq.complete && rightSeq.complete;
+    return true;
   }
+  var ATOM_SEQUENCE_OVERFLOW = "overflow";
   var MAX_ALTERNATIVE_SEQUENCES = 16;
   var MAX_SEQUENCE_ATOMS = 32;
   function splitTopLevelAlternativeSources(source, unicodeMode, captureCount) {
@@ -701,7 +511,7 @@ var OpenClawExecArgPattern = (() => {
       return left.map((seq) => ({ atoms: [...seq.atoms], complete: seq.complete }));
     }
     if (left.length * right.length > MAX_ALTERNATIVE_SEQUENCES) {
-      return null;
+      return ATOM_SEQUENCE_OVERFLOW;
     }
     const out = [];
     for (const prefix of left) {
@@ -747,12 +557,15 @@ var OpenClawExecArgPattern = (() => {
         }
         const interior = source.slice(contentStart, close.start);
         const inner = interior ? readAlternativeAtomSequences(interior, unicodeMode, captureCount) : [{ atoms: [], complete: true }];
+        if (inner === ATOM_SEQUENCE_OVERFLOW) {
+          return ATOM_SEQUENCE_OVERFLOW;
+        }
         if (!inner) {
           return null;
         }
         const next2 = cartesianConcatSequences(sequences, inner);
-        if (!next2) {
-          return null;
+        if (next2 === ATOM_SEQUENCE_OVERFLOW) {
+          return ATOM_SEQUENCE_OVERFLOW;
         }
         sequences = next2;
         index = closeIndex + 1;
@@ -767,8 +580,8 @@ var OpenClawExecArgPattern = (() => {
         return null;
       }
       const next = cartesianConcatSequences(sequences, [{ atoms: [decoded], complete: true }]);
-      if (!next) {
-        return null;
+      if (next === ATOM_SEQUENCE_OVERFLOW) {
+        return ATOM_SEQUENCE_OVERFLOW;
       }
       sequences = next;
       index += 1;
@@ -805,15 +618,301 @@ var OpenClawExecArgPattern = (() => {
     const all = [];
     for (const part of parts) {
       const sequences = collectAtomSequences(part, unicodeMode, captureCount);
+      if (sequences === ATOM_SEQUENCE_OVERFLOW) {
+        return ATOM_SEQUENCE_OVERFLOW;
+      }
       if (!sequences) {
         return null;
       }
       if (all.length + sequences.length > MAX_ALTERNATIVE_SEQUENCES) {
-        return null;
+        return ATOM_SEQUENCE_OVERFLOW;
       }
       all.push(...sequences);
     }
     return all;
+  }
+
+  // src/security/safe-regex-adjacent.ts
+  function isZeroWidthAtom(language) {
+    return language === "" || language === "^" || language === "$" || language === "\\b" || language === "\\B" || language === "(?:)" || language === "(?=)" || language === "(?!)" || language === "(?<=)" || language === "(?<!)";
+  }
+  function isZeroWidthLanguage(language, alternatives) {
+    return isZeroWidthAtom(language) || alternatives.every((alt) => isZeroWidthAtom(alt));
+  }
+  function unionPendingAlts(left, right) {
+    const seen = new Set(left);
+    const out = [...left];
+    for (const alt of right) {
+      if (!seen.has(alt)) {
+        seen.add(alt);
+        out.push(alt);
+      }
+    }
+    return out;
+  }
+  function nextPendingAdjacentAlts(previous, newAlts, minRepeat, maxRepeat, isZeroWidth) {
+    if (isZeroWidth) {
+      return previous;
+    }
+    if (maxRepeat === null && newAlts.length > 0) {
+      if (minRepeat === 0 && previous) {
+        return unionPendingAlts(previous, newAlts);
+      }
+      return [...newAlts];
+    }
+    if (minRepeat === 0) {
+      return previous;
+    }
+    return null;
+  }
+  function isLookaroundPrefix(source, contentStart) {
+    const prefix = source.slice(Math.max(0, contentStart - 4), contentStart);
+    return prefix.endsWith("?=") || prefix.endsWith("?!") || prefix.endsWith("?<=") || prefix.endsWith("?<!");
+  }
+  function walkRegexSource(source, visit) {
+    let depth = 0;
+    let inClass = false;
+    for (let index = 0; index < source.length; index += 1) {
+      const ch = source[index];
+      if (ch === void 0) {
+        continue;
+      }
+      if (ch === "\\") {
+        index += 1;
+        continue;
+      }
+      if (inClass) {
+        if (ch === "]") {
+          inClass = false;
+        }
+        continue;
+      }
+      if (ch === "[") {
+        inClass = true;
+        continue;
+      }
+      if (ch === "(") {
+        depth += 1;
+        visit(ch, index, depth);
+        continue;
+      }
+      if (ch === ")") {
+        depth -= 1;
+        if (depth < 0) {
+          return false;
+        }
+        visit(ch, index, depth);
+        continue;
+      }
+      visit(ch, index, depth);
+    }
+    return depth === 0;
+  }
+  function isSingleWrappingGroup(source) {
+    if (source.length < 2 || source[0] !== "(" || source[source.length - 1] !== ")") {
+      return false;
+    }
+    let closedEarly = false;
+    const balanced = walkRegexSource(source, (ch, index, depth) => {
+      if (ch === ")" && depth === 0 && index !== source.length - 1) {
+        closedEarly = true;
+      }
+    });
+    return balanced && !closedEarly;
+  }
+  function tryUnwrapOuterGroup(source) {
+    if (!isSingleWrappingGroup(source)) {
+      return null;
+    }
+    if (source.startsWith("(?=") || source.startsWith("(?!") || source.startsWith("(?<=")) {
+      return null;
+    }
+    if (source.startsWith("(?:")) {
+      return source.slice(3, -1);
+    }
+    if (source.startsWith("(?")) {
+      return null;
+    }
+    return source.slice(1, -1);
+  }
+  function splitTopLevelAlternatives(source) {
+    const cuts = [];
+    walkRegexSource(source, (ch, index, depth) => {
+      if (ch === "|" && depth === 0) {
+        cuts.push(index);
+      }
+    });
+    if (cuts.length === 0) {
+      return [source];
+    }
+    const parts = [];
+    let start = 0;
+    for (const cut of cuts) {
+      parts.push(source.slice(start, cut));
+      start = cut + 1;
+    }
+    parts.push(source.slice(start));
+    return parts;
+  }
+  function flattenAlternatives(alternatives) {
+    const out = [];
+    const seen = /* @__PURE__ */ new Set();
+    const visit = (raw) => {
+      let current = raw;
+      for (let depth = 0; depth < 8; depth += 1) {
+        const inner = tryUnwrapOuterGroup(current);
+        if (inner === null) {
+          break;
+        }
+        current = inner;
+      }
+      const parts = splitTopLevelAlternatives(current);
+      if (parts.length > 1) {
+        for (const part of parts) {
+          visit(part);
+        }
+        return;
+      }
+      if (!seen.has(current)) {
+        seen.add(current);
+        out.push(current);
+      }
+    };
+    for (const alternative of alternatives) {
+      visit(alternative);
+    }
+    return out.length > 0 ? out : [""];
+  }
+  function sameAlternativeSet(left, right) {
+    if (left.length !== right.length) {
+      return false;
+    }
+    const sortedLeft = [...left].toSorted();
+    const sortedRight = [...right].toSorted();
+    return sortedLeft.every((alt, index) => alt === sortedRight[index]);
+  }
+  function isCharacterClassAlternative(source) {
+    let body = source;
+    if (body.startsWith("^")) {
+      body = body.slice(1);
+    }
+    if (body.endsWith("$")) {
+      body = body.slice(0, -1);
+    }
+    return body.startsWith("[") && body.endsWith("]") && body.length >= 2;
+  }
+  function shouldRejectAdjacentOverlap(leftAlts, rightAlts, ignoreCase, failClosedUnprobedUnicode, singleTokenPairOverlaps) {
+    if (!adjacentRepeatsOverlap(leftAlts, rightAlts, ignoreCase, singleTokenPairOverlaps)) {
+      return false;
+    }
+    if (!failClosedUnprobedUnicode && sameAlternativeSet(leftAlts, rightAlts) && leftAlts.every((alt) => isCharacterClassAlternative(alt))) {
+      return false;
+    }
+    return true;
+  }
+  function adjacentRepeatsOverlap(leftAlts, rightAlts, ignoreCase, singleTokenPairOverlaps) {
+    const leftFlat = flattenAlternatives(leftAlts);
+    const rightFlat = flattenAlternatives(rightAlts);
+    for (const left of leftFlat) {
+      for (const right of rightFlat) {
+        if (left === right) {
+          return true;
+        }
+        if (singleTokenPairOverlaps(left, right, ignoreCase)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  function mixedSequencesOverlap(leftAtoms, rightAtoms, ignoreCase, failClosedUnprobedUnicode, singleTokenPairOverlaps) {
+    const sharedLength = Math.min(leftAtoms.length, rightAtoms.length);
+    for (let index = 0; index < sharedLength; index += 1) {
+      const leftAtom = leftAtoms[index];
+      const rightAtom = rightAtoms[index];
+      if (leftAtom === void 0 || rightAtom === void 0) {
+        return true;
+      }
+      if (!singleTokenPairOverlaps(leftAtom, rightAtom, ignoreCase, failClosedUnprobedUnicode)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  function alternativeHasUnprobedNonAscii(source, captureCount = 0) {
+    const body = stripAlternativeAnchors(source);
+    let decoded = "";
+    for (let index = 0; index < body.length; index += 1) {
+      if (body[index] === "\\") {
+        const scalar = readScalarEscape(body, index, false, captureCount);
+        if (scalar) {
+          decoded += scalar.value;
+          index = scalar.nextIndex - 1;
+          continue;
+        }
+        if (body[index + 1] === "p" || body[index + 1] === "P") {
+          return true;
+        }
+        if (body[index + 1] === "u" && body[index + 2] === "{") {
+          return true;
+        }
+        decoded += body[index];
+        continue;
+      }
+      decoded += body[index];
+    }
+    for (let i = 0; i < decoded.length; i += 1) {
+      if (decoded.charCodeAt(i) > 127) {
+        return true;
+      }
+    }
+    return false;
+  }
+  function isUnicodePropertyAtom(source) {
+    const body = stripAlternativeAnchors(source);
+    const inner = body.startsWith("[") && body.endsWith("]") && !body.slice(1, -1).includes("[") ? body.slice(1, -1) : body;
+    return /^\\[pP]\{[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?\}$/.test(inner);
+  }
+  function singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode, unicodeMode = false, dotAll = false) {
+    const flags = `${ignoreCase ? "i" : ""}${unicodeMode ? "u" : ""}${dotAll ? "s" : ""}`;
+    let leftRe;
+    let rightRe;
+    try {
+      leftRe = new RegExp(`^(?:${stripAlternativeAnchors(left)})$`, flags);
+      rightRe = new RegExp(`^(?:${stripAlternativeAnchors(right)})$`, flags);
+    } catch {
+      return true;
+    }
+    let leftHit = false;
+    let rightHit = false;
+    const consider = (ch) => {
+      const leftMatch = leftRe.test(ch);
+      const rightMatch = rightRe.test(ch);
+      if (leftMatch) {
+        leftHit = true;
+      }
+      if (rightMatch) {
+        rightHit = true;
+      }
+      return leftMatch && rightMatch;
+    };
+    for (let code = 0; code < 128; code += 1) {
+      if (consider(String.fromCharCode(code))) {
+        return true;
+      }
+    }
+    for (const ch of ["\xA0", "\xE9", "\u4E2D"]) {
+      if (consider(ch)) {
+        return true;
+      }
+    }
+    if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !leftHit && !rightHit) {
+      return true;
+    }
+    if (failClosedUnprobedUnicode && (alternativeHasUnprobedNonAscii(left) || alternativeHasUnprobedNonAscii(right))) {
+      return true;
+    }
+    return false;
   }
 
   // src/security/safe-regex.ts
@@ -933,7 +1032,7 @@ var OpenClawExecArgPattern = (() => {
     }
     return tokens === 1;
   }
-  function alternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode, unicodeMode = false, captureCount = 0) {
+  function alternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode, unicodeMode = false, captureCount = 0, dotAll = false) {
     const leftLit = readAlternativeLiteral(left, unicodeMode, captureCount);
     const rightLit = readAlternativeLiteral(right, unicodeMode, captureCount);
     if (leftLit.kind === "literal" && rightLit.kind === "literal") {
@@ -956,11 +1055,15 @@ var OpenClawExecArgPattern = (() => {
         right,
         ignoreCase,
         failClosedUnprobedUnicode,
-        unicodeMode
+        unicodeMode,
+        dotAll
       );
     }
     const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
     const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
+    if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
+      return false;
+    }
     if (leftSequences && rightSequences) {
       let unproven = false;
       for (const leftSeq of leftSequences) {
@@ -975,7 +1078,8 @@ var OpenClawExecArgPattern = (() => {
               rightAtom,
               ignoreCaseFlag,
               failClosed,
-              unicodeMode
+              unicodeMode,
+              dotAll
             )
           )) {
             continue;
@@ -990,82 +1094,7 @@ var OpenClawExecArgPattern = (() => {
     }
     return true;
   }
-  function alternativeHasUnprobedNonAscii(source, captureCount = 0) {
-    const body = stripAlternativeAnchors(source);
-    let decoded = "";
-    for (let index = 0; index < body.length; index += 1) {
-      if (body[index] === "\\") {
-        const scalar = readScalarEscape(body, index, false, captureCount);
-        if (scalar) {
-          decoded += scalar.value;
-          index = scalar.nextIndex - 1;
-          continue;
-        }
-        if (body[index + 1] === "p" || body[index + 1] === "P") {
-          return true;
-        }
-        if (body[index + 1] === "u" && body[index + 2] === "{") {
-          return true;
-        }
-        decoded += body[index];
-        continue;
-      }
-      decoded += body[index];
-    }
-    for (let i = 0; i < decoded.length; i += 1) {
-      if (decoded.charCodeAt(i) > 127) {
-        return true;
-      }
-    }
-    return false;
-  }
-  function isUnicodePropertyAtom(source) {
-    const body = stripAlternativeAnchors(source);
-    const inner = body.startsWith("[") && body.endsWith("]") && !body.slice(1, -1).includes("[") ? body.slice(1, -1) : body;
-    return /^\\[pP]\{[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?\}$/.test(inner);
-  }
-  function singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode, unicodeMode = false) {
-    const flags = `${ignoreCase ? "i" : ""}${unicodeMode ? "u" : ""}`;
-    let leftRe;
-    let rightRe;
-    try {
-      leftRe = new RegExp(`^(?:${stripAlternativeAnchors(left)})$`, flags);
-      rightRe = new RegExp(`^(?:${stripAlternativeAnchors(right)})$`, flags);
-    } catch {
-      return true;
-    }
-    let leftHit = false;
-    let rightHit = false;
-    const consider = (ch) => {
-      const leftMatch = leftRe.test(ch);
-      const rightMatch = rightRe.test(ch);
-      if (leftMatch) {
-        leftHit = true;
-      }
-      if (rightMatch) {
-        rightHit = true;
-      }
-      return leftMatch && rightMatch;
-    };
-    for (let code = 0; code < 128; code += 1) {
-      if (consider(String.fromCharCode(code))) {
-        return true;
-      }
-    }
-    for (const ch of ["\xA0", "\xE9", "\u4E2D"]) {
-      if (consider(ch)) {
-        return true;
-      }
-    }
-    if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !leftHit && !rightHit) {
-      return true;
-    }
-    if (failClosedUnprobedUnicode && (alternativeHasUnprobedNonAscii(left) || alternativeHasUnprobedNonAscii(right))) {
-      return true;
-    }
-    return false;
-  }
-  function recordAlternative(frame, source, branchEnd, ignoreCase, failClosedUnprobedUnicode, unicodeMode, captureCount) {
+  function recordAlternative(frame, source, branchEnd, ignoreCase, failClosedUnprobedUnicode, unicodeMode, captureCount, dotAll) {
     const branchSource = source.slice(frame.branchStart, branchEnd);
     if (frame.alternativeSources.some(
       (alternative) => alternativesMayOverlap(
@@ -1074,7 +1103,8 @@ var OpenClawExecArgPattern = (() => {
         ignoreCase,
         failClosedUnprobedUnicode,
         unicodeMode,
-        captureCount
+        captureCount,
+        dotAll
       )
     )) {
       frame.hasOverlappingAlternative = true;
@@ -1088,11 +1118,11 @@ var OpenClawExecArgPattern = (() => {
     frame.altMinLength = Math.min(frame.altMinLength, frame.branchMinLength);
     frame.altMaxLength = Math.max(frame.altMaxLength, frame.branchMaxLength);
   }
-  function adjacentPairOverlaps(left, right, ignoreCase, unicodeMode = false, captureCount = 0) {
-    return isSingleTokenAlternative(left, unicodeMode, captureCount) && isSingleTokenAlternative(right, unicodeMode, captureCount) && alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode, captureCount);
+  function adjacentPairOverlaps(left, right, ignoreCase, unicodeMode = false, captureCount = 0, dotAll = false) {
+    return isSingleTokenAlternative(left, unicodeMode, captureCount) && isSingleTokenAlternative(right, unicodeMode, captureCount) && alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode, captureCount, dotAll);
   }
-  function analyzeTokensForNestedRepetition(source, tokens, ignoreCase, failClosedUnprobedUnicode, unicodeMode, captureCount) {
-    const pairOverlaps = (left, right, ignoreCaseFlag) => adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode, captureCount);
+  function analyzeTokensForNestedRepetition(source, tokens, ignoreCase, failClosedUnprobedUnicode, unicodeMode, captureCount, dotAll) {
+    const pairOverlaps = (left, right, ignoreCaseFlag) => adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode, captureCount, dotAll);
     const frames = [createParseFrame()];
     const emitToken = (token) => {
       const frame = expectDefined(frames[frames.length - 1], "frames entry at frames.length 1");
@@ -1164,7 +1194,8 @@ var OpenClawExecArgPattern = (() => {
               ignoreCase,
               failClosedUnprobedUnicode,
               unicodeMode,
-              captureCount
+              captureCount,
+              dotAll
             );
           }
           const groupMinLength = frame2.hasAlternation ? frame2.altMinLength ?? 0 : frame2.branchMinLength;
@@ -1216,7 +1247,8 @@ var OpenClawExecArgPattern = (() => {
           ignoreCase,
           failClosedUnprobedUnicode,
           unicodeMode,
-          captureCount
+          captureCount,
+          dotAll
         );
         frame2.branchStart = token.end;
         frame2.branchMinLength = 0;
@@ -1277,7 +1309,8 @@ var OpenClawExecArgPattern = (() => {
       flags.includes("i"),
       failClosedUnprobedUnicode,
       unicodeMode,
-      countCapturingGroups(source, tokens)
+      countCapturingGroups(source, tokens),
+      flags.includes("s")
     );
   }
   function compileSafeRegexDetailedImpl(source, flags, failClosedUnprobedUnicode) {

@@ -7,14 +7,15 @@ import {
   mixedSequencesOverlap,
   nextPendingAdjacentAlts,
   shouldRejectAdjacentOverlap,
+  singleTokenAlternativesMayOverlap,
 } from "./safe-regex-adjacent.js";
 import {
+  ATOM_SEQUENCE_OVERFLOW,
   countCapturingGroups,
   readAlternativeAtomSequences,
   readEscapeAtomEnd,
   readScalarEscape,
   sequenceOverlapIsProven,
-  stripAlternativeAnchors,
   tokenizePattern,
   type PatternToken,
 } from "./safe-regex-tokens.js";
@@ -221,6 +222,7 @@ function alternativesMayOverlap(
   failClosedUnprobedUnicode: boolean,
   unicodeMode = false,
   captureCount = 0,
+  dotAll = false,
 ): boolean {
   const leftLit = readAlternativeLiteral(left, unicodeMode, captureCount);
   const rightLit = readAlternativeLiteral(right, unicodeMode, captureCount);
@@ -253,10 +255,15 @@ function alternativesMayOverlap(
       ignoreCase,
       failClosedUnprobedUnicode,
       unicodeMode,
+      dotAll,
     );
   }
   const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
   const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
+  // Expansion overflow is unproven, not overlap. Keep the stored rule.
+  if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
+    return false;
+  }
   if (leftSequences && rightSequences) {
     // Nested groups such as (ab|cd)e expand to finite sequences. Unequal
     // lengths stay safe when a shared prefix atom is disjoint.
@@ -276,6 +283,7 @@ function alternativesMayOverlap(
                 ignoreCaseFlag,
                 failClosed,
                 unicodeMode,
+                dotAll,
               ),
           )
         ) {
@@ -287,115 +295,11 @@ function alternativesMayOverlap(
         unproven = true;
       }
     }
-    // Truncated overlapping prefixes are unproven, not unsafe. Shared
-    // compile keeps them; exec fail-closed still refuses.
+    // Remaining unproven cases stay fail-closed only on the exec path.
     return unproven && failClosedUnprobedUnicode;
   }
   // Mixed structure with broad components (e.g. aa|a.) can overlap under +.
   return true;
-}
-
-/** True if an alternative may match outside the finite ASCII+probe set. */
-function alternativeHasUnprobedNonAscii(source: string, captureCount = 0): boolean {
-  const body = stripAlternativeAnchors(source);
-  // Decode known scalar escapes so \u0061 stays ASCII-probed (disjoint a|b).
-  let decoded = "";
-  for (let index = 0; index < body.length; index += 1) {
-    if (body[index] === "\\") {
-      const scalar = readScalarEscape(body, index, false, captureCount);
-      if (scalar) {
-        decoded += scalar.value;
-        index = scalar.nextIndex - 1;
-        continue;
-      }
-      // Unicode property escapes cannot be fully probed with a finite set.
-      if (body[index + 1] === "p" || body[index + 1] === "P") {
-        return true;
-      }
-      if (body[index + 1] === "u" && body[index + 2] === "{") {
-        return true;
-      }
-      decoded += body[index];
-      continue;
-    }
-    decoded += body[index];
-  }
-  // Avoid control-char regex (eslint no-control-regex); compare code units.
-  for (let i = 0; i < decoded.length; i += 1) {
-    if (decoded.charCodeAt(i) > 0x7f) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isUnicodePropertyAtom(source: string): boolean {
-  const body = stripAlternativeAnchors(source);
-  const inner =
-    body.startsWith("[") && body.endsWith("]") && !body.slice(1, -1).includes("[")
-      ? body.slice(1, -1)
-      : body;
-  return /^\\[pP]\{[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?\}$/.test(inner);
-}
-
-/** Probe whether two single-token alternatives can match the same character. */
-function singleTokenAlternativesMayOverlap(
-  left: string,
-  right: string,
-  ignoreCase: boolean,
-  failClosedUnprobedUnicode: boolean,
-  unicodeMode = false,
-): boolean {
-  const flags = `${ignoreCase ? "i" : ""}${unicodeMode ? "u" : ""}`;
-  let leftRe: RegExp;
-  let rightRe: RegExp;
-  try {
-    leftRe = new RegExp(`^(?:${stripAlternativeAnchors(left)})$`, flags);
-    rightRe = new RegExp(`^(?:${stripAlternativeAnchors(right)})$`, flags);
-  } catch {
-    return true;
-  }
-  let leftHit = false;
-  let rightHit = false;
-  const consider = (ch: string): boolean => {
-    const leftMatch = leftRe.test(ch);
-    const rightMatch = rightRe.test(ch);
-    if (leftMatch) {
-      leftHit = true;
-    }
-    if (rightMatch) {
-      rightHit = true;
-    }
-    return leftMatch && rightMatch;
-  };
-  for (let code = 0; code < 128; code += 1) {
-    if (consider(String.fromCharCode(code))) {
-      return true;
-    }
-  }
-  // Light non-ASCII probes for Unicode property / word-class overlap.
-  for (const ch of ["\u00A0", "\u00E9", "\u4E2D"]) {
-    if (consider(ch)) {
-      return true;
-    }
-  }
-  // Property aliases (\p{Script=Arabic} vs \p{sc=Arab}) miss the finite
-  // probe set. Fail closed when neither side was observed. [猫]|[犬] is
-  // not a property atom and stays accepted on the shared compiler.
-  if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !leftHit && !rightHit) {
-    return true;
-  }
-  // Finite probe cannot prove safety for unprobed Unicode alternatives
-  // (e.g. /(?:[\u0100]|\u0100)+/). Exec approvals fail closed; shared
-  // compileSafeRegex must not reject safe disjoint Unicode classes like
-  // [猫]|[犬] used by group mentions / cron / plugins.
-  if (
-    failClosedUnprobedUnicode &&
-    (alternativeHasUnprobedNonAscii(left) || alternativeHasUnprobedNonAscii(right))
-  ) {
-    return true;
-  }
-  return false;
 }
 
 function recordAlternative(
@@ -406,6 +310,7 @@ function recordAlternative(
   failClosedUnprobedUnicode: boolean,
   unicodeMode: boolean,
   captureCount: number,
+  dotAll: boolean,
 ): void {
   const branchSource = source.slice(frame.branchStart, branchEnd);
   if (
@@ -417,6 +322,7 @@ function recordAlternative(
         failClosedUnprobedUnicode,
         unicodeMode,
         captureCount,
+        dotAll,
       ),
     )
   ) {
@@ -439,11 +345,12 @@ function adjacentPairOverlaps(
   ignoreCase: boolean,
   unicodeMode = false,
   captureCount = 0,
+  dotAll = false,
 ): boolean {
   return (
     isSingleTokenAlternative(left, unicodeMode, captureCount) &&
     isSingleTokenAlternative(right, unicodeMode, captureCount) &&
-    alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode, captureCount)
+    alternativesMayOverlap(left, right, ignoreCase, false, unicodeMode, captureCount, dotAll)
   );
 }
 
@@ -454,9 +361,10 @@ function analyzeTokensForNestedRepetition(
   failClosedUnprobedUnicode: boolean,
   unicodeMode: boolean,
   captureCount: number,
+  dotAll: boolean,
 ): boolean {
   const pairOverlaps = (left: string, right: string, ignoreCaseFlag: boolean) =>
-    adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode, captureCount);
+    adjacentPairOverlaps(left, right, ignoreCaseFlag, unicodeMode, captureCount, dotAll);
   const frames: ParseFrame[] = [createParseFrame()];
 
   const emitToken = (token: TokenState) => {
@@ -536,6 +444,7 @@ function analyzeTokensForNestedRepetition(
             failClosedUnprobedUnicode,
             unicodeMode,
             captureCount,
+            dotAll,
           );
         }
         const groupMinLength = frame.hasAlternation
@@ -610,6 +519,7 @@ function analyzeTokensForNestedRepetition(
         failClosedUnprobedUnicode,
         unicodeMode,
         captureCount,
+        dotAll,
       );
       frame.branchStart = token.end;
       frame.branchMinLength = 0;
@@ -716,6 +626,7 @@ function hasUnsafeRepetition(
     failClosedUnprobedUnicode,
     unicodeMode,
     countCapturingGroups(source, tokens),
+    flags.includes("s"),
   );
 }
 

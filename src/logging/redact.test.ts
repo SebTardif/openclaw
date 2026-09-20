@@ -141,6 +141,14 @@ describe("custom adjacent-class redaction", () => {
     const output = redactSensitiveText(`id=${value}`, { patterns: [pattern] });
     expect(output).not.toContain(value);
   });
+
+  it("still masks 17-way disjoint alternatives after expansion limit", () => {
+    const output = redactSensitiveText("id=corp-axzx", {
+      patterns: ["corp-((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+"],
+    });
+    expect(output).not.toContain("corp-axzx");
+    expect(output).not.toContain("axzx");
+  });
 });
 
 describe("registered exact secret values", () => {

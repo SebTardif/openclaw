@@ -432,18 +432,32 @@ function findMatchingGroupClose(tokens: readonly PatternToken[], openIndex: numb
   return -1;
 }
 
-function escapeDecodedLiteral(value: string): string {
+function escapeDecodedLiteral(value: string, unicodeMode: boolean): string {
   let escaped = "";
   for (const ch of value) {
     const code = ch.codePointAt(0);
     if (code === undefined) {
       continue;
     }
-    if (code < 0x80) {
+    // `\xNN` and `\uXXXX` keep literal identity with or without `u`.
+    // `\u{hex}` requires unicode mode; non-unicode probes would drop `u`
+    // and treat `\u{e9}` as identity `u{e9}` instead of é.
+    if (code < 0x100) {
       escaped += `\\x${code.toString(16).padStart(2, "0")}`;
       continue;
     }
-    escaped += `\\u{${code.toString(16)}}`;
+    if (code < 0x10000) {
+      escaped += `\\u${code.toString(16).padStart(4, "0")}`;
+      continue;
+    }
+    if (unicodeMode) {
+      escaped += `\\u{${code.toString(16)}}`;
+      continue;
+    }
+    const units = String.fromCodePoint(code);
+    for (let index = 0; index < units.length; index += 1) {
+      escaped += `\\u${units.charCodeAt(index).toString(16).padStart(4, "0")}`;
+    }
   }
   return escaped;
 }
@@ -451,7 +465,7 @@ function escapeDecodedLiteral(value: string): string {
 /**
  * One consumed character for overlap compare, or null when width is unproven
  * (backref, incomplete escape). Decoded scalars are emitted as `\xNN`
- * / `\u{hex}` so `$` and `.` stay literals during overlap probing.
+ * / `\uXXXX` so `$` and `.` stay literals during overlap probing.
  */
 function decodeFixedWidthSimpleToken(
   source: string,
@@ -462,34 +476,40 @@ function decodeFixedWidthSimpleToken(
     return source;
   }
   if (/^\\x[0-9a-fA-F]{2}$/.test(source)) {
-    return escapeDecodedLiteral(String.fromCharCode(Number.parseInt(source.slice(2), 16)));
+    return escapeDecodedLiteral(
+      String.fromCharCode(Number.parseInt(source.slice(2), 16)),
+      unicodeMode,
+    );
   }
   if (/^\\u[0-9a-fA-F]{4}$/.test(source)) {
-    return escapeDecodedLiteral(String.fromCharCode(Number.parseInt(source.slice(2), 16)));
+    return escapeDecodedLiteral(
+      String.fromCharCode(Number.parseInt(source.slice(2), 16)),
+      unicodeMode,
+    );
   }
   if (unicodeMode && /^\\u\{[0-9a-fA-F]{1,6}\}$/.test(source)) {
     const cp = Number.parseInt(source.slice(3, -1), 16);
     if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) {
       return null;
     }
-    return escapeDecodedLiteral(String.fromCodePoint(cp));
+    return escapeDecodedLiteral(String.fromCodePoint(cp), unicodeMode);
   }
   const octal = readUnambiguousOctalEscape(source, 0, unicodeMode, captureCount);
   if (octal && octal.nextIndex === source.length) {
-    return escapeDecodedLiteral(octal.value);
+    return escapeDecodedLiteral(octal.value, unicodeMode);
   }
   const named = NAMED_CHAR_ESCAPES[source];
   if (named !== undefined) {
-    return escapeDecodedLiteral(named);
+    return escapeDecodedLiteral(named, unicodeMode);
   }
   if (source.length === 2) {
     const escaped = source[1];
     if (escaped !== undefined && !/[0-9A-Za-z]/.test(escaped)) {
-      return escapeDecodedLiteral(escaped);
+      return escapeDecodedLiteral(escaped, unicodeMode);
     }
     // Non-unicode `\p` / `\P` are identity letters, not property atoms.
     if (!unicodeMode && (source === "\\p" || source === "\\P") && escaped !== undefined) {
-      return escapeDecodedLiteral(escaped);
+      return escapeDecodedLiteral(escaped, unicodeMode);
     }
   }
   if (/^\\[dDsSwW]$/.test(source) || source.startsWith("\\p{") || source.startsWith("\\P{")) {
@@ -503,7 +523,10 @@ export type AtomSequence = {
   complete: boolean;
 };
 
-/** True when overlapping prefixes are complete enough to prove a prefix language. */
+/**
+ * Equal-length overlapping prefixes are proven even when truncated.
+ * Unequal length still needs the shorter sequence to be complete.
+ */
 export function sequenceOverlapIsProven(leftSeq: AtomSequence, rightSeq: AtomSequence): boolean {
   if (leftSeq.atoms.length < rightSeq.atoms.length) {
     return leftSeq.complete;
@@ -511,8 +534,12 @@ export function sequenceOverlapIsProven(leftSeq: AtomSequence, rightSeq: AtomSeq
   if (rightSeq.atoms.length < leftSeq.atoms.length) {
     return rightSeq.complete;
   }
-  return leftSeq.complete && rightSeq.complete;
+  return true;
 }
+
+export const ATOM_SEQUENCE_OVERFLOW = "overflow";
+
+type AtomSequenceRead = AtomSequence[] | typeof ATOM_SEQUENCE_OVERFLOW | null;
 
 const MAX_ALTERNATIVE_SEQUENCES = 16;
 const MAX_SEQUENCE_ATOMS = 32;
@@ -554,7 +581,7 @@ function splitTopLevelAlternativeSources(
 function cartesianConcatSequences(
   left: readonly AtomSequence[],
   right: readonly AtomSequence[],
-): AtomSequence[] | null {
+): AtomSequence[] | typeof ATOM_SEQUENCE_OVERFLOW {
   if (left.length === 0) {
     return right.map((seq) => ({ atoms: [...seq.atoms], complete: seq.complete }));
   }
@@ -562,7 +589,7 @@ function cartesianConcatSequences(
     return left.map((seq) => ({ atoms: [...seq.atoms], complete: seq.complete }));
   }
   if (left.length * right.length > MAX_ALTERNATIVE_SEQUENCES) {
-    return null;
+    return ATOM_SEQUENCE_OVERFLOW;
   }
   const out: AtomSequence[] = [];
   for (const prefix of left) {
@@ -589,7 +616,7 @@ function collectAtomSequences(
   source: string,
   unicodeMode: boolean,
   captureCount: number,
-): AtomSequence[] | null {
+): AtomSequenceRead {
   const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
   let sequences: AtomSequence[] = [{ atoms: [], complete: true }];
   for (let index = 0; index < tokens.length;) {
@@ -619,12 +646,15 @@ function collectAtomSequences(
       const inner = interior
         ? readAlternativeAtomSequences(interior, unicodeMode, captureCount)
         : [{ atoms: [], complete: true }];
+      if (inner === ATOM_SEQUENCE_OVERFLOW) {
+        return ATOM_SEQUENCE_OVERFLOW;
+      }
       if (!inner) {
         return null;
       }
       const next = cartesianConcatSequences(sequences, inner);
-      if (!next) {
-        return null;
+      if (next === ATOM_SEQUENCE_OVERFLOW) {
+        return ATOM_SEQUENCE_OVERFLOW;
       }
       sequences = next;
       index = closeIndex + 1;
@@ -639,8 +669,8 @@ function collectAtomSequences(
       return null;
     }
     const next = cartesianConcatSequences(sequences, [{ atoms: [decoded], complete: true }]);
-    if (!next) {
-      return null;
+    if (next === ATOM_SEQUENCE_OVERFLOW) {
+      return ATOM_SEQUENCE_OVERFLOW;
     }
     sequences = next;
     index += 1;
@@ -680,7 +710,7 @@ export function readAlternativeAtomSequences(
   source: string,
   unicodeMode = false,
   captureCount = 0,
-): AtomSequence[] | null {
+): AtomSequenceRead {
   const body = stripAlternativeAnchors(source);
   if (!body) {
     return null;
@@ -692,11 +722,14 @@ export function readAlternativeAtomSequences(
   const all: AtomSequence[] = [];
   for (const part of parts) {
     const sequences = collectAtomSequences(part, unicodeMode, captureCount);
+    if (sequences === ATOM_SEQUENCE_OVERFLOW) {
+      return ATOM_SEQUENCE_OVERFLOW;
+    }
     if (!sequences) {
       return null;
     }
     if (all.length + sequences.length > MAX_ALTERNATIVE_SEQUENCES) {
-      return null;
+      return ATOM_SEQUENCE_OVERFLOW;
     }
     all.push(...sequences);
   }

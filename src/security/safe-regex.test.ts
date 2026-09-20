@@ -47,6 +47,8 @@ describe("safe regex", () => {
     ["^((ab|cd)e|(abe))+$", null],
     ["^(a|[b]c)+$", RegExp],
     ["^(a|[a]c)+$", null],
+    [String.raw`^(\u00E9a|[é]a)+$`, null],
+    ["^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$", RegExp],
     [String.raw`^(\x24a|[$]a)+$`, null],
     [String.raw`corp-(\.a|[b]a)+`, RegExp],
     [String.raw`^(\400| 0)+$`, null],
@@ -355,6 +357,44 @@ describe("safe regex", () => {
     const compiled = expectCompiledRegex(longDisjoint);
     expect(compiled.test(`a${"b".repeat(32)}c${"d".repeat(32)}`)).toBe(true);
     expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
+  });
+
+  it("rejects decoded non-ASCII literals that overlap without unicode flags", () => {
+    // `\u00E9` is é. Emitting `\u{e9}` for overlap probes drops `u`, so the
+    // left atom cannot match `[é]` and identical branches look disjoint.
+    const overlapping = String.raw`^(\u00E9a|[é]a)+$`;
+    expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(overlapping)).toBeNull();
+    expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
+  });
+
+  it("rejects overlapping repetitions after prefix truncation", () => {
+    const unit = `[a]${"a".repeat(32)}`;
+    const overlapping = `^(${unit}|${unit}${unit})+$`;
+    expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(overlapping)).toBeNull();
+    expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
+    expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
+  });
+
+  it("preserves disjoint alternatives when expansion reaches its sequence limit", () => {
+    const seventeenWay = "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$";
+    expect(compileSafeRegexDetailed(seventeenWay).reason).toBeNull();
+    expect(compileSafeRegex(seventeenWay)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(seventeenWay).regex).toBeInstanceOf(RegExp);
+    const compiled = expectCompiledRegex(seventeenWay);
+    expect(compiled.test("axzx")).toBe(true);
+    expect(compiled.test("zxqx")).toBe(true);
+    expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
+  });
+
+  it("rejects dotAll alternatives whose overlap needs the s flag", () => {
+    const overlapping = String.raw`^(.a|\na\na)+$`;
+    expect(compileSafeRegexDetailed(overlapping, "s").reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(overlapping, "s")).toBeNull();
+    expect(compileSafeRegexForExec(overlapping, "s").regex).toBeNull();
+    expect(compileSafeRegexDetailed(overlapping).reason).toBeNull();
+    expect(compileSafeRegex(overlapping)).toBeInstanceOf(RegExp);
   });
 
   it("accepts disjoint unequal-length alternatives when prefixes do not overlap", () => {
