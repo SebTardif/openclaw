@@ -4313,6 +4313,82 @@ describe("uninstallUserSystemdGatewayUnit", () => {
     }
   });
 
+  it("refuses cleanup when the inspected user unit is replaced by a leftover legacy unit", async () => {
+    const tempHomeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-user-unit-drift-"));
+    const home = path.join(tempHomeRoot, "home");
+    const env = { HOME: home, OPENCLAW_PROFILE: "lisa" };
+    const canonicalPath = path.join(
+      home,
+      ".config",
+      "systemd",
+      "user",
+      "openclaw-gateway-lisa.service",
+    );
+    const leftoverPath = path.join(home, ".config", "systemd", "user", "openclaw-lisa.service");
+    try {
+      await fs.mkdir(path.dirname(leftoverPath), { recursive: true, mode: 0o755 });
+      await fs.writeFile(leftoverPath, "[Unit]\nDescription=OpenClaw Gateway (profile: lisa)\n", {
+        encoding: "utf8",
+        mode: 0o644,
+      });
+      const { stdout } = createWritableStreamMock();
+      await expect(
+        uninstallUserSystemdGatewayUnit({
+          env,
+          stdout,
+          target: {
+            scope: "user",
+            unitName: "openclaw-gateway-lisa.service",
+            unitPath: canonicalPath,
+          },
+        }),
+      ).rejects.toThrow(/openclaw-gateway-lisa\.service changed to openclaw-lisa\.service/);
+      await fs.access(leftoverPath);
+      expect(execFileMock).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(tempHomeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("still removes the inspected user unit when discovery still matches", async () => {
+    const tempHomeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-user-unit-match-"));
+    const home = path.join(tempHomeRoot, "home");
+    const env = { HOME: home, OPENCLAW_PROFILE: "lisa" };
+    const unitPath = path.join(home, ".config", "systemd", "user", "openclaw-lisa.service");
+    try {
+      await fs.mkdir(path.dirname(unitPath), { recursive: true, mode: 0o755 });
+      await fs.writeFile(unitPath, "[Unit]\nDescription=OpenClaw Gateway (profile: lisa)\n", {
+        encoding: "utf8",
+        mode: 0o644,
+      });
+      execFileMock
+        .mockImplementationOnce(systemctlVersionResult())
+        .mockImplementationOnce(systemctlUserSuccess("disable", "--now", "openclaw-lisa.service"))
+        .mockImplementationOnce(systemctlUserSuccess("daemon-reload"));
+
+      const { stdout } = createWritableStreamMock();
+      const result = await uninstallUserSystemdGatewayUnit({
+        env,
+        stdout,
+        target: {
+          scope: "user",
+          unitName: "openclaw-lisa.service",
+          unitPath,
+        },
+      });
+
+      expect(result).toMatchObject({
+        unitName: "openclaw-lisa.service",
+        unitPath,
+        removed: true,
+        disabled: true,
+      });
+      await expect(fs.access(unitPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(tempHomeRoot, { recursive: true, force: true });
+    }
+  });
+
   it("surfaces daemon-reload failure after removing the disabled unit", async () => {
     await withUserUnitFixture(async ({ env, unitPath }) => {
       await fs.writeFile(unitPath, "[Unit]\nDescription=OpenClaw Gateway\n", {

@@ -950,6 +950,7 @@ export async function maybeResolveDuelingSystemdGatewayScopes(
     const result = await uninstallUserSystemdGatewayUnit({
       env: process.env,
       stdout: process.stdout,
+      target: user,
     });
     note(
       result.removed

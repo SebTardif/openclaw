@@ -9,6 +9,7 @@ import type {
   GatewayServiceEnv,
   GatewayServiceManageArgs,
   GatewayServiceRestartResult,
+  SystemdServiceReadTarget,
 } from "./service-types.js";
 import {
   assertSystemdAvailable,
@@ -237,15 +238,41 @@ type UninstallUserSystemdGatewayUnitResult = {
  * unit untouched. Used by doctor to resolve a `dueling` installation by
  * dropping the redundant user-scope leftover (issue #79375). Removing a unit
  * under `$HOME` needs no root, unlike the system-scope unit.
+ *
+ * Pass the inspected user unit as `target` after confirmation. A later lookup
+ * must not fall back to a leftover legacy unit if that confirmed file vanished.
  */
 export async function uninstallUserSystemdGatewayUnit({
   env,
   stdout,
-}: GatewayServiceManageArgs): Promise<UninstallUserSystemdGatewayUnitResult> {
+  target,
+}: GatewayServiceManageArgs & {
+  target?: SystemdServiceReadTarget;
+}): Promise<UninstallUserSystemdGatewayUnitResult> {
   const installed = await findInstalledSystemdGatewayScope(env);
+  if (target) {
+    if (target.scope !== "user") {
+      throw new Error(
+        `Confirmed systemd unit ${target.unitName} is ${target.scope}-scope; refusing user-scope cleanup`,
+      );
+    }
+    if (
+      installed?.scope === "user" &&
+      (installed.unitName !== target.unitName || installed.unitPath !== target.unitPath)
+    ) {
+      throw new Error(
+        `Confirmed user systemd unit ${target.unitName} changed to ${installed.unitName}; refusing cleanup`,
+      );
+    }
+  }
   const unitName =
-    installed?.scope === "user" ? installed.unitName : `${resolveSystemdServiceName(env)}.service`;
-  const unitPath = installed?.scope === "user" ? installed.unitPath : resolveSystemdUnitPath(env);
+    target?.unitName ??
+    (installed?.scope === "user"
+      ? installed.unitName
+      : `${resolveSystemdServiceName(env)}.service`);
+  const unitPath =
+    target?.unitPath ??
+    (installed?.scope === "user" ? installed.unitPath : resolveSystemdUnitPath(env));
   let disabled = false;
   if (await isSystemctlAvailable(env)) {
     await disableSystemdUserUnitForRemoval(env, unitName);
