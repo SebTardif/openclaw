@@ -126,7 +126,9 @@ describe("safe regex", () => {
 
   it("rejects adjacent Unicode property repeats as one atom", () => {
     const overlapping = String.raw`^\p{L}*\p{L}*\p{L}*z$`;
-    const tokens = tokenizePattern(overlapping).filter((token) => token.kind === "simple-token");
+    const tokens = tokenizePattern(overlapping, "u").filter(
+      (token) => token.kind === "simple-token",
+    );
     expect(tokens.map((token) => token.source)).toEqual([
       "^",
       String.raw`\p{L}`,
@@ -135,10 +137,10 @@ describe("safe regex", () => {
       "z",
       "$",
     ]);
-    expect(compileSafeRegex(overlapping)).toBeNull();
+    expect(compileSafeRegex(overlapping, "u")).toBeNull();
     expect(compileSafeRegexDetailed(overlapping, "u").reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegexForExec(overlapping, "u").regex).toBeNull();
-    expect(compileSafeRegex(String.raw`\P{L}*\P{L}*`)).toBeNull();
+    expect(compileSafeRegex(String.raw`\P{L}*\P{L}*`, "u")).toBeNull();
     expect(compileSafeRegexDetailed(String.raw`\p{L}*\p{Ll}*`, "u").reason).toBe(
       "unsafe-nested-repetition",
     );
@@ -312,6 +314,47 @@ describe("safe regex", () => {
     expect(compiled.test("cdefgj")).toBe(true);
     expect(compileSafeRegexDetailed("^((ab|cd)e|(abe))+$").reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegexForExec("^((ab|cd)e|(abe))+$").regex).toBeNull();
+  });
+
+  it("rejects no-flag property identity alternatives that native matching overlaps", () => {
+    // Without u/v, `\p{L}` is identity `p` plus `{L}`, so this is `(p{L}a|p{L}ap{L}a)+`.
+    const overlapping = String.raw`^(\p{L}a|p\{L\}ap\{L\}a)+$`;
+    const tokens = tokenizePattern(overlapping)
+      .filter((token) => token.kind === "simple-token")
+      .map((token) => token.source);
+    expect(tokens).toEqual([
+      "^",
+      String.raw`\p`,
+      "{",
+      "L",
+      "}",
+      "a",
+      "p",
+      String.raw`\{`,
+      "L",
+      String.raw`\}`,
+      "a",
+      "p",
+      String.raw`\{`,
+      "L",
+      String.raw`\}`,
+      "a",
+      "$",
+    ]);
+    expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(overlapping)).toBeNull();
+    expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
+    expect(compileSafeRegexDetailed(overlapping, "u").reason).toBeNull();
+  });
+
+  it("accepts long disjoint alternatives past the analysis atom cap", () => {
+    const longDisjoint = `^([a]${"b".repeat(32)}|[c]${"d".repeat(32)})+$`;
+    expect(compileSafeRegexDetailed(longDisjoint).reason).toBeNull();
+    expect(compileSafeRegex(longDisjoint)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(longDisjoint).regex).toBeInstanceOf(RegExp);
+    const compiled = expectCompiledRegex(longDisjoint);
+    expect(compiled.test(`a${"b".repeat(32)}c${"d".repeat(32)}`)).toBe(true);
+    expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
   });
 
   it("accepts disjoint unequal-length alternatives when prefixes do not overlap", () => {

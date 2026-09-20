@@ -161,6 +161,18 @@
       "pattern": "^(a|[a]c)+$",
       "accept": false,
       "argument": "aac"
+    },
+    {
+      "id": "property-identity-overlap",
+      "pattern": "^(\\p{L}a|p\\{L\\}ap\\{L\\}a)+$",
+      "accept": false,
+      "argument": "p{L}ap{L}a"
+    },
+    {
+      "id": "long-disjoint-atom-cap",
+      "pattern": "^([a]bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|[c]dddddddddddddddddddddddddddddddd)+$",
+      "accept": true,
+      "argument": "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbcdddddddddddddddddddddddddddddddd"
     }
   ]
 }

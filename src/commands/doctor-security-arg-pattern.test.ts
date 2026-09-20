@@ -293,6 +293,63 @@ describe("doctor security exec argPattern repair", () => {
     });
   });
 
+  it("keeps long disjoint alternatives past the analysis atom cap and still removes nested repetition", async () => {
+    const longDisjoint = {
+      pattern: "/bin/long-disjoint",
+      argPattern: `^([a]${"b".repeat(32)}|[c]${"d".repeat(32)})+$`,
+    };
+    const propertyIdentity = {
+      pattern: "/bin/property-identity",
+      argPattern: String.raw`^(\p{L}a|p\{L\}ap\{L\}a)+$`,
+    };
+    const approvals = {
+      version: 1,
+      agents: {
+        main: {
+          allowlist: [
+            { pattern: "/bin/unsafe", argPattern: "(a+)+$" },
+            longDisjoint,
+            propertyIdentity,
+            { pattern: "/bin/safe", argPattern: "^safe$" },
+          ],
+        },
+      },
+    } satisfies ExecApprovalsFile;
+
+    await withExecApprovalsFile(approvals, async () => {
+      const { CORE_HEALTH_CHECKS } = await import("../flows/doctor-core-checks.js");
+      const check = CORE_HEALTH_CHECKS.find(
+        (candidate) => candidate.id === "core/doctor/exec-approval-arg-patterns",
+      );
+      expect(check).toBeDefined();
+      const context = {
+        mode: "fix" as const,
+        runtime: { log() {}, error() {}, exit() {} },
+        cfg: {} as OpenClawConfig,
+      };
+      const findings = await check!.detect(context);
+      expect(findings).toHaveLength(2);
+      expect(findings.some((finding) => finding.message.includes("/bin/unsafe"))).toBe(true);
+      expect(findings.some((finding) => finding.message.includes("/bin/property-identity"))).toBe(
+        true,
+      );
+      expect(findings.some((finding) => finding.message.includes("/bin/long-disjoint"))).toBe(
+        false,
+      );
+
+      const repaired = await check!.repair?.(context, findings);
+      expect(repaired?.changes).toEqual([
+        expect.stringContaining("Removed 2 rejected exec approval entries"),
+      ]);
+
+      const remaining = loadExecApprovals().agents?.main?.allowlist ?? [];
+      expect(remaining.map(({ pattern, argPattern }) => ({ pattern, argPattern }))).toEqual([
+        longDisjoint,
+        { pattern: "/bin/safe", argPattern: "^safe$" },
+      ]);
+    });
+  });
+
   it("keeps disjoint mixed equal-length alternatives and still removes nested repetition", async () => {
     const mixed = { pattern: "/bin/mixed", argPattern: "^(ab|[c]d)+$" };
     const grouped = { pattern: "/bin/grouped", argPattern: "^((ab)|(cd))+$" };

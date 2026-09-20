@@ -13,6 +13,7 @@ import {
   readAlternativeAtomSequences,
   readEscapeAtomEnd,
   readScalarEscape,
+  sequenceOverlapIsProven,
   stripAlternativeAnchors,
   tokenizePattern,
   type PatternToken,
@@ -246,38 +247,53 @@ function alternativesMayOverlap(
     isSingleTokenAlternative(left, unicodeMode, captureCount) &&
     isSingleTokenAlternative(right, unicodeMode, captureCount)
   ) {
-    return singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode);
+    return singleTokenAlternativesMayOverlap(
+      left,
+      right,
+      ignoreCase,
+      failClosedUnprobedUnicode,
+      unicodeMode,
+    );
   }
   const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
   const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
   if (leftSequences && rightSequences) {
     // Nested groups such as (ab|cd)e expand to finite sequences. Unequal
     // lengths stay safe when a shared prefix atom is disjoint.
-    for (const leftAtoms of leftSequences) {
-      for (const rightAtoms of rightSequences) {
+    let unproven = false;
+    for (const leftSeq of leftSequences) {
+      for (const rightSeq of rightSequences) {
         if (
-          mixedSequencesOverlap(
-            leftAtoms,
-            rightAtoms,
+          !mixedSequencesOverlap(
+            leftSeq.atoms,
+            rightSeq.atoms,
             ignoreCase,
             failClosedUnprobedUnicode,
-            singleTokenAlternativesMayOverlap,
+            (leftAtom, rightAtom, ignoreCaseFlag, failClosed) =>
+              singleTokenAlternativesMayOverlap(
+                leftAtom,
+                rightAtom,
+                ignoreCaseFlag,
+                failClosed,
+                unicodeMode,
+              ),
           )
         ) {
+          continue;
+        }
+        if (sequenceOverlapIsProven(leftSeq, rightSeq)) {
           return true;
         }
+        unproven = true;
       }
     }
-    return false;
+    // Truncated overlapping prefixes are unproven, not unsafe. Shared
+    // compile keeps them; exec fail-closed still refuses.
+    return unproven && failClosedUnprobedUnicode;
   }
   // Mixed structure with broad components (e.g. aa|a.) can overlap under +.
   return true;
 }
-
-/**
- * Probe whether two single-token alternatives can match the same character.
- * Fail closed on compile errors or unknown shapes.
- */
 
 /** True if an alternative may match outside the finite ASCII+probe set. */
 function alternativeHasUnprobedNonAscii(source: string, captureCount = 0): boolean {
@@ -322,13 +338,15 @@ function isUnicodePropertyAtom(source: string): boolean {
   return /^\\[pP]\{[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?\}$/.test(inner);
 }
 
+/** Probe whether two single-token alternatives can match the same character. */
 function singleTokenAlternativesMayOverlap(
   left: string,
   right: string,
   ignoreCase: boolean,
   failClosedUnprobedUnicode: boolean,
+  unicodeMode = false,
 ): boolean {
-  const flags = ignoreCase ? "ui" : "u";
+  const flags = `${ignoreCase ? "i" : ""}${unicodeMode ? "u" : ""}`;
   let leftRe: RegExp;
   let rightRe: RegExp;
   try {

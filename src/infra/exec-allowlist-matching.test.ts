@@ -272,6 +272,14 @@ describe("exec allowlist matching", () => {
       };
       const unequalDisjoint = { pattern: "/usr/bin/python3", argPattern: "^(a|[b]c)+$" };
       const unequalOverlap = { pattern: "/usr/bin/python3", argPattern: "^(a|[a]c)+$" };
+      const propertyIdentityOverlap = {
+        pattern: "/usr/bin/python3",
+        argPattern: String.raw`^(\p{L}a|p\{L\}ap\{L\}a)+$`,
+      };
+      const longDisjoint = {
+        pattern: "/usr/bin/python3",
+        argPattern: `^([a]${"b".repeat(32)}|[c]${"d".repeat(32)})+$`,
+      };
 
       expect(matchAllowlist([duplicate], resolution, ["python3", "aaaa"])).toBeNull();
       expect(matchAllowlist([overlapping], resolution, ["python3", "aaaa"])).toBeNull();
@@ -307,6 +315,15 @@ describe("exec allowlist matching", () => {
         unequalDisjoint,
       );
       expect(matchAllowlist([unequalOverlap], resolution, ["python3", "aac"])).toBeNull();
+      expect(
+        matchAllowlist([propertyIdentityOverlap], resolution, ["python3", "p{L}ap{L}a"]),
+      ).toBeNull();
+      expect(
+        matchAllowlist([longDisjoint], resolution, [
+          "python3",
+          `a${"b".repeat(32)}c${"d".repeat(32)}`,
+        ]),
+      ).toBe(longDisjoint);
     });
 
     it("falls back to an explicit path-only sibling when an argPattern is rejected", () => {

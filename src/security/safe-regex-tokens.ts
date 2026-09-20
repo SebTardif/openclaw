@@ -86,8 +86,9 @@ function isUnicodePropertyName(interior: string): boolean {
 
 /**
  * Last index of one escape atom (`\p{L}`, `\u0041`, `\x41`), else the
- * one-char escape after `\`. Do not swallow `\p{(a+)+}`: without `u`,
- * `\p` is an identity escape and the group must still be analyzed.
+ * one-char escape after `\`. `\p{L}` is one property atom only with
+ * `u`/`v`; without those flags `\p` is identity `p`. Do not swallow
+ * `\p{(a+)+}`: the group must still be analyzed.
  */
 export function readEscapeAtomEnd(
   source: string,
@@ -102,6 +103,9 @@ export function readEscapeAtomEnd(
   const afterKind = backslashIndex + 2;
 
   if ((kind === "p" || kind === "P") && source[afterKind] === "{") {
+    if (!unicodeMode) {
+      return backslashIndex + 1;
+    }
     const close = source.indexOf("}", afterKind + 1);
     if (close !== -1 && isUnicodePropertyName(source.slice(afterKind + 1, close))) {
       return close;
@@ -483,11 +487,31 @@ function decodeFixedWidthSimpleToken(
     if (escaped !== undefined && !/[0-9A-Za-z]/.test(escaped)) {
       return escapeDecodedLiteral(escaped);
     }
+    // Non-unicode `\p` / `\P` are identity letters, not property atoms.
+    if (!unicodeMode && (source === "\\p" || source === "\\P") && escaped !== undefined) {
+      return escapeDecodedLiteral(escaped);
+    }
   }
   if (/^\\[dDsSwW]$/.test(source) || source.startsWith("\\p{") || source.startsWith("\\P{")) {
     return source;
   }
   return null;
+}
+
+export type AtomSequence = {
+  atoms: string[];
+  complete: boolean;
+};
+
+/** True when overlapping prefixes are complete enough to prove a prefix language. */
+export function sequenceOverlapIsProven(leftSeq: AtomSequence, rightSeq: AtomSequence): boolean {
+  if (leftSeq.atoms.length < rightSeq.atoms.length) {
+    return leftSeq.complete;
+  }
+  if (rightSeq.atoms.length < leftSeq.atoms.length) {
+    return rightSeq.complete;
+  }
+  return leftSeq.complete && rightSeq.complete;
 }
 
 const MAX_ALTERNATIVE_SEQUENCES = 16;
@@ -528,25 +552,34 @@ function splitTopLevelAlternativeSources(
 }
 
 function cartesianConcatSequences(
-  left: readonly (readonly string[])[],
-  right: readonly (readonly string[])[],
-): string[][] | null {
+  left: readonly AtomSequence[],
+  right: readonly AtomSequence[],
+): AtomSequence[] | null {
   if (left.length === 0) {
-    return right.map((seq) => [...seq]);
+    return right.map((seq) => ({ atoms: [...seq.atoms], complete: seq.complete }));
   }
   if (right.length === 0) {
-    return left.map((seq) => [...seq]);
+    return left.map((seq) => ({ atoms: [...seq.atoms], complete: seq.complete }));
   }
   if (left.length * right.length > MAX_ALTERNATIVE_SEQUENCES) {
     return null;
   }
-  const out: string[][] = [];
+  const out: AtomSequence[] = [];
   for (const prefix of left) {
     for (const suffix of right) {
-      if (prefix.length + suffix.length > MAX_SEQUENCE_ATOMS) {
-        return null;
+      const combinedLength = prefix.atoms.length + suffix.atoms.length;
+      if (combinedLength > MAX_SEQUENCE_ATOMS) {
+        const room = MAX_SEQUENCE_ATOMS - prefix.atoms.length;
+        out.push({
+          atoms: room > 0 ? [...prefix.atoms, ...suffix.atoms.slice(0, room)] : [...prefix.atoms],
+          complete: false,
+        });
+        continue;
       }
-      out.push([...prefix, ...suffix]);
+      out.push({
+        atoms: [...prefix.atoms, ...suffix.atoms],
+        complete: prefix.complete && suffix.complete,
+      });
     }
   }
   return out;
@@ -556,9 +589,9 @@ function collectAtomSequences(
   source: string,
   unicodeMode: boolean,
   captureCount: number,
-): string[][] | null {
+): AtomSequence[] | null {
   const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
-  let sequences: string[][] = [[]];
+  let sequences: AtomSequence[] = [{ atoms: [], complete: true }];
   for (let index = 0; index < tokens.length;) {
     const token = tokens[index];
     if (!token) {
@@ -585,7 +618,7 @@ function collectAtomSequences(
       const interior = source.slice(contentStart, close.start);
       const inner = interior
         ? readAlternativeAtomSequences(interior, unicodeMode, captureCount)
-        : [[]];
+        : [{ atoms: [], complete: true }];
       if (!inner) {
         return null;
       }
@@ -605,14 +638,14 @@ function collectAtomSequences(
     if (decoded === null) {
       return null;
     }
-    const next = cartesianConcatSequences(sequences, [[decoded]]);
+    const next = cartesianConcatSequences(sequences, [{ atoms: [decoded], complete: true }]);
     if (!next) {
       return null;
     }
     sequences = next;
     index += 1;
   }
-  const nonempty = sequences.filter((seq) => seq.length > 0);
+  const nonempty = sequences.filter((seq) => seq.atoms.length > 0);
   return nonempty.length > 0 ? nonempty : null;
 }
 
@@ -639,14 +672,15 @@ export function stripAlternativeAnchors(source: string): string {
 
 /**
  * Finite atom sequences for one alternative, expanding nested groups.
- * Null when a quantifier, unknown-width atom, or expansion cap makes
- * length unproven.
+ * Null when a quantifier or unknown-width atom makes length unproven.
+ * Sequences longer than the atom cap keep a truncated prefix so
+ * proven-disjoint first atoms still screen; `complete` is false then.
  */
 export function readAlternativeAtomSequences(
   source: string,
   unicodeMode = false,
   captureCount = 0,
-): string[][] | null {
+): AtomSequence[] | null {
   const body = stripAlternativeAnchors(source);
   if (!body) {
     return null;
@@ -655,7 +689,7 @@ export function readAlternativeAtomSequences(
   if (parts.length === 1) {
     return collectAtomSequences(body, unicodeMode, captureCount);
   }
-  const all: string[][] = [];
+  const all: AtomSequence[] = [];
   for (const part of parts) {
     const sequences = collectAtomSequences(part, unicodeMode, captureCount);
     if (!sequences) {

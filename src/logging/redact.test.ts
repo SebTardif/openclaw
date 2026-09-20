@@ -134,6 +134,13 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain("corp-a$b!");
     expect(output).not.toContain("a$b!");
   });
+
+  it("still masks long disjoint alternatives past the analysis atom cap", () => {
+    const pattern = `corp-([a]${"b".repeat(32)}|[c]${"d".repeat(32)})+`;
+    const value = `corp-a${"b".repeat(32)}c${"d".repeat(32)}`;
+    const output = redactSensitiveText(`id=${value}`, { patterns: [pattern] });
+    expect(output).not.toContain(value);
+  });
 });
 
 describe("registered exact secret values", () => {
