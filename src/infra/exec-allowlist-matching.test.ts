@@ -292,6 +292,19 @@ describe("exec allowlist matching", () => {
         pattern: "/usr/bin/python3",
         argPattern: "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$",
       };
+      const overflowPrefix = {
+        pattern: "/usr/bin/python3",
+        argPattern: "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|axax)+$",
+      };
+      const truncatedDisjointPrefix = `[a]${"a".repeat(31)}`;
+      const truncatedDisjoint = {
+        pattern: "/usr/bin/python3",
+        argPattern: `^(${truncatedDisjointPrefix}b|${truncatedDisjointPrefix}c)+$`,
+      };
+      const macronOverlap = {
+        pattern: "/usr/bin/python3",
+        argPattern: "^([Ā]a|ĀaĀa)+$",
+      };
 
       expect(matchAllowlist([duplicate], resolution, ["python3", "aaaa"])).toBeNull();
       expect(matchAllowlist([overlapping], resolution, ["python3", "aaaa"])).toBeNull();
@@ -341,6 +354,14 @@ describe("exec allowlist matching", () => {
         matchAllowlist([truncatedOverlap], resolution, ["python3", `a${"a".repeat(32)}`]),
       ).toBeNull();
       expect(matchAllowlist([seventeenWay], resolution, ["python3", "axzx"])).toBe(seventeenWay);
+      expect(matchAllowlist([overflowPrefix], resolution, ["python3", "axax"])).toBeNull();
+      expect(
+        matchAllowlist([truncatedDisjoint], resolution, [
+          "python3",
+          `${"a".repeat(32)}b${"a".repeat(32)}c`,
+        ]),
+      ).toBe(truncatedDisjoint);
+      expect(matchAllowlist([macronOverlap], resolution, ["python3", "ĀaĀa"])).toBeNull();
     });
 
     it("falls back to an explicit path-only sibling when an argPattern is rejected", () => {

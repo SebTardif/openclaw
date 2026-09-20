@@ -274,6 +274,56 @@ export function mixedSequencesOverlap(
   return true;
 }
 
+/** Characters named by a token, used as overlap witnesses outside ASCII probes. */
+function collectAtomWitnesses(source: string, captureCount: number): string[] {
+  const body = stripAlternativeAnchors(source);
+  const chars: string[] = [];
+  const seen = new Set<string>();
+  const add = (ch: string) => {
+    if (!ch || seen.has(ch)) {
+      return;
+    }
+    seen.add(ch);
+    chars.push(ch);
+  };
+  let inClass = false;
+  for (let index = 0; index < body.length;) {
+    if (body[index] === "\\") {
+      const scalar = readScalarEscape(body, index, false, captureCount);
+      if (scalar) {
+        add(scalar.value);
+        index = scalar.nextIndex;
+        continue;
+      }
+      index = Math.min(index + 2, body.length);
+      continue;
+    }
+    if (!inClass && body[index] === "[") {
+      inClass = true;
+      index += 1;
+      if (body[index] === "^") {
+        index += 1;
+      }
+      continue;
+    }
+    if (inClass && body[index] === "]") {
+      inClass = false;
+      index += 1;
+      continue;
+    }
+    const cp = body.codePointAt(index);
+    if (cp === undefined) {
+      break;
+    }
+    const unit = body[index] ?? "";
+    if (inClass || !".$^*+?(){}|".includes(unit)) {
+      add(String.fromCodePoint(cp));
+    }
+    index += cp > 0xffff ? 2 : 1;
+  }
+  return chars;
+}
+
 /** True if an alternative may match outside the finite ASCII+probe set. */
 function alternativeHasUnprobedNonAscii(source: string, captureCount = 0): boolean {
   const body = stripAlternativeAnchors(source);
@@ -355,6 +405,12 @@ export function singleTokenAlternativesMayOverlap(
   }
   // Light non-ASCII probes for Unicode property / word-class overlap.
   for (const ch of ["\u00A0", "\u00E9", "\u4E2D"]) {
+    if (consider(ch)) {
+      return true;
+    }
+  }
+  // Named atoms such as [Ā] vs Ā share U+0100, which the finite set misses.
+  for (const ch of [...collectAtomWitnesses(left, 0), ...collectAtomWitnesses(right, 0)]) {
     if (consider(ch)) {
       return true;
     }

@@ -119,11 +119,12 @@ describe("safe regex", () => {
   it("exec-style fail-closed rejects unprobed Unicode single-token alts", () => {
     const pattern = String.raw`^(?:[\u0100]|\u0100)+$`;
     const shared = compileSafeRegexDetailed(pattern);
-    // Shared path stays two-arg and does not fail closed on unprobed Unicode.
+    expect(shared.reason).toBe("unsafe-nested-repetition");
+    expect(shared.regex).toBeNull();
     const execMode = compileSafeRegexForExec(pattern);
     expect(execMode.reason).toBe("unsafe-nested-repetition");
     expect(execMode.regex).toBeNull();
-    void shared;
+    expect(compileSafeRegexDetailed("^(?:[猫]|[犬])+$").reason).toBeNull();
   });
 
   it("rejects adjacent Unicode property repeats as one atom", () => {
@@ -386,6 +387,41 @@ describe("safe regex", () => {
     expect(compiled.test("axzx")).toBe(true);
     expect(compiled.test("zxqx")).toBe(true);
     expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
+  });
+
+  it("rejects expansion overflow that would skip comparing a prefix language", () => {
+    // 17 inner alternatives overflow the sequence cap, so `ax` must still be
+    // compared with `axax` instead of compiling as safe.
+    const overflowing = "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|axax)+$";
+    expect(compileSafeRegexDetailed(overflowing).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(overflowing)).toBeNull();
+    expect(compileSafeRegexForExec(overflowing).regex).toBeNull();
+    const seventeenWay = "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$";
+    expect(compileSafeRegexDetailed(seventeenWay).reason).toBeNull();
+    expect(compileSafeRegexForExec(seventeenWay).regex).toBeInstanceOf(RegExp);
+  });
+
+  it("accepts truncated equal prefixes whose missing suffixes are disjoint", () => {
+    const prefix = `[a]${"a".repeat(31)}`;
+    const disjoint = `^(${prefix}b|${prefix}c)+$`;
+    expect(compileSafeRegexDetailed(disjoint).reason).toBeNull();
+    expect(compileSafeRegex(disjoint)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(disjoint).regex).toBeInstanceOf(RegExp);
+    const compiled = expectCompiledRegex(disjoint);
+    expect(compiled.test(`${"a".repeat(32)}b${"a".repeat(32)}c`)).toBe(true);
+    const unit = `[a]${"a".repeat(32)}`;
+    expect(compileSafeRegexDetailed(`^(${unit}|${unit}${unit})+$`).reason).toBe(
+      "unsafe-nested-repetition",
+    );
+  });
+
+  it("rejects shared Unicode atoms that the finite probe set never visits", () => {
+    const overlapping = "^([Ā]a|ĀaĀa)+$";
+    expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(overlapping)).toBeNull();
+    expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
+    expect(compileSafeRegexDetailed("^(?:[猫]|[犬])+$").reason).toBeNull();
+    expect(compileSafeRegex("^(?:[猫]|[犬])+$")).toBeInstanceOf(RegExp);
   });
 
   it("rejects dotAll alternatives whose overlap needs the s flag", () => {

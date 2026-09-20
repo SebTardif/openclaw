@@ -149,6 +149,28 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain("corp-axzx");
     expect(output).not.toContain("axzx");
   });
+
+  it("still masks truncated equal prefixes whose suffixes are disjoint", () => {
+    const prefix = `[a]${"a".repeat(31)}`;
+    const value = `corp-${"a".repeat(32)}b${"a".repeat(32)}c`;
+    const output = redactSensitiveText(`id=${value}`, {
+      patterns: [`corp-(${prefix}b|${prefix}c)+`],
+    });
+    expect(output).not.toContain(value);
+  });
+
+  it("drops overlapping expansion-overflow and unprobed Unicode prefixes", () => {
+    const overflowValue = "corp-axax!";
+    const overflowOutput = redactSensitiveText(`id=${overflowValue}`, {
+      patterns: ["corp-((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|axax)+"],
+    });
+    expect(overflowOutput).toContain(overflowValue);
+    const macronValue = "corp-ĀaĀa";
+    const macronOutput = redactSensitiveText(`id=${macronValue}`, {
+      patterns: ["corp-([Ā]a|ĀaĀa)+"],
+    });
+    expect(macronOutput).toContain(macronValue);
+  });
 });
 
 describe("registered exact secret values", () => {

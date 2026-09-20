@@ -314,6 +314,19 @@ describe("doctor security exec argPattern repair", () => {
       pattern: "/bin/seventeen-way",
       argPattern: "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$",
     };
+    const overflowPrefix = {
+      pattern: "/bin/overflow-prefix",
+      argPattern: "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|axax)+$",
+    };
+    const truncatedDisjointPrefix = `[a]${"a".repeat(31)}`;
+    const truncatedDisjoint = {
+      pattern: "/bin/truncated-disjoint",
+      argPattern: `^(${truncatedDisjointPrefix}b|${truncatedDisjointPrefix}c)+$`,
+    };
+    const macronOverlap = {
+      pattern: "/bin/macron-overlap",
+      argPattern: "^([Ā]a|ĀaĀa)+$",
+    };
     const approvals = {
       version: 1,
       agents: {
@@ -325,6 +338,9 @@ describe("doctor security exec argPattern repair", () => {
             eAcuteOverlap,
             truncatedOverlap,
             seventeenWay,
+            overflowPrefix,
+            truncatedDisjoint,
+            macronOverlap,
             { pattern: "/bin/safe", argPattern: "^safe$" },
           ],
         },
@@ -343,7 +359,7 @@ describe("doctor security exec argPattern repair", () => {
         cfg: {} as OpenClawConfig,
       };
       const findings = await check!.detect(context);
-      expect(findings).toHaveLength(4);
+      expect(findings).toHaveLength(6);
       expect(findings.some((finding) => finding.message.includes("/bin/unsafe"))).toBe(true);
       expect(findings.some((finding) => finding.message.includes("/bin/property-identity"))).toBe(
         true,
@@ -352,22 +368,32 @@ describe("doctor security exec argPattern repair", () => {
       expect(findings.some((finding) => finding.message.includes("/bin/truncated-overlap"))).toBe(
         true,
       );
+      expect(findings.some((finding) => finding.message.includes("/bin/overflow-prefix"))).toBe(
+        true,
+      );
+      expect(findings.some((finding) => finding.message.includes("/bin/macron-overlap"))).toBe(
+        true,
+      );
       expect(findings.some((finding) => finding.message.includes("/bin/long-disjoint"))).toBe(
         false,
       );
       expect(findings.some((finding) => finding.message.includes("/bin/seventeen-way"))).toBe(
         false,
       );
+      expect(findings.some((finding) => finding.message.includes("/bin/truncated-disjoint"))).toBe(
+        false,
+      );
 
       const repaired = await check!.repair?.(context, findings);
       expect(repaired?.changes).toEqual([
-        expect.stringContaining("Removed 4 rejected exec approval entries"),
+        expect.stringContaining("Removed 6 rejected exec approval entries"),
       ]);
 
       const remaining = loadExecApprovals().agents?.main?.allowlist ?? [];
       expect(remaining.map(({ pattern, argPattern }) => ({ pattern, argPattern }))).toEqual([
         longDisjoint,
         seventeenWay,
+        truncatedDisjoint,
         { pattern: "/bin/safe", argPattern: "^safe$" },
       ]);
     });

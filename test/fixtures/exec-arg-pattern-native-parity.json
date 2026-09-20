@@ -173,6 +173,30 @@
       "pattern": "^([a]bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|[c]dddddddddddddddddddddddddddddddd)+$",
       "accept": true,
       "argument": "abbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbcdddddddddddddddddddddddddddddddd"
+    },
+    {
+      "id": "seventeen-way-disjoint",
+      "pattern": "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$",
+      "accept": true,
+      "argument": "axzx"
+    },
+    {
+      "id": "expansion-overflow-prefix",
+      "pattern": "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|axax)+$",
+      "accept": false,
+      "argument": "axax"
+    },
+    {
+      "id": "truncated-equal-prefix-disjoint",
+      "pattern": "^([a]aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab|[a]aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac)+$",
+      "accept": true,
+      "argument": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac"
+    },
+    {
+      "id": "macron-class-literal-overlap",
+      "pattern": "^([Ā]a|ĀaĀa)+$",
+      "accept": false,
+      "argument": "ĀaĀa"
     }
   ]
 }

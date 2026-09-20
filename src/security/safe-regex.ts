@@ -15,6 +15,7 @@ import {
   readAlternativeAtomSequences,
   readEscapeAtomEnd,
   readScalarEscape,
+  sequenceAtomsForOverlap,
   sequenceOverlapIsProven,
   tokenizePattern,
   type PatternToken,
@@ -260,9 +261,9 @@ function alternativesMayOverlap(
   }
   const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
   const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
-  // Expansion overflow is unproven, not overlap. Keep the stored rule.
+  // Overflow cannot prove safety. Exec refuses; Doctor keeps stored rules.
   if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
-    return false;
+    return failClosedUnprobedUnicode;
   }
   if (leftSequences && rightSequences) {
     // Nested groups such as (ab|cd)e expand to finite sequences. Unequal
@@ -272,8 +273,8 @@ function alternativesMayOverlap(
       for (const rightSeq of rightSequences) {
         if (
           !mixedSequencesOverlap(
-            leftSeq.atoms,
-            rightSeq.atoms,
+            sequenceAtomsForOverlap(leftSeq),
+            sequenceAtomsForOverlap(rightSeq),
             ignoreCase,
             failClosedUnprobedUnicode,
             (leftAtom, rightAtom, ignoreCaseFlag, failClosed) =>

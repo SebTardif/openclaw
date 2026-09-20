@@ -521,10 +521,23 @@ function decodeFixedWidthSimpleToken(
 export type AtomSequence = {
   atoms: string[];
   complete: boolean;
+  nextAtom?: string;
 };
 
+export function sequenceAtomsForOverlap(seq: AtomSequence): string[] {
+  return seq.nextAtom === undefined ? seq.atoms : [...seq.atoms, seq.nextAtom];
+}
+
+function withNextAtom(
+  atoms: string[],
+  complete: boolean,
+  nextAtom: string | undefined,
+): AtomSequence {
+  return nextAtom === undefined || complete ? { atoms, complete } : { atoms, complete, nextAtom };
+}
+
 /**
- * Equal-length overlapping prefixes are proven even when truncated.
+ * Truncated equal prefixes are proven only when a stored continuation remains.
  * Unequal length still needs the shorter sequence to be complete.
  */
 export function sequenceOverlapIsProven(leftSeq: AtomSequence, rightSeq: AtomSequence): boolean {
@@ -534,7 +547,10 @@ export function sequenceOverlapIsProven(leftSeq: AtomSequence, rightSeq: AtomSeq
   if (rightSeq.atoms.length < leftSeq.atoms.length) {
     return rightSeq.complete;
   }
-  return true;
+  if (leftSeq.complete || rightSeq.complete) {
+    return true;
+  }
+  return leftSeq.nextAtom !== undefined && rightSeq.nextAtom !== undefined;
 }
 
 export const ATOM_SEQUENCE_OVERFLOW = "overflow";
@@ -583,10 +599,10 @@ function cartesianConcatSequences(
   right: readonly AtomSequence[],
 ): AtomSequence[] | typeof ATOM_SEQUENCE_OVERFLOW {
   if (left.length === 0) {
-    return right.map((seq) => ({ atoms: [...seq.atoms], complete: seq.complete }));
+    return right.map((seq) => withNextAtom([...seq.atoms], seq.complete, seq.nextAtom));
   }
   if (right.length === 0) {
-    return left.map((seq) => ({ atoms: [...seq.atoms], complete: seq.complete }));
+    return left.map((seq) => withNextAtom([...seq.atoms], seq.complete, seq.nextAtom));
   }
   if (left.length * right.length > MAX_ALTERNATIVE_SEQUENCES) {
     return ATOM_SEQUENCE_OVERFLOW;
@@ -596,17 +612,23 @@ function cartesianConcatSequences(
     for (const suffix of right) {
       const combinedLength = prefix.atoms.length + suffix.atoms.length;
       if (combinedLength > MAX_SEQUENCE_ATOMS) {
-        const room = MAX_SEQUENCE_ATOMS - prefix.atoms.length;
-        out.push({
-          atoms: room > 0 ? [...prefix.atoms, ...suffix.atoms.slice(0, room)] : [...prefix.atoms],
-          complete: false,
-        });
+        const room = Math.max(0, MAX_SEQUENCE_ATOMS - prefix.atoms.length);
+        out.push(
+          withNextAtom(
+            room > 0 ? [...prefix.atoms, ...suffix.atoms.slice(0, room)] : [...prefix.atoms],
+            false,
+            prefix.complete ? (suffix.atoms[room] ?? suffix.nextAtom) : prefix.nextAtom,
+          ),
+        );
         continue;
       }
-      out.push({
-        atoms: [...prefix.atoms, ...suffix.atoms],
-        complete: prefix.complete && suffix.complete,
-      });
+      out.push(
+        withNextAtom(
+          [...prefix.atoms, ...suffix.atoms],
+          prefix.complete && suffix.complete,
+          prefix.complete ? suffix.nextAtom : prefix.nextAtom,
+        ),
+      );
     }
   }
   return out;
@@ -720,6 +742,19 @@ export function readAlternativeAtomSequences(
     return collectAtomSequences(body, unicodeMode, captureCount);
   }
   const all: AtomSequence[] = [];
+  let unionAtoms: string[] = [];
+  const flushUnion = (): typeof ATOM_SEQUENCE_OVERFLOW | null => {
+    if (unionAtoms.length === 0) {
+      return null;
+    }
+    const atom = unionAtoms.length === 1 ? unionAtoms[0] : `(?:${unionAtoms.join("|")})`;
+    unionAtoms = [];
+    if (!atom || all.length + 1 > MAX_ALTERNATIVE_SEQUENCES) {
+      return ATOM_SEQUENCE_OVERFLOW;
+    }
+    all.push({ atoms: [atom], complete: true });
+    return null;
+  };
   for (const part of parts) {
     const sequences = collectAtomSequences(part, unicodeMode, captureCount);
     if (sequences === ATOM_SEQUENCE_OVERFLOW) {
@@ -728,10 +763,27 @@ export function readAlternativeAtomSequences(
     if (!sequences) {
       return null;
     }
+    const single =
+      sequences.length === 1 &&
+      sequences[0]?.complete === true &&
+      sequences[0].atoms.length === 1 &&
+      sequences[0].atoms[0] !== undefined
+        ? sequences[0].atoms[0]
+        : undefined;
+    if (single !== undefined) {
+      unionAtoms.push(single);
+      continue;
+    }
+    if (flushUnion() === ATOM_SEQUENCE_OVERFLOW) {
+      return ATOM_SEQUENCE_OVERFLOW;
+    }
     if (all.length + sequences.length > MAX_ALTERNATIVE_SEQUENCES) {
       return ATOM_SEQUENCE_OVERFLOW;
     }
     all.push(...sequences);
+  }
+  if (flushUnion() === ATOM_SEQUENCE_OVERFLOW) {
+    return ATOM_SEQUENCE_OVERFLOW;
   }
   return all;
 }
