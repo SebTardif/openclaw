@@ -106,6 +106,21 @@ function unitBaseName(label: string): string {
   return label.endsWith(".service") ? label.slice(0, -".service".length) : label;
 }
 
+function systemdUnitMatchesIdentity(label: string, allowedNames: Set<string>): boolean {
+  const base = normalizeLowercaseStringOrEmpty(unitBaseName(label));
+  if (allowedNames.has(base)) {
+    return true;
+  }
+  const cut = base.indexOf("@");
+  if (cut <= 0) {
+    return false;
+  }
+  const template = base.slice(0, cut);
+  const instance = base.slice(cut + 1);
+  // Default-profile system templates such as openclaw@.service / openclaw@gateway.service.
+  return allowedNames.has(template) && (instance === "" || instance === "gateway");
+}
+
 async function findSystemSystemdUnitPath(
   env: GatewayServiceEnv,
 ): Promise<{ unitName: string; unitPath: string } | null> {
@@ -169,8 +184,7 @@ async function findMarkerOwnedSystemSystemdUnit(env: GatewayServiceEnv): Promise
     ) {
       continue;
     }
-    const base = normalizeLowercaseStringOrEmpty(unitBaseName(svc.label));
-    if (!allowedNames.has(base)) {
+    if (!systemdUnitMatchesIdentity(svc.label, allowedNames)) {
       continue;
     }
     const match = /^unit:\s*(.+)$/.exec(svc.detail.trim());

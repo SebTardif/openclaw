@@ -4554,7 +4554,7 @@ describe("uninstallUserSystemdGatewayUnit", () => {
         mode: 0o644,
       });
       execFileMock
-        .mockImplementationOnce(systemctlUserSuccess("status"))
+        .mockImplementationOnce(systemctlVersionResult())
         .mockImplementationOnce(systemctlUserSuccess("disable", "--now", "openclaw-lisa.service"))
         .mockImplementationOnce(systemctlUserSuccess("daemon-reload"));
 
