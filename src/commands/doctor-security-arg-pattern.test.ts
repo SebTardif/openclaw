@@ -296,6 +296,8 @@ describe("doctor security exec argPattern repair", () => {
   it("keeps disjoint mixed equal-length alternatives and still removes nested repetition", async () => {
     const mixed = { pattern: "/bin/mixed", argPattern: "^(ab|[c]d)+$" };
     const grouped = { pattern: "/bin/grouped", argPattern: "^((ab)|(cd))+$" };
+    const nested = { pattern: "/bin/nested", argPattern: "^((ab|cd)e|(fg|hi)j)+$" };
+    const unequal = { pattern: "/bin/unequal", argPattern: "^(a|[b]c)+$" };
     const escapedDot = { pattern: "/bin/escaped-dot", argPattern: String.raw`^(\.a|[b]a)+$` };
     const hexDollar = { pattern: "/bin/hex-dollar", argPattern: String.raw`^(\x24a|[$]a)+$` };
     const highOctal = { pattern: "/bin/high-octal", argPattern: String.raw`^(\400| 0)+$` };
@@ -316,6 +318,8 @@ describe("doctor security exec argPattern repair", () => {
             { pattern: "/bin/unsafe", argPattern: "(a+)+$" },
             mixed,
             grouped,
+            nested,
+            unequal,
             escapedDot,
             escapedDollar,
             hexDollar,
@@ -352,6 +356,8 @@ describe("doctor security exec argPattern repair", () => {
       );
       expect(findings.some((finding) => finding.message.includes("/bin/mixed"))).toBe(false);
       expect(findings.some((finding) => finding.message.includes("/bin/grouped"))).toBe(false);
+      expect(findings.some((finding) => finding.message.includes("/bin/nested"))).toBe(false);
+      expect(findings.some((finding) => finding.message.includes("/bin/unequal"))).toBe(false);
       expect(findings.some((finding) => finding.message.includes("/bin/escaped-dot"))).toBe(false);
       expect(findings.some((finding) => finding.message.includes("/bin/escaped-dollar"))).toBe(
         false,
@@ -366,6 +372,8 @@ describe("doctor security exec argPattern repair", () => {
       expect(remaining.map(({ pattern, argPattern }) => ({ pattern, argPattern }))).toEqual([
         mixed,
         grouped,
+        nested,
+        unequal,
         escapedDot,
         escapedDollar,
         { pattern: "/bin/safe", argPattern: "^safe$" },

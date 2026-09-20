@@ -137,6 +137,30 @@
       "pattern": "^(a\\$|b[!])+$",
       "accept": true,
       "argument": "a$b!"
+    },
+    {
+      "id": "nested-alt-disjoint",
+      "pattern": "^((ab|cd)e|(fg|hi)j)+$",
+      "accept": true,
+      "argument": "abehij"
+    },
+    {
+      "id": "nested-alt-overlap",
+      "pattern": "^((ab|cd)e|(abe))+$",
+      "accept": false,
+      "argument": "abeabe"
+    },
+    {
+      "id": "unequal-length-disjoint",
+      "pattern": "^(a|[b]c)+$",
+      "accept": true,
+      "argument": "abc"
+    },
+    {
+      "id": "unequal-length-overlap",
+      "pattern": "^(a|[a]c)+$",
+      "accept": false,
+      "argument": "aac"
     }
   ]
 }

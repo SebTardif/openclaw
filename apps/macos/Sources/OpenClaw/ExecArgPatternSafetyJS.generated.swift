@@ -257,11 +257,9 @@ var OpenClawExecArgPattern = (() => {
     }
     return false;
   }
-  function mixedEqualLengthSequencesOverlap(leftAtoms, rightAtoms, ignoreCase, failClosedUnprobedUnicode, singleTokenPairOverlaps) {
-    if (leftAtoms.length !== rightAtoms.length) {
-      return true;
-    }
-    for (let index = 0; index < leftAtoms.length; index += 1) {
+  function mixedSequencesOverlap(leftAtoms, rightAtoms, ignoreCase, failClosedUnprobedUnicode, singleTokenPairOverlaps) {
+    const sharedLength = Math.min(leftAtoms.length, rightAtoms.length);
+    for (let index = 0; index < sharedLength; index += 1) {
       const leftAtom = leftAtoms[index];
       const rightAtom = rightAtoms[index];
       if (leftAtom === void 0 || rightAtom === void 0) {
@@ -649,9 +647,61 @@ var OpenClawExecArgPattern = (() => {
     }
     return null;
   }
-  function collectFixedLengthAtoms(source, unicodeMode, captureCount) {
+  var MAX_ALTERNATIVE_SEQUENCES = 16;
+  var MAX_SEQUENCE_ATOMS = 32;
+  function splitTopLevelAlternativeSources(source, unicodeMode, captureCount) {
     const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
-    const atoms = [];
+    const cuts = [];
+    let depth = 0;
+    for (const token of tokens) {
+      if (token.kind === "group-open") {
+        depth += 1;
+        continue;
+      }
+      if (token.kind === "group-close") {
+        depth -= 1;
+        continue;
+      }
+      if (token.kind === "alternation" && depth === 0) {
+        cuts.push(token.start);
+      }
+    }
+    if (cuts.length === 0) {
+      return [source];
+    }
+    const parts = [];
+    let start = 0;
+    for (const cut of cuts) {
+      parts.push(source.slice(start, cut));
+      start = cut + 1;
+    }
+    parts.push(source.slice(start));
+    return parts;
+  }
+  function cartesianConcatSequences(left, right) {
+    if (left.length === 0) {
+      return right.map((seq) => [...seq]);
+    }
+    if (right.length === 0) {
+      return left.map((seq) => [...seq]);
+    }
+    if (left.length * right.length > MAX_ALTERNATIVE_SEQUENCES) {
+      return null;
+    }
+    const out = [];
+    for (const prefix of left) {
+      for (const suffix of right) {
+        if (prefix.length + suffix.length > MAX_SEQUENCE_ATOMS) {
+          return null;
+        }
+        out.push([...prefix, ...suffix]);
+      }
+    }
+    return out;
+  }
+  function collectAtomSequences(source, unicodeMode, captureCount) {
+    const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
+    let sequences = [[]];
     for (let index = 0; index < tokens.length; ) {
       const token = tokens[index];
       if (!token) {
@@ -672,13 +722,15 @@ var OpenClawExecArgPattern = (() => {
           continue;
         }
         const interior = source.slice(contentStart, close.start);
-        if (interior) {
-          const inner = collectFixedLengthAtoms(interior, unicodeMode, captureCount);
-          if (!inner) {
-            return null;
-          }
-          atoms.push(...inner);
+        const inner = interior ? readAlternativeAtomSequences(interior, unicodeMode, captureCount) : [[]];
+        if (!inner) {
+          return null;
         }
+        const next2 = cartesianConcatSequences(sequences, inner);
+        if (!next2) {
+          return null;
+        }
+        sequences = next2;
         index = closeIndex + 1;
         continue;
       }
@@ -690,10 +742,15 @@ var OpenClawExecArgPattern = (() => {
       if (decoded === null) {
         return null;
       }
-      atoms.push(decoded);
+      const next = cartesianConcatSequences(sequences, [[decoded]]);
+      if (!next) {
+        return null;
+      }
+      sequences = next;
       index += 1;
     }
-    return atoms.length > 0 ? atoms : null;
+    const nonempty = sequences.filter((seq) => seq.length > 0);
+    return nonempty.length > 0 ? nonempty : null;
   }
   function stripAlternativeAnchors(source) {
     let start = 0;
@@ -712,12 +769,27 @@ var OpenClawExecArgPattern = (() => {
     }
     return source.slice(start, end);
   }
-  function readFixedLengthAlternativeAtoms(source, unicodeMode = false, captureCount = 0) {
+  function readAlternativeAtomSequences(source, unicodeMode = false, captureCount = 0) {
     const body = stripAlternativeAnchors(source);
     if (!body) {
       return null;
     }
-    return collectFixedLengthAtoms(body, unicodeMode, captureCount);
+    const parts = splitTopLevelAlternativeSources(body, unicodeMode, captureCount);
+    if (parts.length === 1) {
+      return collectAtomSequences(body, unicodeMode, captureCount);
+    }
+    const all = [];
+    for (const part of parts) {
+      const sequences = collectAtomSequences(part, unicodeMode, captureCount);
+      if (!sequences) {
+        return null;
+      }
+      if (all.length + sequences.length > MAX_ALTERNATIVE_SEQUENCES) {
+        return null;
+      }
+      all.push(...sequences);
+    }
+    return all;
   }
 
   // src/security/safe-regex.ts
@@ -857,16 +929,23 @@ var OpenClawExecArgPattern = (() => {
     if (isSingleTokenAlternative(left, unicodeMode, captureCount) && isSingleTokenAlternative(right, unicodeMode, captureCount)) {
       return singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode);
     }
-    const leftAtoms = readFixedLengthAlternativeAtoms(left, unicodeMode, captureCount);
-    const rightAtoms = readFixedLengthAlternativeAtoms(right, unicodeMode, captureCount);
-    if (leftAtoms && rightAtoms) {
-      return mixedEqualLengthSequencesOverlap(
-        leftAtoms,
-        rightAtoms,
-        ignoreCase,
-        failClosedUnprobedUnicode,
-        singleTokenAlternativesMayOverlap
-      );
+    const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
+    const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
+    if (leftSequences && rightSequences) {
+      for (const leftAtoms of leftSequences) {
+        for (const rightAtoms of rightSequences) {
+          if (mixedSequencesOverlap(
+            leftAtoms,
+            rightAtoms,
+            ignoreCase,
+            failClosedUnprobedUnicode,
+            singleTokenAlternativesMayOverlap
+          )) {
+            return true;
+          }
+        }
+      }
+      return false;
     }
     return true;
   }

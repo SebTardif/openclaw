@@ -4,14 +4,14 @@ import { pruneMapToMaxSize } from "../infra/map-size.js";
 import {
   isLookaroundPrefix,
   isZeroWidthLanguage,
-  mixedEqualLengthSequencesOverlap,
+  mixedSequencesOverlap,
   nextPendingAdjacentAlts,
   shouldRejectAdjacentOverlap,
 } from "./safe-regex-adjacent.js";
 import {
   countCapturingGroups,
+  readAlternativeAtomSequences,
   readEscapeAtomEnd,
-  readFixedLengthAlternativeAtoms,
   readScalarEscape,
   stripAlternativeAnchors,
   tokenizePattern,
@@ -248,17 +248,27 @@ function alternativesMayOverlap(
   ) {
     return singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode);
   }
-  const leftAtoms = readFixedLengthAlternativeAtoms(left, unicodeMode, captureCount);
-  const rightAtoms = readFixedLengthAlternativeAtoms(right, unicodeMode, captureCount);
-  if (leftAtoms && rightAtoms) {
-    // Equal consumed length: disjoint mixed alts such as ab|[c]d are safe.
-    return mixedEqualLengthSequencesOverlap(
-      leftAtoms,
-      rightAtoms,
-      ignoreCase,
-      failClosedUnprobedUnicode,
-      singleTokenAlternativesMayOverlap,
-    );
+  const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
+  const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
+  if (leftSequences && rightSequences) {
+    // Nested groups such as (ab|cd)e expand to finite sequences. Unequal
+    // lengths stay safe when a shared prefix atom is disjoint.
+    for (const leftAtoms of leftSequences) {
+      for (const rightAtoms of rightSequences) {
+        if (
+          mixedSequencesOverlap(
+            leftAtoms,
+            rightAtoms,
+            ignoreCase,
+            failClosedUnprobedUnicode,
+            singleTokenAlternativesMayOverlap,
+          )
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
   // Mixed structure with broad components (e.g. aa|a.) can overlap under +.
   return true;

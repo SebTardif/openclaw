@@ -490,13 +490,75 @@ function decodeFixedWidthSimpleToken(
   return null;
 }
 
-function collectFixedLengthAtoms(
+const MAX_ALTERNATIVE_SEQUENCES = 16;
+const MAX_SEQUENCE_ATOMS = 32;
+
+function splitTopLevelAlternativeSources(
   source: string,
   unicodeMode: boolean,
   captureCount: number,
-): string[] | null {
+): string[] {
   const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
-  const atoms: string[] = [];
+  const cuts: number[] = [];
+  let depth = 0;
+  for (const token of tokens) {
+    if (token.kind === "group-open") {
+      depth += 1;
+      continue;
+    }
+    if (token.kind === "group-close") {
+      depth -= 1;
+      continue;
+    }
+    if (token.kind === "alternation" && depth === 0) {
+      cuts.push(token.start);
+    }
+  }
+  if (cuts.length === 0) {
+    return [source];
+  }
+  const parts: string[] = [];
+  let start = 0;
+  for (const cut of cuts) {
+    parts.push(source.slice(start, cut));
+    start = cut + 1;
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+function cartesianConcatSequences(
+  left: readonly (readonly string[])[],
+  right: readonly (readonly string[])[],
+): string[][] | null {
+  if (left.length === 0) {
+    return right.map((seq) => [...seq]);
+  }
+  if (right.length === 0) {
+    return left.map((seq) => [...seq]);
+  }
+  if (left.length * right.length > MAX_ALTERNATIVE_SEQUENCES) {
+    return null;
+  }
+  const out: string[][] = [];
+  for (const prefix of left) {
+    for (const suffix of right) {
+      if (prefix.length + suffix.length > MAX_SEQUENCE_ATOMS) {
+        return null;
+      }
+      out.push([...prefix, ...suffix]);
+    }
+  }
+  return out;
+}
+
+function collectAtomSequences(
+  source: string,
+  unicodeMode: boolean,
+  captureCount: number,
+): string[][] | null {
+  const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
+  let sequences: string[][] = [[]];
   for (let index = 0; index < tokens.length;) {
     const token = tokens[index];
     if (!token) {
@@ -521,13 +583,17 @@ function collectFixedLengthAtoms(
         continue;
       }
       const interior = source.slice(contentStart, close.start);
-      if (interior) {
-        const inner = collectFixedLengthAtoms(interior, unicodeMode, captureCount);
-        if (!inner) {
-          return null;
-        }
-        atoms.push(...inner);
+      const inner = interior
+        ? readAlternativeAtomSequences(interior, unicodeMode, captureCount)
+        : [[]];
+      if (!inner) {
+        return null;
       }
+      const next = cartesianConcatSequences(sequences, inner);
+      if (!next) {
+        return null;
+      }
+      sequences = next;
       index = closeIndex + 1;
       continue;
     }
@@ -539,10 +605,15 @@ function collectFixedLengthAtoms(
     if (decoded === null) {
       return null;
     }
-    atoms.push(decoded);
+    const next = cartesianConcatSequences(sequences, [[decoded]]);
+    if (!next) {
+      return null;
+    }
+    sequences = next;
     index += 1;
   }
-  return atoms.length > 0 ? atoms : null;
+  const nonempty = sequences.filter((seq) => seq.length > 0);
+  return nonempty.length > 0 ? nonempty : null;
 }
 
 /**
@@ -567,17 +638,33 @@ export function stripAlternativeAnchors(source: string): string {
 }
 
 /**
- * Fixed-length atom sequence for one alternative, or null when a
- * quantifier, unknown-width atom, or unproven group makes length unknown.
+ * Finite atom sequences for one alternative, expanding nested groups.
+ * Null when a quantifier, unknown-width atom, or expansion cap makes
+ * length unproven.
  */
-export function readFixedLengthAlternativeAtoms(
+export function readAlternativeAtomSequences(
   source: string,
   unicodeMode = false,
   captureCount = 0,
-): string[] | null {
+): string[][] | null {
   const body = stripAlternativeAnchors(source);
   if (!body) {
     return null;
   }
-  return collectFixedLengthAtoms(body, unicodeMode, captureCount);
+  const parts = splitTopLevelAlternativeSources(body, unicodeMode, captureCount);
+  if (parts.length === 1) {
+    return collectAtomSequences(body, unicodeMode, captureCount);
+  }
+  const all: string[][] = [];
+  for (const part of parts) {
+    const sequences = collectAtomSequences(part, unicodeMode, captureCount);
+    if (!sequences) {
+      return null;
+    }
+    if (all.length + sequences.length > MAX_ALTERNATIVE_SEQUENCES) {
+      return null;
+    }
+    all.push(...sequences);
+  }
+  return all;
 }

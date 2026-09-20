@@ -246,7 +246,7 @@ export function adjacentRepeatsOverlap(
   return false;
 }
 
-export function mixedEqualLengthSequencesOverlap(
+export function mixedSequencesOverlap(
   leftAtoms: readonly string[],
   rightAtoms: readonly string[],
   ignoreCase: boolean,
@@ -258,10 +258,8 @@ export function mixedEqualLengthSequencesOverlap(
     failClosedUnprobedUnicode: boolean,
   ) => boolean,
 ): boolean {
-  if (leftAtoms.length !== rightAtoms.length) {
-    return true;
-  }
-  for (let index = 0; index < leftAtoms.length; index += 1) {
+  const sharedLength = Math.min(leftAtoms.length, rightAtoms.length);
+  for (let index = 0; index < sharedLength; index += 1) {
     const leftAtom = leftAtoms[index];
     const rightAtom = rightAtoms[index];
     if (leftAtom === undefined || rightAtom === undefined) {
@@ -271,5 +269,6 @@ export function mixedEqualLengthSequencesOverlap(
       return false;
     }
   }
+  // Common prefix overlaps. Unequal length is a prefix language (unsafe).
   return true;
 }

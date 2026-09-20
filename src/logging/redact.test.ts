@@ -103,6 +103,14 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain("abcd");
   });
 
+  it("still masks corp-((ab|cd)e|(fg|hi)j)+ nested alternatives", () => {
+    const output = redactSensitiveText("id=corp-abehij", {
+      patterns: ["corp-((ab|cd)e|(fg|hi)j)+"],
+    });
+    expect(output).not.toContain("corp-abehij");
+    expect(output).not.toContain("abehij");
+  });
+
   it("still masks corp-((ab)|(cd))+ capturing-group alternatives", () => {
     const output = redactSensitiveText("id=corp-abcd", {
       patterns: ["corp-((ab)|(cd))+"],

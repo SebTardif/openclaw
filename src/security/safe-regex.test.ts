@@ -42,6 +42,11 @@ describe("safe regex", () => {
     [String.raw`^(\141\x61|aaaa)+$`, null],
     ["^((ab)|(cd))+$", RegExp],
     ["corp-((ab)|(cd))+", RegExp],
+    ["corp-((ab|cd)e|(fg|hi)j)+", RegExp],
+    ["^((ab|cd)e|(fg|hi)j)+$", RegExp],
+    ["^((ab|cd)e|(abe))+$", null],
+    ["^(a|[b]c)+$", RegExp],
+    ["^(a|[a]c)+$", null],
     [String.raw`^(\x24a|[$]a)+$`, null],
     [String.raw`corp-(\.a|[b]a)+`, RegExp],
     [String.raw`^(\400| 0)+$`, null],
@@ -294,6 +299,32 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegex(overlapping)).toBeNull();
     expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
+  });
+
+  it("accepts disjoint nested alternatives of equal consumed length", () => {
+    const nested = "corp-((ab|cd)e|(fg|hi)j)+";
+    const grouped = "^((ab|cd)e|(fg|hi)j)+$";
+    expect(compileSafeRegexDetailed(nested).reason).toBeNull();
+    expect(compileSafeRegex(nested)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(nested).regex).toBeInstanceOf(RegExp);
+    const compiled = expectCompiledRegex(grouped);
+    expect(compiled.test("abehij")).toBe(true);
+    expect(compiled.test("cdefgj")).toBe(true);
+    expect(compileSafeRegexDetailed("^((ab|cd)e|(abe))+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegexForExec("^((ab|cd)e|(abe))+$").regex).toBeNull();
+  });
+
+  it("accepts disjoint unequal-length alternatives when prefixes do not overlap", () => {
+    const grouped = "^(a|[b]c)+$";
+    expect(compileSafeRegexDetailed(grouped).reason).toBeNull();
+    expect(compileSafeRegex(grouped)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(grouped).regex).toBeInstanceOf(RegExp);
+    const compiled = expectCompiledRegex(grouped);
+    expect(compiled.test("abc")).toBe(true);
+    expect(compiled.test("bca")).toBe(true);
+    expect(compileSafeRegexDetailed("^(a|[a]c)+$").reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegexForExec("^(a|[a]c)+$").regex).toBeNull();
+    expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
   });
 
   it("accepts disjoint capturing-group alternatives of equal consumed length", () => {

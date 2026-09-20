@@ -262,6 +262,16 @@ describe("exec allowlist matching", () => {
         pattern: "/usr/bin/python3",
         argPattern: String.raw`^(a\$|b[!])+$`,
       };
+      const nestedDisjoint = {
+        pattern: "/usr/bin/python3",
+        argPattern: "^((ab|cd)e|(fg|hi)j)+$",
+      };
+      const nestedOverlap = {
+        pattern: "/usr/bin/python3",
+        argPattern: "^((ab|cd)e|(abe))+$",
+      };
+      const unequalDisjoint = { pattern: "/usr/bin/python3", argPattern: "^(a|[b]c)+$" };
+      const unequalOverlap = { pattern: "/usr/bin/python3", argPattern: "^(a|[a]c)+$" };
 
       expect(matchAllowlist([duplicate], resolution, ["python3", "aaaa"])).toBeNull();
       expect(matchAllowlist([overlapping], resolution, ["python3", "aaaa"])).toBeNull();
@@ -289,6 +299,14 @@ describe("exec allowlist matching", () => {
       expect(matchAllowlist([escapedDollarDisjoint], resolution, ["python3", "a$b!"])).toBe(
         escapedDollarDisjoint,
       );
+      expect(matchAllowlist([nestedDisjoint], resolution, ["python3", "abehij"])).toBe(
+        nestedDisjoint,
+      );
+      expect(matchAllowlist([nestedOverlap], resolution, ["python3", "abeabe"])).toBeNull();
+      expect(matchAllowlist([unequalDisjoint], resolution, ["python3", "abc"])).toBe(
+        unequalDisjoint,
+      );
+      expect(matchAllowlist([unequalOverlap], resolution, ["python3", "aac"])).toBeNull();
     });
 
     it("falls back to an explicit path-only sibling when an argPattern is rejected", () => {
