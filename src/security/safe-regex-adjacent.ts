@@ -367,6 +367,18 @@ function isUnicodePropertyAtom(source: string): boolean {
   return /^\\[pP]\{[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?\}$/.test(inner);
 }
 
+function isMixedPropertyClass(source: string): boolean {
+  const body = stripAlternativeAnchors(source);
+  if (!body.startsWith("[") || !body.endsWith("]")) {
+    return false;
+  }
+  const inner = body.slice(1, -1);
+  if (!/\\[pP]\{/.test(inner)) {
+    return false;
+  }
+  return !/^\\[pP]\{[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?\}$/.test(inner);
+}
+
 /** Probe whether two single-token alternatives can match the same character. */
 export function singleTokenAlternativesMayOverlap(
   left: string,
@@ -421,6 +433,12 @@ export function singleTokenAlternativesMayOverlap(
   // languages were observed without a shared witness. [猫]|[犬] is not a
   // property atom and stays accepted on the shared compiler.
   if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !(leftHit && rightHit)) {
+    return true;
+  }
+  // [0\p{Script=Greek}] is not a lone property atom. ASCII hits `0` while
+  // `\p{L}` hits A, so the languages look disjoint even though Greek letters
+  // sit in both. Mixed property classes stay uncertain without a shared witness.
+  if (isMixedPropertyClass(left) || isMixedPropertyClass(right)) {
     return true;
   }
   // Finite probe cannot prove safety for unprobed Unicode alternatives

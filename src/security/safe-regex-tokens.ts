@@ -1,6 +1,7 @@
 // Tokenizes user-supplied regex sources for the safe-regex analyzer.
 import {
   ATOM_SEQUENCE_OVERFLOW,
+  appendCollapsedSequences,
   cartesianConcatSequences,
   MAX_ALTERNATIVE_SEQUENCES,
   type AtomSequence,
@@ -709,10 +710,9 @@ export function readAlternativeAtomSequences(
     if (flushUnion() === ATOM_SEQUENCE_OVERFLOW) {
       return ATOM_SEQUENCE_OVERFLOW;
     }
-    if (all.length + sequences.length > MAX_ALTERNATIVE_SEQUENCES) {
+    if (appendCollapsedSequences(all, sequences) === ATOM_SEQUENCE_OVERFLOW) {
       return ATOM_SEQUENCE_OVERFLOW;
     }
-    all.push(...sequences);
   }
   if (flushUnion() === ATOM_SEQUENCE_OVERFLOW) {
     return ATOM_SEQUENCE_OVERFLOW;

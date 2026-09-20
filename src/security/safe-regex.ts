@@ -295,6 +295,9 @@ function alternativesMayOverlap(
           return true;
         }
         if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {
+          if (leftSeq.unknownTailHomogeneous === true || rightSeq.unknownTailHomogeneous === true) {
+            return true;
+          }
           continue;
         }
         unproven = true;

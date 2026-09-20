@@ -375,6 +375,11 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegex(overlapping)).toBeNull();
     expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
+    const longerUnit = `[a]${"a".repeat(33)}`;
+    const longerOverlapping = `^(${longerUnit}|${longerUnit}${longerUnit})+$`;
+    expect(compileSafeRegexDetailed(longerOverlapping).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(longerOverlapping)).toBeNull();
+    expect(compileSafeRegexForExec(longerOverlapping).regex).toBeNull();
     expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
   });
 
@@ -400,6 +405,10 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(twoCharOverflow).reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegex(twoCharOverflow)).toBeNull();
     expect(compileSafeRegexForExec(twoCharOverflow).regex).toBeNull();
+    const twoCharDisjoint = "^((ax|bx|cx|dx|ex|fx|gx|hx|ix|jx|kx|lx|mx|nx|ox|px|qx)|zx)+$";
+    expect(compileSafeRegexDetailed(twoCharDisjoint).reason).toBeNull();
+    expect(compileSafeRegex(twoCharDisjoint)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(twoCharDisjoint).regex).toBeInstanceOf(RegExp);
     const seventeenWay = "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$";
     expect(compileSafeRegexDetailed(seventeenWay).reason).toBeNull();
     expect(compileSafeRegexForExec(seventeenWay).regex).toBeInstanceOf(RegExp);
@@ -435,6 +444,10 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(greekLetter, "u").reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegex(greekLetter, "u")).toBeNull();
     expect(compileSafeRegexForExec(greekLetter, "u").regex).toBeNull();
+    const mixedGreekClass = String.raw`^(\p{L}a|[0\p{Script=Greek}]a[0\p{Script=Greek}]a)+$`;
+    expect(compileSafeRegexDetailed(mixedGreekClass, "u").reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(mixedGreekClass, "u")).toBeNull();
+    expect(compileSafeRegexForExec(mixedGreekClass, "u").regex).toBeNull();
     expect(compileSafeRegexDetailed("^(?:[猫]|[犬])+$").reason).toBeNull();
     expect(compileSafeRegex("^(?:[猫]|[犬])+$")).toBeInstanceOf(RegExp);
   });
