@@ -296,10 +296,19 @@ describe("exec allowlist matching", () => {
         pattern: "/usr/bin/python3",
         argPattern: "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|axax)+$",
       };
+      const twoCharOverflowPrefix = {
+        pattern: "/usr/bin/python3",
+        argPattern: "^((ax|bx|cx|dx|ex|fx|gx|hx|ix|jx|kx|lx|mx|nx|ox|px|qx)|axax)+$",
+      };
       const truncatedDisjointPrefix = `[a]${"a".repeat(31)}`;
       const truncatedDisjoint = {
         pattern: "/usr/bin/python3",
         argPattern: `^(${truncatedDisjointPrefix}b|${truncatedDisjointPrefix}c)+$`,
+      };
+      const longerTruncatedDisjointPrefix = `[a]${"a".repeat(32)}`;
+      const longerTruncatedDisjoint = {
+        pattern: "/usr/bin/python3",
+        argPattern: `^(${longerTruncatedDisjointPrefix}b|${longerTruncatedDisjointPrefix}c)+$`,
       };
       const macronOverlap = {
         pattern: "/usr/bin/python3",
@@ -355,12 +364,19 @@ describe("exec allowlist matching", () => {
       ).toBeNull();
       expect(matchAllowlist([seventeenWay], resolution, ["python3", "axzx"])).toBe(seventeenWay);
       expect(matchAllowlist([overflowPrefix], resolution, ["python3", "axax"])).toBeNull();
+      expect(matchAllowlist([twoCharOverflowPrefix], resolution, ["python3", "axax"])).toBeNull();
       expect(
         matchAllowlist([truncatedDisjoint], resolution, [
           "python3",
           `${"a".repeat(32)}b${"a".repeat(32)}c`,
         ]),
       ).toBe(truncatedDisjoint);
+      expect(
+        matchAllowlist([longerTruncatedDisjoint], resolution, [
+          "python3",
+          `${"a".repeat(33)}b${"a".repeat(33)}c`,
+        ]),
+      ).toBe(longerTruncatedDisjoint);
       expect(matchAllowlist([macronOverlap], resolution, ["python3", "ĀaĀa"])).toBeNull();
     });
 

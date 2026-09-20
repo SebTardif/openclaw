@@ -318,10 +318,19 @@ describe("doctor security exec argPattern repair", () => {
       pattern: "/bin/overflow-prefix",
       argPattern: "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|axax)+$",
     };
+    const twoCharOverflowPrefix = {
+      pattern: "/bin/two-char-overflow",
+      argPattern: "^((ax|bx|cx|dx|ex|fx|gx|hx|ix|jx|kx|lx|mx|nx|ox|px|qx)|axax)+$",
+    };
     const truncatedDisjointPrefix = `[a]${"a".repeat(31)}`;
     const truncatedDisjoint = {
       pattern: "/bin/truncated-disjoint",
       argPattern: `^(${truncatedDisjointPrefix}b|${truncatedDisjointPrefix}c)+$`,
+    };
+    const longerTruncatedDisjointPrefix = `[a]${"a".repeat(32)}`;
+    const longerTruncatedDisjoint = {
+      pattern: "/bin/truncated-disjoint-32",
+      argPattern: `^(${longerTruncatedDisjointPrefix}b|${longerTruncatedDisjointPrefix}c)+$`,
     };
     const macronOverlap = {
       pattern: "/bin/macron-overlap",
@@ -339,7 +348,9 @@ describe("doctor security exec argPattern repair", () => {
             truncatedOverlap,
             seventeenWay,
             overflowPrefix,
+            twoCharOverflowPrefix,
             truncatedDisjoint,
+            longerTruncatedDisjoint,
             macronOverlap,
             { pattern: "/bin/safe", argPattern: "^safe$" },
           ],
@@ -359,7 +370,7 @@ describe("doctor security exec argPattern repair", () => {
         cfg: {} as OpenClawConfig,
       };
       const findings = await check!.detect(context);
-      expect(findings).toHaveLength(6);
+      expect(findings).toHaveLength(7);
       expect(findings.some((finding) => finding.message.includes("/bin/unsafe"))).toBe(true);
       expect(findings.some((finding) => finding.message.includes("/bin/property-identity"))).toBe(
         true,
@@ -369,6 +380,9 @@ describe("doctor security exec argPattern repair", () => {
         true,
       );
       expect(findings.some((finding) => finding.message.includes("/bin/overflow-prefix"))).toBe(
+        true,
+      );
+      expect(findings.some((finding) => finding.message.includes("/bin/two-char-overflow"))).toBe(
         true,
       );
       expect(findings.some((finding) => finding.message.includes("/bin/macron-overlap"))).toBe(
@@ -383,10 +397,13 @@ describe("doctor security exec argPattern repair", () => {
       expect(findings.some((finding) => finding.message.includes("/bin/truncated-disjoint"))).toBe(
         false,
       );
+      expect(
+        findings.some((finding) => finding.message.includes("/bin/truncated-disjoint-32")),
+      ).toBe(false);
 
       const repaired = await check!.repair?.(context, findings);
       expect(repaired?.changes).toEqual([
-        expect.stringContaining("Removed 6 rejected exec approval entries"),
+        expect.stringContaining("Removed 7 rejected exec approval entries"),
       ]);
 
       const remaining = loadExecApprovals().agents?.main?.allowlist ?? [];
@@ -394,6 +411,7 @@ describe("doctor security exec argPattern repair", () => {
         longDisjoint,
         seventeenWay,
         truncatedDisjoint,
+        longerTruncatedDisjoint,
         { pattern: "/bin/safe", argPattern: "^safe$" },
       ]);
     });

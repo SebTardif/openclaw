@@ -187,10 +187,22 @@
       "argument": "axax"
     },
     {
+      "id": "two-char-expansion-overflow-prefix",
+      "pattern": "^((ax|bx|cx|dx|ex|fx|gx|hx|ix|jx|kx|lx|mx|nx|ox|px|qx)|axax)+$",
+      "accept": false,
+      "argument": "axax"
+    },
+    {
       "id": "truncated-equal-prefix-disjoint",
       "pattern": "^([a]aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab|[a]aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac)+$",
       "accept": true,
       "argument": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac"
+    },
+    {
+      "id": "truncated-equal-prefix-disjoint-32",
+      "pattern": "^([a]aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab|[a]aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac)+$",
+      "accept": true,
+      "argument": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac"
     },
     {
       "id": "macron-class-literal-overlap",

@@ -64,6 +64,82 @@ var OpenClawExecArgPattern = (() => {
     }
   }
 
+  // src/security/safe-regex-sequences.ts
+  function sequenceAtomsForOverlap(seq) {
+    return seq.nextAtom === void 0 ? seq.atoms : [...seq.atoms, seq.nextAtom];
+  }
+  function withNextAtom(atoms, complete, nextAtom, unknownTail = false) {
+    const seq = { atoms, complete };
+    if (!complete && nextAtom !== void 0) {
+      seq.nextAtom = nextAtom;
+    }
+    if (!complete && unknownTail) {
+      seq.unknownTail = true;
+    }
+    return seq;
+  }
+  function sequenceOverlapIsProven(leftSeq, rightSeq) {
+    if (leftSeq.atoms.length < rightSeq.atoms.length) {
+      return leftSeq.complete;
+    }
+    if (rightSeq.atoms.length < leftSeq.atoms.length) {
+      return rightSeq.complete;
+    }
+    if (leftSeq.complete || rightSeq.complete) {
+      return true;
+    }
+    if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {
+      return false;
+    }
+    return leftSeq.nextAtom !== void 0 && rightSeq.nextAtom !== void 0;
+  }
+  var ATOM_SEQUENCE_OVERFLOW = "overflow";
+  var MAX_ALTERNATIVE_SEQUENCES = 16;
+  var MAX_SEQUENCE_ATOMS = 32;
+  function cloneAtomSequence(seq) {
+    return withNextAtom([...seq.atoms], seq.complete, seq.nextAtom, seq.unknownTail === true);
+  }
+  function concatAtomSequence(prefix, suffix) {
+    if (prefix.atoms.length + suffix.atoms.length <= MAX_SEQUENCE_ATOMS) {
+      return withNextAtom(
+        [...prefix.atoms, ...suffix.atoms],
+        prefix.complete && suffix.complete,
+        prefix.complete ? suffix.nextAtom : prefix.nextAtom,
+        prefix.unknownTail === true || suffix.unknownTail === true || !prefix.complete && suffix.atoms.length > 0
+      );
+    }
+    const room = Math.max(0, MAX_SEQUENCE_ATOMS - prefix.atoms.length);
+    const kept = room > 0 ? [...prefix.atoms, ...suffix.atoms.slice(0, room)] : [...prefix.atoms];
+    if (!prefix.complete) {
+      return withNextAtom(kept, false, prefix.nextAtom, true);
+    }
+    const fromSuffix = room < suffix.atoms.length;
+    return withNextAtom(
+      kept,
+      false,
+      fromSuffix ? suffix.atoms[room] : suffix.nextAtom,
+      suffix.unknownTail === true || fromSuffix && (!suffix.complete || suffix.atoms.length - room > 1)
+    );
+  }
+  function cartesianConcatSequences(left, right) {
+    if (left.length === 0) {
+      return right.map(cloneAtomSequence);
+    }
+    if (right.length === 0) {
+      return left.map(cloneAtomSequence);
+    }
+    if (left.length * right.length > MAX_ALTERNATIVE_SEQUENCES) {
+      return ATOM_SEQUENCE_OVERFLOW;
+    }
+    const out = [];
+    for (const prefix of left) {
+      for (const suffix of right) {
+        out.push(concatAtomSequence(prefix, suffix));
+      }
+    }
+    return out;
+  }
+
   // src/security/safe-regex-tokens.ts
   function readGroupContentStart(source, index) {
     if (source[index + 1] !== "?") {
@@ -462,27 +538,6 @@ var OpenClawExecArgPattern = (() => {
     }
     return null;
   }
-  function sequenceAtomsForOverlap(seq) {
-    return seq.nextAtom === void 0 ? seq.atoms : [...seq.atoms, seq.nextAtom];
-  }
-  function withNextAtom(atoms, complete, nextAtom) {
-    return nextAtom === void 0 || complete ? { atoms, complete } : { atoms, complete, nextAtom };
-  }
-  function sequenceOverlapIsProven(leftSeq, rightSeq) {
-    if (leftSeq.atoms.length < rightSeq.atoms.length) {
-      return leftSeq.complete;
-    }
-    if (rightSeq.atoms.length < leftSeq.atoms.length) {
-      return rightSeq.complete;
-    }
-    if (leftSeq.complete || rightSeq.complete) {
-      return true;
-    }
-    return leftSeq.nextAtom !== void 0 && rightSeq.nextAtom !== void 0;
-  }
-  var ATOM_SEQUENCE_OVERFLOW = "overflow";
-  var MAX_ALTERNATIVE_SEQUENCES = 16;
-  var MAX_SEQUENCE_ATOMS = 32;
   function splitTopLevelAlternativeSources(source, unicodeMode, captureCount) {
     const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
     const cuts = [];
@@ -511,42 +566,6 @@ var OpenClawExecArgPattern = (() => {
     }
     parts.push(source.slice(start));
     return parts;
-  }
-  function cartesianConcatSequences(left, right) {
-    if (left.length === 0) {
-      return right.map((seq) => withNextAtom([...seq.atoms], seq.complete, seq.nextAtom));
-    }
-    if (right.length === 0) {
-      return left.map((seq) => withNextAtom([...seq.atoms], seq.complete, seq.nextAtom));
-    }
-    if (left.length * right.length > MAX_ALTERNATIVE_SEQUENCES) {
-      return ATOM_SEQUENCE_OVERFLOW;
-    }
-    const out = [];
-    for (const prefix of left) {
-      for (const suffix of right) {
-        const combinedLength = prefix.atoms.length + suffix.atoms.length;
-        if (combinedLength > MAX_SEQUENCE_ATOMS) {
-          const room = Math.max(0, MAX_SEQUENCE_ATOMS - prefix.atoms.length);
-          out.push(
-            withNextAtom(
-              room > 0 ? [...prefix.atoms, ...suffix.atoms.slice(0, room)] : [...prefix.atoms],
-              false,
-              prefix.complete ? suffix.atoms[room] ?? suffix.nextAtom : prefix.nextAtom
-            )
-          );
-          continue;
-        }
-        out.push(
-          withNextAtom(
-            [...prefix.atoms, ...suffix.atoms],
-            prefix.complete && suffix.complete,
-            prefix.complete ? suffix.nextAtom : prefix.nextAtom
-          )
-        );
-      }
-    }
-    return out;
   }
   function collectAtomSequences(source, unicodeMode, captureCount) {
     const tokens = tokenizePattern(source, unicodeMode ? "u" : "", captureCount);
@@ -998,7 +1017,7 @@ var OpenClawExecArgPattern = (() => {
         return true;
       }
     }
-    if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !leftHit && !rightHit) {
+    if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !(leftHit && rightHit)) {
       return true;
     }
     if (failClosedUnprobedUnicode && (alternativeHasUnprobedNonAscii(left) || alternativeHasUnprobedNonAscii(right))) {
@@ -1154,7 +1173,7 @@ var OpenClawExecArgPattern = (() => {
     const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
     const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
     if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
-      return failClosedUnprobedUnicode;
+      return true;
     }
     if (leftSequences && rightSequences) {
       let unproven = false;
@@ -1178,6 +1197,9 @@ var OpenClawExecArgPattern = (() => {
           }
           if (sequenceOverlapIsProven(leftSeq, rightSeq)) {
             return true;
+          }
+          if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {
+            continue;
           }
           unproven = true;
         }

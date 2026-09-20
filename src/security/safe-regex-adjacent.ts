@@ -415,10 +415,12 @@ export function singleTokenAlternativesMayOverlap(
       return true;
     }
   }
-  // Property aliases (\p{Script=Arabic} vs \p{sc=Arab}) miss the finite
-  // probe set. Fail closed when neither side was observed. [猫]|[犬] is
-  // not a property atom and stays accepted on the shared compiler.
-  if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !leftHit && !rightHit) {
+  // Property languages such as \p{L} vs \p{Script=Greek} can miss the finite
+  // probe set on one side. ASCII hits Letter, none hit Greek, and source
+  // witnesses add no Greek character. Fail closed unless both property
+  // languages were observed without a shared witness. [猫]|[犬] is not a
+  // property atom and stays accepted on the shared compiler.
+  if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !(leftHit && rightHit)) {
     return true;
   }
   // Finite probe cannot prove safety for unprobed Unicode alternatives

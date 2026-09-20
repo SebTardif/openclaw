@@ -396,6 +396,10 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(overflowing).reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegex(overflowing)).toBeNull();
     expect(compileSafeRegexForExec(overflowing).regex).toBeNull();
+    const twoCharOverflow = "^((ax|bx|cx|dx|ex|fx|gx|hx|ix|jx|kx|lx|mx|nx|ox|px|qx)|axax)+$";
+    expect(compileSafeRegexDetailed(twoCharOverflow).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(twoCharOverflow)).toBeNull();
+    expect(compileSafeRegexForExec(twoCharOverflow).regex).toBeNull();
     const seventeenWay = "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$";
     expect(compileSafeRegexDetailed(seventeenWay).reason).toBeNull();
     expect(compileSafeRegexForExec(seventeenWay).regex).toBeInstanceOf(RegExp);
@@ -409,6 +413,13 @@ describe("safe regex", () => {
     expect(compileSafeRegexForExec(disjoint).regex).toBeInstanceOf(RegExp);
     const compiled = expectCompiledRegex(disjoint);
     expect(compiled.test(`${"a".repeat(32)}b${"a".repeat(32)}c`)).toBe(true);
+    const longerPrefix = `[a]${"a".repeat(32)}`;
+    const longerDisjoint = `^(${longerPrefix}b|${longerPrefix}c)+$`;
+    expect(compileSafeRegexDetailed(longerDisjoint).reason).toBeNull();
+    expect(compileSafeRegex(longerDisjoint)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(longerDisjoint).regex).toBeInstanceOf(RegExp);
+    const longerCompiled = expectCompiledRegex(longerDisjoint);
+    expect(longerCompiled.test(`${"a".repeat(33)}b${"a".repeat(33)}c`)).toBe(true);
     const unit = `[a]${"a".repeat(32)}`;
     expect(compileSafeRegexDetailed(`^(${unit}|${unit}${unit})+$`).reason).toBe(
       "unsafe-nested-repetition",
@@ -420,6 +431,10 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegex(overlapping)).toBeNull();
     expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
+    const greekLetter = String.raw`^(\p{L}a|\p{Script=Greek}a\p{Script=Greek}a)+$`;
+    expect(compileSafeRegexDetailed(greekLetter, "u").reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(greekLetter, "u")).toBeNull();
+    expect(compileSafeRegexForExec(greekLetter, "u").regex).toBeNull();
     expect(compileSafeRegexDetailed("^(?:[猫]|[犬])+$").reason).toBeNull();
     expect(compileSafeRegex("^(?:[猫]|[犬])+$")).toBeInstanceOf(RegExp);
   });

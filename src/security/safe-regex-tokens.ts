@@ -1,4 +1,18 @@
 // Tokenizes user-supplied regex sources for the safe-regex analyzer.
+import {
+  ATOM_SEQUENCE_OVERFLOW,
+  cartesianConcatSequences,
+  MAX_ALTERNATIVE_SEQUENCES,
+  type AtomSequence,
+  type AtomSequenceRead,
+} from "./safe-regex-sequences.js";
+
+export {
+  ATOM_SEQUENCE_OVERFLOW,
+  sequenceAtomsForOverlap,
+  sequenceOverlapIsProven,
+  type AtomSequence,
+} from "./safe-regex-sequences.js";
 
 type QuantifierRead = {
   consumed: number;
@@ -518,48 +532,6 @@ function decodeFixedWidthSimpleToken(
   return null;
 }
 
-export type AtomSequence = {
-  atoms: string[];
-  complete: boolean;
-  nextAtom?: string;
-};
-
-export function sequenceAtomsForOverlap(seq: AtomSequence): string[] {
-  return seq.nextAtom === undefined ? seq.atoms : [...seq.atoms, seq.nextAtom];
-}
-
-function withNextAtom(
-  atoms: string[],
-  complete: boolean,
-  nextAtom: string | undefined,
-): AtomSequence {
-  return nextAtom === undefined || complete ? { atoms, complete } : { atoms, complete, nextAtom };
-}
-
-/**
- * Truncated equal prefixes are proven only when a stored continuation remains.
- * Unequal length still needs the shorter sequence to be complete.
- */
-export function sequenceOverlapIsProven(leftSeq: AtomSequence, rightSeq: AtomSequence): boolean {
-  if (leftSeq.atoms.length < rightSeq.atoms.length) {
-    return leftSeq.complete;
-  }
-  if (rightSeq.atoms.length < leftSeq.atoms.length) {
-    return rightSeq.complete;
-  }
-  if (leftSeq.complete || rightSeq.complete) {
-    return true;
-  }
-  return leftSeq.nextAtom !== undefined && rightSeq.nextAtom !== undefined;
-}
-
-export const ATOM_SEQUENCE_OVERFLOW = "overflow";
-
-type AtomSequenceRead = AtomSequence[] | typeof ATOM_SEQUENCE_OVERFLOW | null;
-
-const MAX_ALTERNATIVE_SEQUENCES = 16;
-const MAX_SEQUENCE_ATOMS = 32;
-
 function splitTopLevelAlternativeSources(
   source: string,
   unicodeMode: boolean,
@@ -592,46 +564,6 @@ function splitTopLevelAlternativeSources(
   }
   parts.push(source.slice(start));
   return parts;
-}
-
-function cartesianConcatSequences(
-  left: readonly AtomSequence[],
-  right: readonly AtomSequence[],
-): AtomSequence[] | typeof ATOM_SEQUENCE_OVERFLOW {
-  if (left.length === 0) {
-    return right.map((seq) => withNextAtom([...seq.atoms], seq.complete, seq.nextAtom));
-  }
-  if (right.length === 0) {
-    return left.map((seq) => withNextAtom([...seq.atoms], seq.complete, seq.nextAtom));
-  }
-  if (left.length * right.length > MAX_ALTERNATIVE_SEQUENCES) {
-    return ATOM_SEQUENCE_OVERFLOW;
-  }
-  const out: AtomSequence[] = [];
-  for (const prefix of left) {
-    for (const suffix of right) {
-      const combinedLength = prefix.atoms.length + suffix.atoms.length;
-      if (combinedLength > MAX_SEQUENCE_ATOMS) {
-        const room = Math.max(0, MAX_SEQUENCE_ATOMS - prefix.atoms.length);
-        out.push(
-          withNextAtom(
-            room > 0 ? [...prefix.atoms, ...suffix.atoms.slice(0, room)] : [...prefix.atoms],
-            false,
-            prefix.complete ? (suffix.atoms[room] ?? suffix.nextAtom) : prefix.nextAtom,
-          ),
-        );
-        continue;
-      }
-      out.push(
-        withNextAtom(
-          [...prefix.atoms, ...suffix.atoms],
-          prefix.complete && suffix.complete,
-          prefix.complete ? suffix.nextAtom : prefix.nextAtom,
-        ),
-      );
-    }
-  }
-  return out;
 }
 
 function collectAtomSequences(

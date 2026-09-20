@@ -157,6 +157,12 @@ describe("custom adjacent-class redaction", () => {
       patterns: [`corp-(${prefix}b|${prefix}c)+`],
     });
     expect(output).not.toContain(value);
+    const longerPrefix = `[a]${"a".repeat(32)}`;
+    const longerValue = `corp-${"a".repeat(33)}b${"a".repeat(33)}c`;
+    const longerOutput = redactSensitiveText(`id=${longerValue}`, {
+      patterns: [`corp-(${longerPrefix}b|${longerPrefix}c)+`],
+    });
+    expect(longerOutput).not.toContain(longerValue);
   });
 
   it("drops overlapping expansion-overflow and unprobed Unicode prefixes", () => {
@@ -165,11 +171,21 @@ describe("custom adjacent-class redaction", () => {
       patterns: ["corp-((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|axax)+"],
     });
     expect(overflowOutput).toContain(overflowValue);
+    const twoCharOverflowValue = "corp-axaxax";
+    const twoCharOverflowOutput = redactSensitiveText(`id=${twoCharOverflowValue}`, {
+      patterns: ["corp-((ax|bx|cx|dx|ex|fx|gx|hx|ix|jx|kx|lx|mx|nx|ox|px|qx)|axax)+"],
+    });
+    expect(twoCharOverflowOutput).toContain(twoCharOverflowValue);
     const macronValue = "corp-ĀaĀa";
     const macronOutput = redactSensitiveText(`id=${macronValue}`, {
       patterns: ["corp-([Ā]a|ĀaĀa)+"],
     });
     expect(macronOutput).toContain(macronValue);
+    const greekValue = "corp-αaαa";
+    const greekOutput = redactSensitiveText(`id=${greekValue}`, {
+      patterns: [String.raw`/corp-(\p{L}a|\p{Script=Greek}a\p{Script=Greek}a)+/u`],
+    });
+    expect(greekOutput).toContain(greekValue);
   });
 });
 

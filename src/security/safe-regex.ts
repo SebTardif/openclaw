@@ -261,9 +261,10 @@ function alternativesMayOverlap(
   }
   const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
   const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
-  // Overflow cannot prove safety. Exec refuses; Doctor keeps stored rules.
+  // Overflow cannot prove safety. Shared and exec both refuse; Doctor then
+  // removes the overlapping rule instead of treating expansion limits as safe.
   if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
-    return failClosedUnprobedUnicode;
+    return true;
   }
   if (leftSequences && rightSequences) {
     // Nested groups such as (ab|cd)e expand to finite sequences. Unequal
@@ -292,6 +293,9 @@ function alternativesMayOverlap(
         }
         if (sequenceOverlapIsProven(leftSeq, rightSeq)) {
           return true;
+        }
+        if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {
+          continue;
         }
         unproven = true;
       }
