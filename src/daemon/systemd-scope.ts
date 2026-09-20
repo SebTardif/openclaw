@@ -106,25 +106,81 @@ function unitBaseName(label: string): string {
   return label.endsWith(".service") ? label.slice(0, -".service".length) : label;
 }
 
+function systemdTemplatePrefix(base: string): { template: string; instance: string } | null {
+  const cut = base.indexOf("@");
+  if (cut <= 0) {
+    return null;
+  }
+  return { template: base.slice(0, cut), instance: base.slice(cut + 1) };
+}
+
+function systemdInstalledNameProbes(names: string[]): string[] {
+  const probes: string[] = [];
+  const seen = new Set<string>();
+  const add = (name: string) => {
+    if (!seen.has(name)) {
+      seen.add(name);
+      probes.push(name);
+    }
+  };
+  for (const name of names) {
+    add(name);
+  }
+  for (const name of names) {
+    const parsed = systemdTemplatePrefix(name);
+    if (parsed?.instance) {
+      add(`${parsed.template}@`);
+    }
+  }
+  return probes;
+}
+
 function systemdUnitMatchesIdentity(label: string, allowedNames: Set<string>): boolean {
   const base = normalizeLowercaseStringOrEmpty(unitBaseName(label));
   if (allowedNames.has(base)) {
     return true;
   }
-  const cut = base.indexOf("@");
-  if (cut <= 0) {
+  const parsed = systemdTemplatePrefix(base);
+  if (!parsed) {
     return false;
   }
-  const template = base.slice(0, cut);
-  const instance = base.slice(cut + 1);
+  const { template, instance } = parsed;
   // Default-profile system templates such as openclaw@.service / openclaw@gateway.service.
-  return allowedNames.has(template) && (instance === "" || instance === "gateway");
+  if (allowedNames.has(template) && (instance === "" || instance === "gateway")) {
+    return true;
+  }
+  // Explicit OPENCLAW_SYSTEMD_UNIT=openclaw@gateway.service may only have the
+  // backing template installed; keep the requested instance for inspection.
+  if (instance !== "") {
+    return false;
+  }
+  const prefix = `${template}@`;
+  for (const name of allowedNames) {
+    if (name.startsWith(prefix) && name.length > prefix.length) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveSystemdTemplateInstanceName(unitName: string, env: GatewayServiceEnv): string {
+  if (!unitName.endsWith("@.service")) {
+    return unitName;
+  }
+  const template = unitName.slice(0, -"@.service".length);
+  const requested = resolveSystemdServiceName(env);
+  const parsed = systemdTemplatePrefix(requested);
+  const instance =
+    parsed && parsed.template === template && parsed.instance
+      ? parsed.instance
+      : os.userInfo().username;
+  return `${template}@${instance}.service`;
 }
 
 async function findSystemSystemdUnitPath(
   env: GatewayServiceEnv,
 ): Promise<{ unitName: string; unitPath: string } | null> {
-  const candidates = resolveInstalledSystemdServiceNameCandidates(env);
+  const candidates = systemdInstalledNameProbes(resolveInstalledSystemdServiceNameCandidates(env));
   for (const name of candidates) {
     const serviceFile = `${name}.service`;
     for (const dir of SYSTEM_SYSTEMD_UNIT_DIRS) {
@@ -247,10 +303,7 @@ export async function findSystemdGatewayInstallation(
   ]);
   if (system) {
     // A template is shared; native inspection needs this account's runnable instance.
-    system.unitName = system.unitName.replace(
-      /@\.service$/,
-      () => `@${os.userInfo().username}.service`,
-    );
+    system.unitName = resolveSystemdTemplateInstanceName(system.unitName, env);
   }
   if (user && system) {
     // Only the SAME canonical gateway installed in both scopes is a dueling

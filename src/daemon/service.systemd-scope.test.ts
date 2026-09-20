@@ -32,9 +32,21 @@ it.each([
   { file: "openclaw.service", instance: "openclaw.service", running: false },
   { file: "openclaw@.service", instance: "openclaw@gateway.service", running: false },
   { file: "openclaw@.service", instance: "openclaw@gateway.service", running: true },
+  {
+    file: "openclaw@.service",
+    instance: "openclaw@gateway.service",
+    running: false,
+    unit: "openclaw@gateway.service",
+  },
+  {
+    file: "openclaw@.service",
+    instance: "openclaw@gateway.service",
+    running: true,
+    unit: "openclaw@gateway.service",
+  },
 ])(
-  "inspects $instance with running=$running and preserves its sealed definition",
-  async ({ file, instance, running }) => {
+  "inspects $instance with running=$running unit=$unit and preserves its sealed definition",
+  async ({ file, instance, running, unit }) => {
     const home = await fs.realpath(dirs.make("openclaw-system-maintenance-"));
     const root = path.join(home, "package");
     const entrypoint = path.join(root, "openclaw.mjs");
@@ -147,7 +159,7 @@ it.each([
         OPENCLAW_STATE_DIR: undefined,
         OPENCLAW_CONFIG_PATH: undefined,
         OPENCLAW_PROFILE: undefined,
-        OPENCLAW_SYSTEMD_UNIT: undefined,
+        OPENCLAW_SYSTEMD_UNIT: unit,
         OPENCLAW_SUPERVISOR_MODE: undefined,
         OPENCLAW_SERVICE_MARKER: undefined,
         OPENCLAW_SERVICE_KIND: undefined,

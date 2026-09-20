@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findInstalledSystemdGatewayScope, isNonFatalSystemdInstallProbeError } from "./systemd.js";
 
@@ -219,6 +220,73 @@ describe("systemd gateway identity (openclaw#119648)", () => {
     expect(result?.scope).toBe("user");
     expect(result?.unitName).toBe("openclaw-gateway-lisa.service");
     expect(result?.unitPath).toContain("/.config/systemd/user/openclaw-gateway-lisa.service");
+  });
+
+  it("explicit instance override resolves a template-only system install", async () => {
+    mockUnitFileLayout({ system: false });
+    vi.spyOn(os, "userInfo").mockReturnValue({
+      username: "unrelated-login",
+      uid: 1000,
+      gid: 1000,
+      homedir: TEST_MANAGED_HOME,
+      shell: "/bin/sh",
+    });
+    findSystemGatewayServicesMock.mockResolvedValueOnce([
+      {
+        platform: "linux",
+        label: "openclaw@.service",
+        detail: "unit: /etc/systemd/system/openclaw@.service",
+        scope: "system",
+        marker: "openclaw",
+      },
+    ]);
+    const result = await findInstalledSystemdGatewayScope({
+      HOME: TEST_MANAGED_HOME,
+      OPENCLAW_SYSTEMD_UNIT: "openclaw@gateway.service",
+    });
+    expect(result).toEqual({
+      scope: "system",
+      unitName: "openclaw@gateway.service",
+      unitPath: "/etc/systemd/system/openclaw@.service",
+    });
+  });
+
+  it("explicit instance override does not adopt a different template instance", async () => {
+    mockUnitFileLayout({ system: false });
+    findSystemGatewayServicesMock.mockResolvedValueOnce([
+      {
+        platform: "linux",
+        label: "openclaw@other.service",
+        detail: "unit: /etc/systemd/system/openclaw@other.service",
+        scope: "system",
+        marker: "openclaw",
+      },
+    ]);
+    const result = await findInstalledSystemdGatewayScope({
+      HOME: TEST_MANAGED_HOME,
+      OPENCLAW_SYSTEMD_UNIT: "openclaw@gateway.service",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("explicit instance override finds the backing template on disk", async () => {
+    mockUnitFileLayout({ system: "/etc/systemd/system/openclaw@.service" });
+    vi.spyOn(os, "userInfo").mockReturnValue({
+      username: "unrelated-login",
+      uid: 1000,
+      gid: 1000,
+      homedir: TEST_MANAGED_HOME,
+      shell: "/bin/sh",
+    });
+    const result = await findInstalledSystemdGatewayScope({
+      HOME: TEST_MANAGED_HOME,
+      OPENCLAW_SYSTEMD_UNIT: "openclaw@gateway.service",
+    });
+    expect(result).toEqual({
+      scope: "system",
+      unitName: "openclaw@gateway.service",
+      unitPath: "/etc/systemd/system/openclaw@.service",
+    });
   });
 
   it("explicit OPENCLAW_SYSTEMD_UNIT does not adopt an unrelated profile unit", async () => {
