@@ -1,4 +1,5 @@
 // Compares regex atom languages for schema-pattern ReDoS screening.
+import { classBodyHasNestedSet } from "./safe-regex-class-nest.js";
 import {
   classifyNumericEscape,
   decodeUnicodeEscapeChars,
@@ -196,28 +197,6 @@ export function classHasUnknownConsumedLength(sig: string, unicodeSets: boolean)
       continue;
     }
     i += 1;
-  }
-  return false;
-}
-
-function classBodyHasNestedSet(sig: string, start: number, end: number): boolean {
-  for (let i = start; i < end; i += 1) {
-    if (sig[i] === "\\") {
-      i += 1;
-      continue;
-    }
-    if (sig[i] !== "[") {
-      continue;
-    }
-    for (let j = i + 1; j < end; j += 1) {
-      if (sig[j] === "\\") {
-        j += 1;
-        continue;
-      }
-      if (sig[j] === "]") {
-        return true;
-      }
-    }
   }
   return false;
 }
@@ -521,10 +500,17 @@ function collectSequences(
   }
   const inner = stripOuterGroup(sig);
   if (inner !== null) {
-    return splitTopLevelAlternatives(inner).flatMap((alternative) => {
+    const out: AtomLanguage[][] = [];
+    for (const alternative of splitTopLevelAlternatives(inner)) {
       const seqs = sequencesFromSource(alternative, foldCase, depth, unicode, capturingGroups);
-      return seqs.map((seq) => (seq.length > 0 ? seq : unknownSequence()));
-    });
+      for (const seq of seqs) {
+        out.push(seq.length > 0 ? seq : unknownSequence());
+        if (out.length > MAX_SEQUENCE_SET) {
+          return unknownSequences();
+        }
+      }
+    }
+    return out;
   }
   if (sig.startsWith("[")) {
     return [[classLanguage(sig, foldCase, unicode)]];

@@ -429,4 +429,27 @@ describe("safe regex", () => {
       );
     },
   );
+
+  it("accepts 17 disjoint one-character alternatives next to a different group", () => {
+    const left = Array.from({ length: 17 }, (_, i) => String.fromCharCode(97 + i)).join("|");
+    expect(compileJsonSchemaPatternRegexDetailed(`^(${left})*(z)*$`).reason).toBeNull();
+  });
+
+  it(
+    "rejects oversized alternative unions before comparing adjacent groups",
+    { timeout: 2000 },
+    () => {
+      const left = Array.from({ length: 40 }, () => "a").join("|");
+      const right = Array.from({ length: 40 }, () => "b").join("|");
+      expect(compileJsonSchemaPatternRegexDetailed(`^(${left})*(${right})*$`).reason).toBe(
+        "unsafe-nested-repetition",
+      );
+    },
+  );
+
+  it("screens a bracket-heavy class without quadratic nesting scans", { timeout: 2000 }, () => {
+    const pattern = `^([${"[".repeat(100_000)}]|a)+$`;
+    expect(compileJsonSchemaPatternRegexDetailed(pattern).reason).toBeNull();
+    expect(compileSafeRegexDetailed(pattern).reason).toBeNull();
+  });
 });
