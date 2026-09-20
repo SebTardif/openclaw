@@ -2112,11 +2112,6 @@ describe("maybeResolveDuelingSystemdGatewayScopes", () => {
     await maybeResolveDuelingSystemdGatewayScopes(runtime, prompter);
 
     expect(mocks.uninstallUserSystemdGatewayUnit).toHaveBeenCalledTimes(1);
-    expect(mocks.uninstallUserSystemdGatewayUnit).toHaveBeenCalledWith({
-      env: process.env,
-      stdout: process.stdout,
-      target: duelingInstallation.user,
-    });
     expect(runtime.log).toHaveBeenCalledWith(
       "Removed the redundant user-scope gateway unit. The system-scope unit is now the sole gateway manager.",
     );

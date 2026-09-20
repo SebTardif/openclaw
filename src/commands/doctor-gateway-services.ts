@@ -864,7 +864,6 @@ export async function maybeScanExtraGatewayServices(
  * Resolves a `dueling` systemd install (both a user-scope and a system-scope
  * gateway unit present) by removing the redundant user-scope unit after
  * confirmation, keeping the root-installed system-scope unit as authoritative.
- *
  * This is the fix for issue #79375: on Linux the two units bind the same port
  * and SIGTERM each other in an endless restart loop. The canonical units are
  * deliberately excluded from `findExtraGatewayServices`, so this detects the
