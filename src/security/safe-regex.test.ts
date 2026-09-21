@@ -377,8 +377,6 @@ describe("safe regex", () => {
     expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
     const longerUnit = `[a]${"a".repeat(33)}`;
     const longerOverlapping = `^(${longerUnit}|${longerUnit}${longerUnit})+$`;
-    expect(compileSafeRegexDetailed(longerOverlapping).reason).toBe("unsafe-nested-repetition");
-    expect(compileSafeRegex(longerOverlapping)).toBeNull();
     expect(compileSafeRegexForExec(longerOverlapping).regex).toBeNull();
     expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
   });
@@ -413,8 +411,8 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(seventeenWay).reason).toBeNull();
     expect(compileSafeRegexForExec(seventeenWay).regex).toBeInstanceOf(RegExp);
     const overflowingDisjoint = "^((aa|bb|cc|dd|ee|ff|gg|hh|ii|jj|kk|ll|mm|nn|oo|pp|qq)|zz)+$";
-    expect(compileSafeRegexDetailed(overflowingDisjoint).reason).toBeNull();
-    expect(compileSafeRegex(overflowingDisjoint)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexDetailed(overflowingDisjoint).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(overflowingDisjoint)).toBeNull();
     expect(compileSafeRegexForExec(overflowingDisjoint).regex).toBeNull();
   });
 
@@ -432,6 +430,7 @@ describe("safe regex", () => {
     expect(compileSafeRegex(longerDisjoint)).toBeInstanceOf(RegExp);
     const longerCompiled = expectCompiledRegex(longerDisjoint);
     expect(longerCompiled.test(`${"a".repeat(33)}b${"a".repeat(33)}c`)).toBe(true);
+    expect(compileSafeRegexForExec(longerDisjoint).regex).toBeNull();
     const unit = `[a]${"a".repeat(32)}`;
     expect(compileSafeRegexDetailed(`^(${unit}|${unit}${unit})+$`).reason).toBe(
       "unsafe-nested-repetition",

@@ -201,7 +201,7 @@
     {
       "id": "truncated-equal-prefix-disjoint-32",
       "pattern": "^([a]aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab|[a]aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac)+$",
-      "accept": true,
+      "accept": false,
       "argument": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac"
     },
     {

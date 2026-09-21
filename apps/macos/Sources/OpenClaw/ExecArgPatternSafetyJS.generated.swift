@@ -1254,7 +1254,7 @@ var OpenClawExecArgPattern = (() => {
     const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
     const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
     if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
-      return failClosedUnprobedUnicode;
+      return true;
     }
     if (leftSequences && rightSequences) {
       let unproven = false;
@@ -1280,9 +1280,6 @@ var OpenClawExecArgPattern = (() => {
             return true;
           }
           if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {
-            if (leftSeq.unknownTailHomogeneous === true || rightSeq.unknownTailHomogeneous === true) {
-              return true;
-            }
             unproven = true;
             continue;
           }

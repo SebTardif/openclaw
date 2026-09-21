@@ -376,7 +376,7 @@ describe("exec allowlist matching", () => {
           "python3",
           `${"a".repeat(33)}b${"a".repeat(33)}c`,
         ]),
-      ).toBe(longerTruncatedDisjoint);
+      ).toBeNull();
       expect(matchAllowlist([macronOverlap], resolution, ["python3", "ĀaĀa"])).toBeNull();
     });
 
