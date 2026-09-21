@@ -435,10 +435,17 @@ export function singleTokenAlternativesMayOverlap(
   if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !(leftHit && rightHit)) {
     return true;
   }
-  // [0\p{Script=Greek}] is not a lone property atom. ASCII hits `0` while
-  // `\p{L}` hits A, so the languages look disjoint even though Greek letters
-  // sit in both. Mixed property classes stay uncertain without a shared witness.
-  if (isMixedPropertyClass(left) || isMixedPropertyClass(right)) {
+  // [0\p{Script=Greek}] vs \p{L} can miss Greek on the finite probe set.
+  // Mixed vs mixed, or mixed vs a property atom, stays uncertain.
+  // Mixed vs a probed ASCII class such as [1] stays disjoint when no
+  // witness matched.
+  if (
+    (isMixedPropertyClass(left) || isMixedPropertyClass(right)) &&
+    (isUnicodePropertyAtom(left) ||
+      isUnicodePropertyAtom(right) ||
+      (isMixedPropertyClass(left) && isMixedPropertyClass(right)) ||
+      failClosedUnprobedUnicode)
+  ) {
     return true;
   }
   // Finite probe cannot prove safety for unprobed Unicode alternatives

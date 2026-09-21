@@ -68,13 +68,16 @@ var OpenClawExecArgPattern = (() => {
   function sequenceAtomsForOverlap(seq) {
     return seq.nextAtom === void 0 ? seq.atoms : [...seq.atoms, seq.nextAtom];
   }
-  function withNextAtom(atoms, complete, nextAtom, unknownTail = false) {
+  function withNextAtom(atoms, complete, nextAtom, unknownTail = false, unknownTailHomogeneous = false) {
     const seq = { atoms, complete };
     if (!complete && nextAtom !== void 0) {
       seq.nextAtom = nextAtom;
     }
     if (!complete && unknownTail) {
       seq.unknownTail = true;
+      if (unknownTailHomogeneous) {
+        seq.unknownTailHomogeneous = true;
+      }
     }
     return seq;
   }
@@ -97,7 +100,67 @@ var OpenClawExecArgPattern = (() => {
   var MAX_ALTERNATIVE_SEQUENCES = 16;
   var MAX_SEQUENCE_ATOMS = 32;
   function cloneAtomSequence(seq) {
-    return withNextAtom([...seq.atoms], seq.complete, seq.nextAtom, seq.unknownTail === true);
+    return withNextAtom(
+      [...seq.atoms],
+      seq.complete,
+      seq.nextAtom,
+      seq.unknownTail === true,
+      seq.unknownTailHomogeneous === true
+    );
+  }
+  function omittedTailIsHomogeneous(suffix, room) {
+    const next = suffix.atoms[room];
+    if (next === void 0) {
+      return false;
+    }
+    if (suffix.unknownTail === true) {
+      return false;
+    }
+    if (suffix.nextAtom !== void 0 && suffix.nextAtom !== next) {
+      return false;
+    }
+    return suffix.atoms.slice(room + 1).every((atom) => atom === next);
+  }
+  function collapseEqualTailSequences(sequences) {
+    if (sequences.length < 2) {
+      return null;
+    }
+    const first = sequences[0];
+    if (!first?.complete || first.atoms.length < 2 || first.unknownTail === true) {
+      return null;
+    }
+    const tail = first.atoms.slice(1);
+    const tailKey = tail.join("\0");
+    const heads = [];
+    for (const seq of sequences) {
+      if (!seq.complete || seq.unknownTail === true || seq.atoms.length !== first.atoms.length || seq.atoms.slice(1).join("\0") !== tailKey) {
+        return null;
+      }
+      const head = seq.atoms[0];
+      if (head === void 0) {
+        return null;
+      }
+      heads.push(head);
+    }
+    const firstHead = heads[0];
+    if (firstHead === void 0) {
+      return null;
+    }
+    const union = heads.length === 1 ? firstHead : `(?:${heads.join("|")})`;
+    return [{ atoms: [union, ...tail], complete: true }];
+  }
+  function appendCollapsedSequences(all, sequences) {
+    if (all.length + sequences.length <= MAX_ALTERNATIVE_SEQUENCES) {
+      all.push(...sequences);
+      return null;
+    }
+    const collapsed = collapseEqualTailSequences([...all, ...sequences]);
+    if (!collapsed) {
+      return ATOM_SEQUENCE_OVERFLOW;
+    }
+    all.length = 0;
+    all.push(...collapsed);
+    return null;
   }
   function concatAtomSequence(prefix, suffix) {
     if (prefix.atoms.length + suffix.atoms.length <= MAX_SEQUENCE_ATOMS) {
@@ -111,14 +174,19 @@ var OpenClawExecArgPattern = (() => {
     const room = Math.max(0, MAX_SEQUENCE_ATOMS - prefix.atoms.length);
     const kept = room > 0 ? [...prefix.atoms, ...suffix.atoms.slice(0, room)] : [...prefix.atoms];
     if (!prefix.complete) {
-      return withNextAtom(kept, false, prefix.nextAtom, true);
+      const suffixAtom = suffix.atoms.length === 1 ? suffix.atoms[0] : void 0;
+      const sameAsNext = prefix.nextAtom !== void 0 && suffixAtom !== void 0 && suffixAtom === prefix.nextAtom;
+      const homogeneous = sameAsNext && (prefix.unknownTailHomogeneous === true || prefix.unknownTail !== true);
+      return withNextAtom(kept, false, prefix.nextAtom, true, homogeneous);
     }
     const fromSuffix = room < suffix.atoms.length;
+    const unknownTail = suffix.unknownTail === true || fromSuffix && (!suffix.complete || suffix.atoms.length - room > 1);
     return withNextAtom(
       kept,
       false,
       fromSuffix ? suffix.atoms[room] : suffix.nextAtom,
-      suffix.unknownTail === true || fromSuffix && (!suffix.complete || suffix.atoms.length - room > 1)
+      unknownTail,
+      unknownTail && fromSuffix && omittedTailIsHomogeneous(suffix, room)
     );
   }
   function cartesianConcatSequences(left, right) {
@@ -679,10 +747,9 @@ var OpenClawExecArgPattern = (() => {
       if (flushUnion() === ATOM_SEQUENCE_OVERFLOW) {
         return ATOM_SEQUENCE_OVERFLOW;
       }
-      if (all.length + sequences.length > MAX_ALTERNATIVE_SEQUENCES) {
+      if (appendCollapsedSequences(all, sequences) === ATOM_SEQUENCE_OVERFLOW) {
         return ATOM_SEQUENCE_OVERFLOW;
       }
-      all.push(...sequences);
     }
     if (flushUnion() === ATOM_SEQUENCE_OVERFLOW) {
       return ATOM_SEQUENCE_OVERFLOW;
@@ -979,6 +1046,17 @@ var OpenClawExecArgPattern = (() => {
     const inner = body.startsWith("[") && body.endsWith("]") && !body.slice(1, -1).includes("[") ? body.slice(1, -1) : body;
     return /^\\[pP]\{[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?\}$/.test(inner);
   }
+  function isMixedPropertyClass(source) {
+    const body = stripAlternativeAnchors(source);
+    if (!body.startsWith("[") || !body.endsWith("]")) {
+      return false;
+    }
+    const inner = body.slice(1, -1);
+    if (!/\\[pP]\{/.test(inner)) {
+      return false;
+    }
+    return !/^\\[pP]\{[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_]+)?\}$/.test(inner);
+  }
   function singleTokenAlternativesMayOverlap(left, right, ignoreCase, failClosedUnprobedUnicode, unicodeMode = false, dotAll = false) {
     const flags = `${ignoreCase ? "i" : ""}${unicodeMode ? "u" : ""}${dotAll ? "s" : ""}`;
     let leftRe;
@@ -1018,6 +1096,9 @@ var OpenClawExecArgPattern = (() => {
       }
     }
     if (isUnicodePropertyAtom(left) && isUnicodePropertyAtom(right) && !(leftHit && rightHit)) {
+      return true;
+    }
+    if ((isMixedPropertyClass(left) || isMixedPropertyClass(right)) && (isUnicodePropertyAtom(left) || isUnicodePropertyAtom(right) || isMixedPropertyClass(left) && isMixedPropertyClass(right) || failClosedUnprobedUnicode)) {
       return true;
     }
     if (failClosedUnprobedUnicode && (alternativeHasUnprobedNonAscii(left) || alternativeHasUnprobedNonAscii(right))) {
@@ -1173,7 +1254,7 @@ var OpenClawExecArgPattern = (() => {
     const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
     const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
     if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
-      return true;
+      return failClosedUnprobedUnicode;
     }
     if (leftSequences && rightSequences) {
       let unproven = false;
@@ -1199,6 +1280,10 @@ var OpenClawExecArgPattern = (() => {
             return true;
           }
           if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {
+            if (leftSeq.unknownTailHomogeneous === true || rightSeq.unknownTailHomogeneous === true) {
+              return true;
+            }
+            unproven = true;
             continue;
           }
           unproven = true;

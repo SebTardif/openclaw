@@ -412,6 +412,10 @@ describe("safe regex", () => {
     const seventeenWay = "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$";
     expect(compileSafeRegexDetailed(seventeenWay).reason).toBeNull();
     expect(compileSafeRegexForExec(seventeenWay).regex).toBeInstanceOf(RegExp);
+    const overflowingDisjoint = "^((aa|bb|cc|dd|ee|ff|gg|hh|ii|jj|kk|ll|mm|nn|oo|pp|qq)|zz)+$";
+    expect(compileSafeRegexDetailed(overflowingDisjoint).reason).toBeNull();
+    expect(compileSafeRegex(overflowingDisjoint)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(overflowingDisjoint).regex).toBeNull();
   });
 
   it("accepts truncated equal prefixes whose missing suffixes are disjoint", () => {
@@ -426,13 +430,15 @@ describe("safe regex", () => {
     const longerDisjoint = `^(${longerPrefix}b|${longerPrefix}c)+$`;
     expect(compileSafeRegexDetailed(longerDisjoint).reason).toBeNull();
     expect(compileSafeRegex(longerDisjoint)).toBeInstanceOf(RegExp);
-    expect(compileSafeRegexForExec(longerDisjoint).regex).toBeInstanceOf(RegExp);
     const longerCompiled = expectCompiledRegex(longerDisjoint);
     expect(longerCompiled.test(`${"a".repeat(33)}b${"a".repeat(33)}c`)).toBe(true);
     const unit = `[a]${"a".repeat(32)}`;
     expect(compileSafeRegexDetailed(`^(${unit}|${unit}${unit})+$`).reason).toBe(
       "unsafe-nested-repetition",
     );
+    const mixedTailUnit = `[a]${"ba".repeat(17)}`;
+    const mixedTailOverlapping = `^(${mixedTailUnit}|${mixedTailUnit}${mixedTailUnit})+$`;
+    expect(compileSafeRegexForExec(mixedTailOverlapping).regex).toBeNull();
   });
 
   it("rejects shared Unicode atoms that the finite probe set never visits", () => {
@@ -448,6 +454,9 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(mixedGreekClass, "u").reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegex(mixedGreekClass, "u")).toBeNull();
     expect(compileSafeRegexForExec(mixedGreekClass, "u").regex).toBeNull();
+    const disjointMixedDigit = String.raw`^([0\p{Script=Greek}]|[1])+$`;
+    expect(compileSafeRegexDetailed(disjointMixedDigit, "u").reason).toBeNull();
+    expect(compileSafeRegex(disjointMixedDigit, "u")).toBeInstanceOf(RegExp);
     expect(compileSafeRegexDetailed("^(?:[猫]|[犬])+$").reason).toBeNull();
     expect(compileSafeRegex("^(?:[猫]|[犬])+$")).toBeInstanceOf(RegExp);
   });

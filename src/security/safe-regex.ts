@@ -264,7 +264,9 @@ function alternativesMayOverlap(
   // Overflow cannot prove safety. Shared and exec both refuse; Doctor then
   // removes the overlapping rule instead of treating expansion limits as safe.
   if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
-    return true;
+    // Expansion limits are inconclusive, not proven overlap. Exec stays
+    // fail-closed; the shared compiler keeps disjoint redaction usable.
+    return failClosedUnprobedUnicode;
   }
   if (leftSequences && rightSequences) {
     // Nested groups such as (ab|cd)e expand to finite sequences. Unequal
@@ -298,6 +300,7 @@ function alternativesMayOverlap(
           if (leftSeq.unknownTailHomogeneous === true || rightSeq.unknownTailHomogeneous === true) {
             return true;
           }
+          unproven = true;
           continue;
         }
         unproven = true;
