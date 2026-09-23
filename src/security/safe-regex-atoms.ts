@@ -187,14 +187,6 @@ export function classHasUnknownConsumedLength(sig: string, unicodeSets: boolean)
       i += next === undefined ? 1 : 2;
       continue;
     }
-    if (sig[i] === "[") {
-      const nested = readCharClassSig(sig, i, true);
-      if (classHasUnknownConsumedLength(nested.sig, true)) {
-        return true;
-      }
-      i = nested.end;
-      continue;
-    }
     i += 1;
   }
   return false;

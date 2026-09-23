@@ -1,5 +1,6 @@
 // Covers safe-regex checks for risky user-supplied patterns.
 import { describe, expect, it } from "vitest";
+import { classHasUnknownConsumedLength } from "./safe-regex-atoms.js";
 import {
   compileJsonSchemaPatternRegexDetailed,
   compileSafeRegex,
@@ -391,6 +392,15 @@ describe("safe regex", () => {
     expect(compileJsonSchemaPatternRegexDetailed("^(a|a(?=a))+$").reason).toBe(
       "unsafe-nested-repetition",
     );
+  });
+
+  it("scans deeply nested classes without using the call stack", { timeout: 1500 }, () => {
+    const depth = 20000;
+    const open = "[".repeat(depth);
+    const close = "]".repeat(depth);
+    expect(classHasUnknownConsumedLength(`${open}\\q{ab}${close}`, true)).toBe(true);
+    expect(classHasUnknownConsumedLength(`${open}a${close}`, true)).toBe(false);
+    expect(classHasUnknownConsumedLength(`${open}\\q{ab}${close}`, false)).toBe(false);
   });
 
   it("rejects overlapping v-mode string-class alternatives", () => {
