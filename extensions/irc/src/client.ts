@@ -188,8 +188,14 @@ export async function connectIrcClient(options: IrcClientOptions): Promise<IrcCl
   };
 
   const failAndClose = (err: unknown) => {
+    // destroy() emits close after `closed` is set, so that listener
+    // cannot ask the monitor to reconnect a registered client.
+    const notifyDisconnect = ready && !closed;
     fail(err);
     close();
+    if (notifyDisconnect) {
+      options.onDisconnect?.();
+    }
   };
 
   const sendRaw = (line: string) => {
