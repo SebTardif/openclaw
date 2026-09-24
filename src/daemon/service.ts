@@ -107,6 +107,8 @@ export type GatewayService = GatewayServiceLoadStateReader & {
   label: string;
   loadedText: string;
   notLoadedText: string;
+  /** Diagnostic guidance only; this does not establish service absence. */
+  unsupportedReason?: string;
   stage: (args: GatewayServiceStageArgs) => Promise<void>;
   install: (args: GatewayServiceInstallArgs) => Promise<void>;
   uninstall: (args: GatewayServiceManageArgs) => Promise<void>;
@@ -197,7 +199,7 @@ export async function readGatewayServiceState(
   ) {
     return await withSystemdServiceReadBinding(
       baseEnv,
-      () => admitSystemdServiceReadBinding(baseEnv, deadline),
+      () => admitSystemdServiceReadBinding(baseEnv, deadline, args.systemdReadTarget?.unitName),
       (binding) => {
         const remaining = deadline - performance.now();
         if (remaining <= 0) {
@@ -484,33 +486,35 @@ export function describeGatewayServiceRestart(
 type SupportedGatewayServicePlatform = "darwin" | "linux" | "win32";
 type ServiceKind = "gateway" | "node";
 
-function createUnsupportedGatewayServiceError(kind: ServiceKind): Error {
+function describeUnsupportedGatewayService(kind: ServiceKind): string {
   if (process.platform === "freebsd") {
     if (kind === "node") {
-      return new Error(
+      return (
         "Node service management is not supported by this CLI on FreeBSD. " +
-          "Run `openclaw node run` for a foreground node host connected to your Gateway.",
+        "Run `openclaw node run` for a foreground node host connected to your Gateway."
       );
     }
-    return new Error(
+    return (
       "Gateway service management is not supported by this CLI on FreeBSD. " +
-        'For a pkg install, set openclaw_user to your onboarding account and openclaw_enable="YES" in /etc/rc.conf, ' +
-        "then use `service openclaw start` (or stop/restart/status) as root. " +
-        "For a foreground Gateway, run `openclaw gateway run` as your onboarding account.",
+      'For a pkg install, set openclaw_user to your onboarding account and openclaw_enable="YES" in /etc/rc.conf, ' +
+      "then use `service openclaw start` (or stop/restart/status) as root. " +
+      "For a foreground Gateway, run `openclaw gateway run` as your onboarding account."
     );
   }
-  return new Error(`Gateway service install not supported on ${process.platform}`);
+  return `Gateway service install not supported on ${process.platform}`;
 }
 
 function createUnsupportedGatewayService(kind: ServiceKind): GatewayService {
+  const unsupportedReason = describeUnsupportedGatewayService(kind);
   // Node hosts share this adapter, but their recovery must never control the Gateway.
   const rejectUnsupportedGatewayService = async (): Promise<never> => {
-    throw createUnsupportedGatewayServiceError(kind);
+    throw new Error(unsupportedReason);
   };
   return {
     label: "Gateway service",
     loadedText: "available",
     notLoadedText: "not installed",
+    unsupportedReason,
     stage: rejectUnsupportedGatewayService,
     install: rejectUnsupportedGatewayService,
     uninstall: rejectUnsupportedGatewayService,
@@ -519,10 +523,7 @@ function createUnsupportedGatewayService(kind: ServiceKind): GatewayService {
     restart: rejectUnsupportedGatewayService,
     isLoaded: rejectUnsupportedGatewayService,
     readCommand: async () => null,
-    readRuntime: async () => ({
-      status: "unknown",
-      detail: createUnsupportedGatewayServiceError(kind).message,
-    }),
+    readRuntime: async () => ({ status: "unknown", detail: unsupportedReason }),
   };
 }
 

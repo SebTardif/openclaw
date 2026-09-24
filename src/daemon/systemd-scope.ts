@@ -390,13 +390,8 @@ async function findUserSystemdGatewayScope(
 ): Promise<SystemdServiceReadTarget | null> {
   const candidates = resolveInstalledSystemdServiceNameCandidates(env);
   for (const name of candidates) {
-    let userPath: string;
     try {
-      userPath = resolveSystemdUnitPathForName(env, name);
-    } catch {
-      continue;
-    }
-    try {
+      const userPath = resolveSystemdUnitPathForName(env, name);
       await fs.access(userPath);
       return { scope: "user", unitName: `${name}.service`, unitPath: userPath };
     } catch {
@@ -430,21 +425,16 @@ export async function findSystemdGatewayInstallation(
   options?: SystemdDiscoveryOptions,
 ): Promise<SystemdGatewayInstallation> {
   const user = await findUserSystemdGatewayScope(env);
-  // A differently named system unit cannot displace an installed user unit.
+  // With a user unit present, only this profile's known system aliases compete.
   const system = await findSystemSystemdGatewayScope(env, options, !user);
   if (system) {
     // A template is shared; native inspection needs this account's runnable instance.
     system.unitName = resolveSystemdTemplateInstanceName(system.unitName, env);
   }
-  if (user && system) {
-    // Only matching native names are duplicates. Another system unit may be
-    // an intentional separate gateway; user lifecycle remains user-first.
-    if (user.unitName === system.unitName) {
+  if (user) {
+    if (system) {
       return { kind: "dueling", user, system };
     }
-    return { kind: "user", user };
-  }
-  if (user) {
     return { kind: "user", user };
   }
   if (system) {

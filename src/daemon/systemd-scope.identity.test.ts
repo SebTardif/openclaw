@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { findSystemdGatewayInstallation } from "./systemd-scope.js";
 import { findInstalledSystemdGatewayScope, isNonFatalSystemdInstallProbeError } from "./systemd.js";
 
 const findSystemGatewayServicesMock = vi.hoisted(() =>
@@ -73,6 +74,23 @@ describe("systemd gateway identity (openclaw#119648)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
+
+  it.each([
+    ["openclaw-gateway-lisa.service", "openclaw-lisa.service"],
+    ["openclaw-lisa.service", "openclaw-gateway-lisa.service"],
+  ])(
+    "detects competing current and legacy profile units: user %s, system %s",
+    async (user, system) => {
+      mockUnitFileLayout({ user, system: `/etc/systemd/system/${system}` });
+      await expect(
+        findSystemdGatewayInstallation({ HOME: TEST_MANAGED_HOME, OPENCLAW_PROFILE: "lisa" }),
+      ).resolves.toMatchObject({
+        kind: "dueling",
+        user: { unitName: user },
+        system: { unitName: system },
+      });
+    },
+  );
 
   it("findInstalledSystemdGatewayScope falls back to marker-owned system unit with custom name", async () => {
     mockUnitFileLayout({ system: false });
