@@ -10,7 +10,10 @@ import {
 } from "./constants.js";
 import { normalizeWindowsPathSeparators } from "./output.js";
 import { resolveDaemonHomeDir } from "./paths.js";
-import { ServiceDefinitionInspectionError } from "./service-inspection-error.js";
+import {
+  ServiceDefinitionInspectionError,
+  findServiceOwnershipRefusal,
+} from "./service-inspection-error.js";
 import type {
   GatewayServiceCommandConfig,
   GatewayServiceCommandSnapshot,
@@ -26,6 +29,7 @@ import type {
   SystemdEnvironmentFilesParams,
   SystemdEnvironmentFileSpec,
 } from "./systemd-service-files.types.js";
+import { assertSystemdServiceAccount } from "./systemd-service-identity.js";
 import {
   parseSystemdEnvAssignments,
   parseSystemdExecStart,
@@ -235,17 +239,20 @@ async function readSystemdManagerCommand(
       }
       inlineEnvironment[assignment.slice(0, separator)] = assignment.slice(separator + 1);
     }
-    const account = systemScope ? os.userInfo() : undefined;
+    if (systemScope && typeof user !== "string") {
+      throw unavailable();
+    }
+    const account =
+      systemScope && typeof user === "string"
+        ? opts?.requireEffective
+          ? assertSystemdServiceAccount(user)
+          : os.userInfo()
+        : undefined;
     const sameAccount =
       account &&
       (user === account.username ||
         user === String(account.uid) ||
         (user === "" && account.uid === 0));
-    if (systemScope && (typeof user !== "string" || (opts?.requireEffective && !sameAccount))) {
-      throw new Error(
-        "System systemd Gateway runs as another account; run Doctor as the service's User= account.",
-      );
-    }
 
     await binding?.verify();
     const managedDefinition =
@@ -397,7 +404,7 @@ export async function readSystemdServiceExecStart(
   try {
     const target =
       options?.systemdReadTarget ??
-      (await (await import("./systemd-scope.js")).findInstalledSystemdGatewayScope(env));
+      (await (await import("./systemd-scope.js")).findInstalledSystemdGatewayScope(env, options));
     const opts = target ? { ...options, systemdReadTarget: target } : options;
     const unitPath = target?.unitPath ?? resolveSystemdUnitPath(env);
     const content = await fs.readFile(unitPath, "utf8").catch((error: unknown) => {
@@ -474,7 +481,7 @@ export async function readSystemdServiceExecStart(
         return command;
       })
       .catch((error: unknown) => {
-        if (opts?.requireEffective) {
+        if (opts?.requireEffective || findServiceOwnershipRefusal(error)) {
           throw error;
         }
         opts?.onCommandInspection?.({ kind: "unavailable", error });
@@ -491,7 +498,7 @@ export async function readSystemdServiceExecStart(
     };
   } catch (error) {
     options?.onCommandInspection?.({ kind: "unavailable", error });
-    if (options?.requireEffective) {
+    if (options?.requireEffective || findServiceOwnershipRefusal(error)) {
       throw error;
     }
     return null;

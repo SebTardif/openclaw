@@ -133,11 +133,15 @@ async function createFakeGateway(): Promise<FakeGateway> {
   let seq = 1;
   let worker = workerRecord("ready");
   const workerEnvironmentService = {
+    getDedicatedNodeLeaseSignal: () => undefined,
+    captureSessionAttachment: () => {
+      throw new Error("conversation attachments are outside the SDK environment RPC proof");
+    },
     getSessionAttachment: () => undefined,
     findSessionAttachment: () => undefined,
     getSessionAttachmentStatus: () => undefined,
     assertSessionAttachment: () => {},
-    touchSessionAttachment: () => {},
+    touchSessionAttachment: async () => {},
     createSessionAttachment: async () => {
       throw new Error("conversation attachments are outside the SDK environment RPC proof");
     },
@@ -155,6 +159,7 @@ async function createFakeGateway(): Promise<FakeGateway> {
     machineShapeVersion: () => 0,
     supportsExecutionMode: (profileId, mode) =>
       profileId === "development" && mode === "worker-turn",
+    readProviderDisplayId: () => undefined,
     listMachineOptions: async () => undefined,
     listOperatingSystems: async () => undefined,
     prepare: async () => {

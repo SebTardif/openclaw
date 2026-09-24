@@ -1,13 +1,51 @@
 import type { Static } from "typebox";
 import { Type } from "typebox";
 import { closedObject } from "./closed-object.js";
-import { ChatAccountSelectionSchema } from "./model-account-selection.js";
+import { ChatAccountSelectionSchema, ModelAuthProfileIdSchema } from "./model-account-selection.js";
 import {
   GatewayAgentRuntimeSchema,
   GatewayContextWindowOptionSchema,
   GatewayThinkingLevelOptionSchema,
 } from "./model-runtime-options.js";
 import { NonEmptyString } from "./primitives.js";
+
+/** Model catalog request with optional visibility scope. */
+export const ModelsListParamsSchema = Type.Object(
+  {
+    agentId: Type.Optional(NonEmptyString),
+    sessionKey: Type.Optional(NonEmptyString),
+    authProfileId: Type.Optional(ModelAuthProfileIdSchema),
+    provider: Type.Optional(NonEmptyString),
+    includeDetails: Type.Optional(Type.Boolean()),
+    includeProviderCapabilities: Type.Optional(Type.Boolean()),
+    /** Include global default-model previews, independent of agent/session overrides. */
+    includeDefaultModels: Type.Optional(Type.Boolean()),
+    /** Reuse prepared/cached facts without starting provider discovery. */
+    preparedOnly: Type.Optional(Type.Boolean()),
+    /** Force replacement of a completed full-catalog generation. */
+    refresh: Type.Optional(Type.Boolean()),
+    view: Type.Optional(
+      Type.Union([
+        Type.Literal("default"),
+        Type.Literal("configured"),
+        Type.Literal("provider-config"),
+        Type.Literal("all"),
+      ]),
+    ),
+  },
+  {
+    additionalProperties: false,
+    allOf: [
+      {
+        not: {
+          properties: { preparedOnly: { const: true }, refresh: { const: true } },
+          required: ["preparedOnly", "refresh"],
+        },
+      },
+      { not: { required: ["sessionKey", "authProfileId"] } },
+    ],
+  },
+);
 
 const ModelUnavailableReasonSchema = Type.Union([
   Type.Literal("missing-auth"),
@@ -81,6 +119,13 @@ export const ModelCatalogProviderOutcomeSchema = closedObject({
 
 export const ModelsListResultSchema = closedObject({
   models: Type.Array(ModelChoiceSchema),
+  /** The Gateway owns role restrictions and the effective permitted reset target. */
+  modelSelectionPolicy: Type.Optional(
+    closedObject({
+      restricted: Type.Literal(true),
+      defaultModel: Type.Union([NonEmptyString, Type.Null()]),
+    }),
+  ),
   /** Manifest-owned decision choices, separate from conversational model routing. */
   decisionModels: Type.Optional(
     Type.Array(
@@ -89,6 +134,36 @@ export const ModelsListResultSchema = closedObject({
         provider: NonEmptyString,
         name: NonEmptyString,
         pluginId: NonEmptyString,
+        capabilities: Type.Optional(
+          closedObject({
+            questionTypes: Type.Array(
+              Type.Union([Type.Literal("boolean"), Type.Literal("choice"), Type.Literal("score")]),
+              { minItems: 1, maxItems: 3, uniqueItems: true },
+            ),
+            maxQuestions: Type.Optional(
+              Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+            ),
+            maxChoiceAlternatives: Type.Optional(
+              Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+            ),
+            maxScoreLevels: Type.Optional(
+              Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+            ),
+            maxInputTokens: Type.Optional(
+              Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+            ),
+            inputTokenScope: Type.Optional(
+              Type.Union([
+                Type.Literal("encoded-question"),
+                Type.Literal("state-plus-each-criterion"),
+              ]),
+            ),
+            requiresBooleanCriteria: Type.Optional(Type.Boolean()),
+            confidence: Type.Optional(
+              Type.Union([Type.Literal("provider-specific"), Type.Literal("none")]),
+            ),
+          }),
+        ),
       }),
     ),
   ),
@@ -108,3 +183,4 @@ export type ModelChoice = Static<typeof ModelChoiceSchema>;
 export type ModelRuntimeChoice = Static<typeof ModelRuntimeChoiceSchema>;
 export type ModelCatalogProviderOutcome = Static<typeof ModelCatalogProviderOutcomeSchema>;
 export type ModelsListResult = Static<typeof ModelsListResultSchema>;
+export type ModelsListParams = Static<typeof ModelsListParamsSchema>;

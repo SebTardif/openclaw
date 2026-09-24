@@ -366,6 +366,10 @@ export function createDispatchReplyOperationCoordinator(params: {
     const admitCurrentReplyTurn = async () => {
       try {
         return await admitReplyTurn({
+          runId: params.replyOptions?.runId,
+          stateAcquisitionDeadline: params.replyOptions?.stateAcquisitionDeadline,
+          assertRequestCurrent: () => params.replyOptions?.operatorAuthority?.assertCurrent(),
+          providerReviewAcknowledgment: params.replyOptions?.providerReviewAcknowledgment,
           agentId: params.agentId,
           sessionKey: dispatchOperationSessionKey,
           resolveGatewayContext:
@@ -659,6 +663,11 @@ export function createDispatchReplyOperationCoordinator(params: {
         sendToolResult: (payload) => turnLedger.sendQueued("tool", payload).queued,
         sendBlockReply: (payload) => turnLedger.sendQueued("block", payload).queued,
         sendFinalReply: (payload) => turnLedger.sendQueued("final", payload).queued,
+        ...(params.dispatcher.sendPreparedReply
+          ? {
+              sendPreparedReply: (kind, plan) => turnLedger.sendPreparedQueued(kind, plan).queued,
+            }
+          : {}),
       },
       isAborted: isPreDispatchOperationAborted,
     }),

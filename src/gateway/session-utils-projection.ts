@@ -10,9 +10,9 @@ import { captureRuntimeStateEnvironment } from "../config/paths.js";
 import { resolveSessionStorePathCore, type SessionEntry } from "../config/sessions.js";
 import { resolveConcreteSessionStorePath } from "../config/sessions/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { iterateProjectedAgentRunSessionKeys } from "../infra/agent-run-projection.js";
 import {
   buildProjectedAgentRunIndex,
-  resolveProjectedAgentRunProgressState,
   type ProjectedAgentRunIndex,
 } from "../infra/agent-run-registry.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
@@ -30,8 +30,12 @@ export function buildSessionListRowMetadataContext(params: {
   sessionKeys?: readonly string[];
   subagentRuns?: SessionListRowContext["subagentRuns"];
   projectedAgentRuns?: ProjectedAgentRunIndex;
+  projectedSubagentActivity?: ReadonlySet<string>;
   userProfileIdentityById?: Map<string, SessionActorProfileIdentity | undefined>;
-}): SessionListRowContext {
+}): SessionListRowContext & {
+  projectedAgentRuns: ProjectedAgentRunIndex;
+  projectedSubagentActivity: ReadonlySet<string>;
+} {
   const subagentRuns =
     params.subagentRuns ?? buildSubagentSessionListReadIndex(params.now, params.sessionKeys);
   const projectedAgentRuns = params.projectedAgentRuns ?? buildProjectedAgentRunIndex();
@@ -46,7 +50,9 @@ export function buildSessionListRowMetadataContext(params: {
   return {
     subagentRuns,
     projectedAgentRuns,
-    projectedSubagentActivity: buildProjectedSubagentActivity(subagentRuns, projectedAgentRuns),
+    projectedSubagentActivity:
+      params.projectedSubagentActivity ??
+      buildProjectedSubagentActivity(subagentRuns, projectedAgentRuns),
     subagentRunsByChildSessionKey: subagentRuns.runsByChildSessionKey,
     configuredDefaultModelByAgent: new Map(),
     thinkingFactsByModelRef: new Map(),
@@ -88,19 +94,9 @@ export function buildProjectedSubagentActivity(
   projectedAgentRuns: ProjectedAgentRunIndex,
 ): ReadonlySet<string> {
   const active = new Set<string>();
-  if (
-    projectedAgentRuns.sessionKeys.size === 0 &&
-    projectedAgentRuns.sessionIds.size === 0 &&
-    projectedAgentRuns.ownerlessSessionKeys.size === 0 &&
-    projectedAgentRuns.ownerlessSessionIds.size === 0
-  ) {
-    return active;
-  }
-  for (const [key, run] of subagentRuns.latestRunsByChildSessionKey) {
-    if (
-      resolveProjectedAgentRunProgressState({ sessionKeys: [key], index: projectedAgentRuns }) ===
-      undefined
-    ) {
+  for (const key of iterateProjectedAgentRunSessionKeys(projectedAgentRuns)) {
+    const run = subagentRuns.latestRunsByChildSessionKey.get(key);
+    if (!run) {
       continue;
     }
     let requester = run.requesterSessionKey;
@@ -209,6 +205,7 @@ export function resolveGatewaySessionRuntimeProjection(params: {
   agentId: string;
   sessionKey: string;
   entry?: SessionEntry;
+  preparedAcpMeta?: SessionEntry["acp"] | null;
   rowContext?: SessionListRowContext;
   metadataSnapshot?: PluginMetadataSnapshot;
 }) {
@@ -217,9 +214,11 @@ export function resolveGatewaySessionRuntimeProjection(params: {
   // replacement lifecycle while projecting the original entry.
   const acpMeta =
     entry?.acp ??
-    (entry
-      ? readAcpSessionMetaForEntry({ cfg, sessionKey, agentId, entry })
-      : readAcpSessionMeta({ sessionKey, agentId }));
+    (params.preparedAcpMeta !== undefined
+      ? (params.preparedAcpMeta ?? undefined)
+      : entry
+        ? readAcpSessionMetaForEntry({ cfg, sessionKey, agentId, entry })
+        : readAcpSessionMeta({ sessionKey, agentId }));
   const agentRuntime = resolveCurrentSessionAgentRuntimeMetadata({
     cfg: params.cfg,
     agentScope: { kind: "prepared", agentId: params.agentId },

@@ -18,7 +18,8 @@ import {
 
 type SkillsChangeEvent = NonNullable<Parameters<typeof bumpSkillsSnapshotVersion>[0]>;
 
-const { createdWatchers, watchMock, watchForSkillRoot } = createSkillsWatcherMock();
+const { createdWatchers, watchMock, nativeWatchMock, watchForSkillRoot } =
+  createSkillsWatcherMock();
 
 const pluginSkillsMocks = vi.hoisted(() => ({
   resolvePluginSkillRoots: vi.fn((): Array<{ dir: string; rejectHardlinks: boolean }> => []),
@@ -32,6 +33,9 @@ let fixtureWorkspaceDir: string;
 
 vi.mock("chokidar", () => ({
   default: { watch: watchMock },
+}));
+vi.mock("./refresh-ancestor-native.js", () => ({
+  createNativeSkillsAncestorWatcher: nativeWatchMock,
 }));
 
 vi.mock("../loading/plugin-skills.js", () => ({
@@ -608,6 +612,8 @@ describe("ensureSkillsWatcher", () => {
       // ignoreInitial may suppress all/change events for content found by this scan.
       expect(read()).toEqual([]);
       content.emit("ready");
+      expect(read()).toEqual([]);
+      watchForSkillRoot(logicalRoot).watcher.emit("ready");
       if (lastFailedAncestor) {
         expect(read()).toEqual([]);
         lastFailedAncestor.emit(
@@ -663,6 +669,12 @@ describe("ensureSkillsWatcher", () => {
       }
       const beforeReady = getSkillsSourceVersion(fixtureWorkspaceDir);
       deeper.watcher.emit("ready");
+      expect(getSkillsSourceVersion(fixtureWorkspaceDir)).toBe(beforeReady);
+      watchForSkillRoot(logicalRoot).watcher.emit("ready");
+      if (scan === "error-then-ready") {
+        expect(getSkillsSourceVersion(fixtureWorkspaceDir)).toBe(beforeReady);
+        watchForSkillRoot(logicalRoot).watcher.emit("ready");
+      }
       expect(getSkillsSourceVersion(fixtureWorkspaceDir)).toBeGreaterThan(beforeReady);
 
       const seen: SkillsChangeEvent[] = [];
@@ -917,6 +929,8 @@ describe("ensureSkillsWatcher", () => {
     await vi.advanceTimersByTimeAsync(250);
     expect(seen).toEqual([]);
     replacement.emit("ready");
+    expect(seen).toEqual([]);
+    watchForSkillRoot(sharedB).watcher.emit("ready");
     await vi.advanceTimersByTimeAsync(250);
     expect(seen).toEqual([
       { workspaceDir: fixtureWorkspaceDir, reason: "watch", changedPath: undefined },
@@ -976,6 +990,8 @@ describe("ensureSkillsWatcher", () => {
         await vi.advanceTimersByTimeAsync(250);
         expect(seen).toEqual([]);
         watcher.emit("ready");
+        expect(seen).toEqual([]);
+        watchForSkillRoot(sharedRoot).watcher.emit("ready");
       } else {
         watcher.emit("all", event, changedPath);
       }

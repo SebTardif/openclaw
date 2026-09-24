@@ -1125,7 +1125,10 @@ struct GatewayNodeSessionTests {
             .event(EventFrame(
                 type: "event",
                 event: "node.invoke.cancel",
-                payload: AnyCodable(["invokeId": AnyCodable("terminal-1")]),
+                payload: AnyCodable([
+                    "invokeId": AnyCodable("terminal-1"),
+                    "nodeId": AnyCodable("test-node"),
+                ]),
                 seq: nil,
                 stateversion: nil)),
             socketGeneration: 1)
@@ -1642,7 +1645,10 @@ struct GatewayNodeSessionTests {
                 .event(EventFrame(
                     type: "event",
                     event: "node.invoke.cancel",
-                    payload: AnyCodable(["invokeId": AnyCodable("cancel-before-admission")]),
+                    payload: AnyCodable([
+                        "invokeId": AnyCodable("cancel-before-admission"),
+                        "nodeId": AnyCodable("test-node"),
+                    ]),
                     seq: nil,
                     stateversion: nil)),
                 socketGeneration: 1)
@@ -2375,6 +2381,7 @@ struct GatewayNodeSessionTests {
         let replacementTask = try #require(session.latestTask())
         #expect(replacementTask.sentRequestCount(method: "node.event") == 0)
         #expect(replacementTask.sentRequestCount(method: "approval.get") == 0)
+        await gateway.disconnect()
     }
 
     @Test
@@ -2607,8 +2614,10 @@ struct GatewayNodeSessionTests {
             command: "computer.act",
             paramsJSON: paramsJSON,
             idempotencyKey: idempotencyKey)
-        for _ in 0..<20 {
-            await Task.yield()
+        try await waitUntil("duplicate joins the in-flight receipt") {
+            await gateway.computerReceiptJoinCountForTesting(
+                idempotencyKey: idempotencyKey,
+                receiptScope: "url:ws://example.invalid") == 1
         }
         #expect(await probe.count() == 1)
 
@@ -3012,27 +3021,6 @@ struct GatewayNodeSessionTests {
         }
 
         await gateway.disconnect()
-    }
-
-    @Test(arguments: [false, true])
-    func `gateway handshake deadlines are transport timeouts`(waitingForChallenge: Bool) async throws {
-        let session = FakeGatewayWebSocketSession(
-            helloDelayNanoseconds: waitingForChallenge ? 0 : 60_000_000_000,
-            challenge: (waitingForChallenge ? 60_000_000_000 : 0, "nonce-1"))
-        let gateway = GatewayNodeSession()
-        do {
-            try await gateway.connectForTest(
-                testURL("wss://gateway.example.invalid"),
-                options: operatorConnectOptions(),
-                session: session)
-            Issue.record("A stalled handshake unexpectedly connected")
-        } catch {
-            let failure = error as NSError
-            #expect(failure.domain == NSURLErrorDomain)
-            #expect(failure.code == URLError.timedOut.rawValue)
-        }
-        await gateway.disconnect()
-        #expect(session.latestTask()?.state != .running)
     }
 
     @Test(arguments: [[], ["model-catalog-snapshot", "future-capability"]])
@@ -3774,5 +3762,28 @@ struct GatewayNodeSessionTests {
 
         listenTask.cancel()
         await gateway.disconnect()
+    }
+}
+
+struct GatewayNodeSessionDeadlineTests {
+    @Test(arguments: [false, true])
+    func `gateway handshake deadlines are transport timeouts`(waitingForChallenge: Bool) async throws {
+        let session = FakeGatewayWebSocketSession(
+            helloDelayNanoseconds: waitingForChallenge ? 0 : 60_000_000_000,
+            challenge: (waitingForChallenge ? 60_000_000_000 : 0, "nonce-1"))
+        let gateway = GatewayNodeSession()
+        do {
+            try await gateway.connectForTest(
+                testURL("wss://gateway.example.invalid"),
+                options: operatorConnectOptions(),
+                session: session)
+            Issue.record("A stalled handshake unexpectedly connected")
+        } catch {
+            let failure = error as NSError
+            #expect(failure.domain == NSURLErrorDomain)
+            #expect(failure.code == URLError.timedOut.rawValue)
+        }
+        await gateway.disconnect()
+        #expect(session.latestTask()?.state != .running)
     }
 }

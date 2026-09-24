@@ -6,6 +6,7 @@ import { nothing } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred as deferred } from "../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
+import type { AgentsListResult } from "../api/types.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../app/context.ts";
 import { createGatewayMetadataObserver } from "../app/gateway-observers.ts";
 import { clawhubVerdictKey } from "../lib/skills/index.ts";
@@ -519,10 +520,8 @@ describe("gateway source replacement across reconnect with a reused client", () 
       return {};
     });
     const client = { request } as unknown as GatewayBrowserClient;
-    const agentsList = { defaultId: "main", agents: [{ id: "main" }] };
     const context = contextWithClient(client, {
       connected: true,
-      agentsList,
       selectedAgentId: "main",
     });
     const staleData = { authStatus: { ts: 1, providers: [] } } as unknown as ModelProvidersData;
@@ -761,7 +760,6 @@ describe("gateway source replacement across reconnect with a reused client", () 
       gateway: context.gateway,
       gatewaySnapshot: { ...context.gateway.snapshot },
       agents: context.agents,
-      agentsList,
       selectedAgentId: "main",
       selectionIntentRevision: context.settingsAgentSelection.intentRevision,
       report: null,
@@ -819,19 +817,16 @@ describe("gateway source replacement across reconnect with a reused client", () 
     const page = createPage("openclaw-sessions-page", contextWithClient(client)) as TestPage & {
       result: unknown;
       selectedKeys: Set<string>;
-      checkpointItemsByKey: Record<string, unknown>;
     };
     document.body.append(page);
     await page.updateComplete;
     page.result = { sessions: [{ key: "old" }] };
     page.selectedKeys = new Set(["old"]);
-    page.checkpointItemsByKey = { old: [{}] };
 
     await replaceContext(page, client);
 
     expect(page.result).toBeNull();
     expect(page.selectedKeys.size).toBe(0);
-    expect(page.checkpointItemsByKey).toEqual({});
   });
 
   it("clears usage loaded by the previous provider", async () => {
@@ -898,7 +893,7 @@ describe("gateway source replacement across reconnect with a reused client", () 
   });
 
   it("discards an agent list from a replaced skills source that reuses its client", async () => {
-    const pending = deferred<SkillsRouteData["agentsList"]>();
+    const pending = deferred<AgentsListResult | null>();
     const ensureList = vi.fn(() => pending.promise);
     const request = vi.fn(async () => emptySkillLibrary);
     const client = { request } as unknown as GatewayBrowserClient;
@@ -915,7 +910,7 @@ describe("gateway source replacement across reconnect with a reused client", () 
       mainKey: "agent:fresh:main",
       scope: "all",
       agents: [{ id: "fresh" }],
-    } as unknown as NonNullable<SkillsRouteData["agentsList"]>;
+    } as unknown as AgentsListResult;
     await replaceContext(page, client, { connected: true, agentsList: replacementAgents });
 
     pending.resolve({
@@ -923,7 +918,7 @@ describe("gateway source replacement across reconnect with a reused client", () 
       mainKey: "agent:stale:main",
       scope: "all",
       agents: [{ id: "stale" }],
-    } as unknown as NonNullable<SkillsRouteData["agentsList"]>);
+    } as unknown as AgentsListResult);
     await load;
 
     expect(page.context.agents.state.agentsList).toBe(replacementAgents);

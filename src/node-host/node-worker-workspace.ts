@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
@@ -52,6 +51,11 @@ import {
   type NodeWorkerWorkspaceSession as WorkspaceSession,
 } from "./node-worker-workspace-identity.js";
 import { NodeWorkerWorkspaceProcesses } from "./node-worker-workspace-processes.js";
+import {
+  listOwnedEntries,
+  listOwnedDirectories,
+  removeIfEmpty,
+} from "./node-worker-workspace-retention.js";
 import { runNodeWorkerWorkspaceSeed } from "./node-worker-workspace-seeds.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -59,37 +63,6 @@ const WORKSPACE_RETENTION_DELETE_LIMIT = 256;
 const ENVIRONMENT_HASH_PATTERN = /^[a-f0-9]{16}$/u;
 const SESSION_HASH_PATTERN = /^[a-f0-9]{32}$/u;
 const MANIFEST_FILE_PATTERN = /^[a-f0-9]{64}\.json$/u;
-
-async function listOwnedEntries(parent: string): Promise<fs.Dirent[]> {
-  try {
-    return (await fsp.readdir(parent, { withFileTypes: true })).toSorted((left, right) =>
-      left.name.localeCompare(right.name),
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return [];
-    }
-    throw error;
-  }
-}
-
-async function listOwnedDirectories(parent: string): Promise<string[]> {
-  return (await listOwnedEntries(parent))
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
-    .map((entry) => entry.name);
-}
-
-async function removeIfEmpty(target: string, signal?: AbortSignal): Promise<void> {
-  signal?.throwIfAborted();
-  try {
-    await fsp.rmdir(target);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") {
-      throw error;
-    }
-  }
-}
 
 /** Runs trusted worker transport commands only from a node-owned session workspace. */
 export class NodeWorkerWorkspaceRuntime {
@@ -143,10 +116,10 @@ export class NodeWorkerWorkspaceRuntime {
     return await this.prepared.prepare(input, signal);
   }
 
-  acquirePreparedWorkspace(
+  async acquirePreparedWorkspace(
     request: Omit<NodeWorkerManagedWorkspaceRequest, "sessionKey"> & { sessionKey?: string },
   ) {
-    if (!this.prepared.store?.find(request.environmentId)) {
+    if (!(await this.prepared.store?.find(request.environmentId))) {
       if (isPathInside(this.prepared.root, request.workspaceDir)) {
         throw new Error("INVALID_REQUEST: prepared workspace binding is missing");
       }
@@ -155,16 +128,28 @@ export class NodeWorkerWorkspaceRuntime {
     if (!request.sessionKey) {
       throw new Error("INVALID_REQUEST: prepared workspace acquisition requires its bound session");
     }
-    return this.acquireManagedWorkspace({ ...request, sessionKey: request.sessionKey });
+    return this.acquireManagedWorkspaceAsync({ ...request, sessionKey: request.sessionKey });
   }
 
-  /** Claims an existing identity-derived workspace against concurrent retention. */
-  acquireManagedWorkspace(request: NodeWorkerManagedWorkspaceRequest): {
-    workspaceDir: string;
-    homeDir?: string;
-    release: () => void;
-  } {
-    const prepared = this.prepared.store?.find(request.environmentId);
+  /** @deprecated Retained for the public synchronous plugin workspace capability. */
+  acquireManagedWorkspace(request: NodeWorkerManagedWorkspaceRequest) {
+    const prepared = this.prepared.store?.findSync(request.environmentId);
+    return this.acquireWorkspaceIdentity(request, prepared);
+  }
+
+  async acquireManagedWorkspaceAsync(
+    request: NodeWorkerManagedWorkspaceRequest,
+  ): Promise<{ workspaceDir: string; homeDir?: string; release: () => void }> {
+    const captured = { ...request };
+    return this.prepared.acquire(captured.environmentId, (row) =>
+      this.acquireWorkspaceIdentity(captured, row),
+    );
+  }
+
+  private acquireWorkspaceIdentity(
+    request: NodeWorkerManagedWorkspaceRequest,
+    prepared?: import("./node-worker-prepared-workspace-store.js").NodeWorkerPreparedWorkspaceRow,
+  ) {
     const identity = prepared
       ? resolveNodePreparedWorkspaceIdentity(this.prepared.root, prepared, request)
       : resolveNodeManagedWorkspaceIdentity(this.root, request);
@@ -208,7 +193,7 @@ export class NodeWorkerWorkspaceRuntime {
   private currentLocalProtection(
     gatewayNamespace: string,
     retainedDuringPass: ReadonlySet<string>,
-    listNonterminal: () => readonly NodeWorkerWorkspaceLaunchReference[],
+    launches: readonly NodeWorkerWorkspaceLaunchReference[],
   ): Set<string> {
     const protectedGenerations = new Set(retainedDuringPass);
     for (const generationKey of this.activeWorkspaceOperations.keys()) {
@@ -216,7 +201,7 @@ export class NodeWorkerWorkspaceRuntime {
         protectedGenerations.add(generationKey);
       }
     }
-    for (const launch of listNonterminal()) {
+    for (const launch of launches) {
       if (launch.gatewayNamespace === gatewayNamespace) {
         protectedGenerations.add(launchGenerationKey(launch));
       }
@@ -252,7 +237,7 @@ export class NodeWorkerWorkspaceRuntime {
 
   async applyRetainSnapshot(
     input: NodeWorkerWorkspaceRetainInput,
-    listNonterminal: () => readonly NodeWorkerWorkspaceLaunchReference[],
+    listNonterminal: () => Promise<readonly NodeWorkerWorkspaceLaunchReference[]>,
     signal?: AbortSignal,
   ): Promise<NodeWorkerWorkspaceRetainResult> {
     return await this.retainQueue.enqueue(input.gatewayNamespace, async () => {
@@ -300,19 +285,28 @@ export class NodeWorkerWorkspaceRuntime {
     gatewayNamespace: string;
     snapshot: NodeWorkerWorkspaceRetainSnapshot;
     retainedDuringPass: ReadonlySet<string>;
-    listNonterminal: () => readonly NodeWorkerWorkspaceLaunchReference[];
+    listNonterminal: () => Promise<readonly NodeWorkerWorkspaceLaunchReference[]>;
     signal?: AbortSignal;
   }): Promise<{ deleted: number; hasMore: boolean }> {
+    let launches: readonly NodeWorkerWorkspaceLaunchReference[] = [];
+    const refreshLaunches = async () => {
+      launches = await params.listNonterminal();
+    };
+    const currentProtection = () =>
+      this.currentLocalProtection(params.gatewayNamespace, params.retainedDuringPass, launches);
     const retired = await this.prepared.collect(
       params.gatewayNamespace,
       (generationKey) =>
         params.snapshot.retainedGenerations.has(generationKey) ||
-        this.currentLocalProtection(
-          params.gatewayNamespace,
-          params.retainedDuringPass,
-          params.listNonterminal,
-        ).has(generationKey),
+        currentProtection().has(generationKey),
       params.signal,
+      refreshLaunches,
+      (generationKey) => {
+        this.deletingWorkspaceGenerations.add(generationKey);
+        return () => {
+          this.deletingWorkspaceGenerations.delete(generationKey);
+        };
+      },
     );
     for (const generationKey of retired.generationKeys) {
       this.latestTransferredManifest.delete(generationKey);
@@ -332,11 +326,8 @@ export class NodeWorkerWorkspaceRuntime {
         ) {
           return;
         }
-        const localProtection = this.currentLocalProtection(
-          params.gatewayNamespace,
-          params.retainedDuringPass,
-          params.listNonterminal,
-        );
+        await refreshLaunches();
+        const localProtection = currentProtection();
         const entries = await listOwnedEntries(session.sessionRoot);
         const existingGenerations = new Set<number>();
         for (const entry of entries) {
@@ -382,31 +373,26 @@ export class NodeWorkerWorkspaceRuntime {
             return;
           }
           // A launch or workspace command can claim this generation while filesystem reads await.
-          if (
-            this.currentLocalProtection(
-              params.gatewayNamespace,
-              params.retainedDuringPass,
-              params.listNonterminal,
-            ).has(candidate.generationKey)
-          ) {
+          await refreshLaunches();
+          if (currentProtection().has(candidate.generationKey)) {
             continue;
           }
           if (
-            await removeNodeWorkerWorkspaceEntry(this.root, candidate.path, "directory", () => {
-              params.signal?.throwIfAborted();
-              if (
-                this.currentLocalProtection(
-                  params.gatewayNamespace,
-                  params.retainedDuringPass,
-                  params.listNonterminal,
-                ).has(candidate.generationKey)
-              ) {
-                return false;
-              }
-              // No claim may begin after this final check and before recursive removal settles.
-              this.deletingWorkspaceGenerations.add(candidate.generationKey);
-              return true;
-            }).finally(() => this.deletingWorkspaceGenerations.delete(candidate.generationKey))
+            await removeNodeWorkerWorkspaceEntry(
+              this.root,
+              candidate.path,
+              "directory",
+              () => {
+                params.signal?.throwIfAborted();
+                if (currentProtection().has(candidate.generationKey)) {
+                  return false;
+                }
+                // No claim may begin after this final check and before recursive removal settles.
+                this.deletingWorkspaceGenerations.add(candidate.generationKey);
+                return true;
+              },
+              refreshLaunches,
+            ).finally(() => this.deletingWorkspaceGenerations.delete(candidate.generationKey))
           ) {
             deleted += 1;
             if (parseGenerationName(path.basename(candidate.path)) !== undefined) {
@@ -417,13 +403,8 @@ export class NodeWorkerWorkspaceRuntime {
         }
         const sessionPrefix = `${params.gatewayNamespace}/${session.environmentHash}/${session.sessionHash}/`;
         const hasCurrentLocalProtection = () =>
-          [
-            ...this.currentLocalProtection(
-              params.gatewayNamespace,
-              params.retainedDuringPass,
-              params.listNonterminal,
-            ),
-          ].some((key) => key.startsWith(sessionPrefix));
+          [...currentProtection()].some((key) => key.startsWith(sessionPrefix));
+        await refreshLaunches();
         const hasLocalProtection = hasCurrentLocalProtection();
         const retainedManifestRefs = currentSnapshot.manifestsBySession.get(
           workspaceSessionKey(session.environmentHash, session.sessionHash),
@@ -461,6 +442,7 @@ export class NodeWorkerWorkspaceRuntime {
                   params.signal?.throwIfAborted();
                   return !hasCurrentLocalProtection();
                 },
+                refreshLaunches,
               )
             ) {
               deleted += 1;
@@ -480,6 +462,7 @@ export class NodeWorkerWorkspaceRuntime {
         const hasAuthoritativeRetain = [...currentSnapshot.retainedGenerations].some((key) =>
           key.startsWith(sessionPrefix),
         );
+        await refreshLaunches();
         if (!hasGenerationOrArtifact && !hasAuthoritativeRetain && !hasCurrentLocalProtection()) {
           const metadataRoot = path.join(session.sessionRoot, ".openclaw-worker");
           if (deleted >= WORKSPACE_RETENTION_DELETE_LIMIT) {
@@ -487,10 +470,16 @@ export class NodeWorkerWorkspaceRuntime {
             return;
           }
           if (
-            await removeNodeWorkerWorkspaceEntry(this.root, metadataRoot, "directory", () => {
-              params.signal?.throwIfAborted();
-              return !hasCurrentLocalProtection();
-            })
+            await removeNodeWorkerWorkspaceEntry(
+              this.root,
+              metadataRoot,
+              "directory",
+              () => {
+                params.signal?.throwIfAborted();
+                return !hasCurrentLocalProtection();
+              },
+              refreshLaunches,
+            )
           ) {
             deleted += 1;
           }
@@ -513,7 +502,7 @@ export class NodeWorkerWorkspaceRuntime {
   ): Promise<NodeWorkerWorkspaceExecResult> {
     const environmentHash = hashPathComponent(input.environmentId, 16);
     const sessionHash = hashPathComponent(input.sessionId, 32);
-    const registered = this.prepared.store?.find(input.environmentId);
+    const registered = await this.prepared.store?.find(input.environmentId);
     const sessionRootCandidate = registered
       ? path.dirname(registered.workspace_dir)
       : path.join(this.root, input.gatewayNamespace, "workspaces", environmentHash, sessionHash);
@@ -530,7 +519,8 @@ export class NodeWorkerWorkspaceRuntime {
     try {
       return await serializeNodeWorkerWorkspace(sessionRootCandidate, async () => {
         signal?.throwIfAborted();
-        const prepared = this.prepared.store?.find(input.environmentId);
+        const prepared = await this.prepared.store?.find(input.environmentId);
+        signal?.throwIfAborted();
         if (
           input.preparationKey !== undefined &&
           prepared?.preparation_key !== input.preparationKey

@@ -1,4 +1,4 @@
-import { vi } from "vitest";
+import { onTestFinished, vi } from "vitest";
 import type {
   SessionCatalogPullRequestSummary,
   SessionsCatalogListResult,
@@ -22,6 +22,7 @@ import type { SessionDataController } from "../components/session-data-controlle
 import type { SessionOrganizerController } from "../components/session-organizer-controller.ts";
 import type { ContextualSidebar } from "../components/sidebar-context-state.ts";
 import type { AgentIdentityCapability } from "../lib/agents/identity.ts";
+import type { GatewayStatus } from "../lib/gateway-status.ts";
 import {
   createSessionCapability,
   type SessionCapability,
@@ -59,9 +60,7 @@ export type SidebarLifecycleState = HTMLElement & {
   router?: AppSidebarSessionNavigationElement["router"];
   enabledRouteIds?: readonly NavigationRouteId[];
   connected: boolean;
-  offline: boolean;
-  restartPending: boolean;
-  queuedOutboxCount: number;
+  connectionStatus: GatewayStatus | null;
   lastError: string | null;
   outboxAttentionCountForSession: (sessionKey: string) => number;
   hasSessionDraft: (sessionKey: string) => boolean;
@@ -311,6 +310,7 @@ export function createSessionsHarness(agentId: string, keys: string[]) {
     return true;
   });
   let scopedSessions: SessionCapability | null = null;
+  onTestFinished(() => scopedSessions?.dispose());
   const assignOwner = vi.fn<SessionCapability["assignOwner"]>(async (key, owner, options) => {
     const assigned = scopedSessions ? await scopedSessions.assignOwner(key, owner, options) : null;
     if (!assigned || !state.result) {
@@ -614,7 +614,32 @@ export async function mountSidebarContext(
     sidebarWithPreloads.sidebarMenus.preloadMenuRenderer(),
   ]);
   await sidebar.updateComplete;
+  if (sidebar.querySelector("openclaw-channel-avatar")) {
+    await customElements.whenDefined("openclaw-channel-avatar");
+    const channelAvatars = sidebar.querySelectorAll<
+      HTMLElement & { updateComplete: Promise<boolean> }
+    >("openclaw-channel-avatar");
+    await Promise.all(Array.from(channelAvatars, (avatar) => avatar.updateComplete));
+  }
   return { provider, sidebar, context };
+}
+
+export async function mountSessionCatalogSidebar(client: GatewayBrowserClient) {
+  const gateway = createGatewayHarness(client);
+  gateway.publish({
+    hello: {
+      features: { methods: ["sessions.catalog.list"], events: ["sessions.catalog.changed"] },
+    } as ApplicationGatewaySnapshot["hello"],
+  });
+  const { sidebar } = await mountSidebar(
+    gateway.gateway,
+    createSessions("main", ["agent:main:main"]),
+  );
+  sidebar.connected = true;
+  await sidebar.updateComplete;
+  await vi.advanceTimersByTimeAsync(0);
+  await sidebar.updateComplete;
+  return { gateway, sidebar };
 }
 
 export const TWO_AGENTS = {

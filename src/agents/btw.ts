@@ -42,13 +42,13 @@ import { EmbeddedBlockChunker, type BlockReplyChunking } from "./embedded-agent-
 import { resolveModelAsync } from "./embedded-agent-runner/model.js";
 import { getActiveEmbeddedRunSnapshot } from "./embedded-agent-runner/runs.js";
 import { resolveEmbeddedAgentStream } from "./embedded-agent-runner/stream-resolution.js";
+import { resolvePluginHarnessPolicyToolsAllow } from "./harness/execution-environment.js";
 import { createAgentHarnessHostCapabilities } from "./harness/host-capability.js";
 import { resolveAgentHarnessOwnerPluginId } from "./harness/registry.js";
 import { ensureSelectedAgentHarnessPlugin } from "./harness/runtime-plugin.js";
 import type { AgentHarnessPreparedModelProvider } from "./harness/selection-decision.js";
 import {
   resolveAvailableAgentHarnessPolicy,
-  resolvePluginHarnessPolicyToolsAllow,
   selectAgentHarness,
   selectAgentHarnessForPreparedModelProviders,
 } from "./harness/selection.js";
@@ -411,7 +411,7 @@ async function resolveRuntimeModel(params: {
   abortSignal?: AbortSignal;
   provider: string;
   model: string;
-  agentId?: string;
+  agentId: string;
   sessionEntry?: StoredSessionEntry;
   sessionStore?: Record<string, StoredSessionEntry>;
   sessionKey?: string;
@@ -1018,10 +1018,10 @@ export async function runBtwSideQuestion(
               params.messageThreadId === undefined ? undefined : String(params.messageThreadId),
           },
           pluginId: resolveAgentHarnessOwnerPluginId(selectedHarness),
+          nativeModelPolicySupport: selectedHarness.nativeModelPolicySupport,
         });
         const sideParams = {
           ...hostAttempt,
-          images: params.images,
           hostCapabilities: host.capabilities,
           sandbox,
           provider: runtimeModel.provider,

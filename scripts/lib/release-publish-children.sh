@@ -28,11 +28,11 @@ print_release_resume_command() {
 }
 
 is_stable_release() {
-  [[ "${RELEASE_TAG}" != *"-alpha."* && "${RELEASE_TAG}" != *"-beta."* ]]
+  [[ "${RELEASE_NPM_DIST_TAG}" != "extended-stable" && "${RELEASE_TAG}" != *"-alpha."* && "${RELEASE_TAG}" != *"-beta."* ]]
 }
 
 is_android_release() {
-  [[ "${RELEASE_TAG}" =~ ^v[0-9]{4}\.[1-9][0-9]*\.[1-9][0-9]*(-[1-9][0-9]*)?$ ]]
+  [[ "${RELEASE_NPM_DIST_TAG}" != "extended-stable" && "${RELEASE_TAG}" =~ ^v[0-9]{4}\.[1-9][0-9]*\.[1-9][0-9]*(-[1-9][0-9]*)?$ ]]
 }
 
 resolve_child_workflow_ref() {
@@ -381,6 +381,7 @@ wait_for_run() {
   local started_job="${4:-}"
   local approve_environments="${5:-true}"
   local approved_environment="${6:-}"
+  local wait_for_terminal="${7:-false}"
   local status conclusion url updated_at created_at duration_seconds duration_label last_state failed_json approval_status run_json jobs_json started_jobs state
 
   if ! verify_child_run_sha "$workflow" "$run_id" "$expected_sha"; then
@@ -399,8 +400,10 @@ wait_for_run() {
     if [[ -n "${failed_json}" ]] && jq -e 'length > 0' <<< "$failed_json" >/dev/null; then
       echo "${workflow} has failed jobs before the workflow completed: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${run_id}" >&2
       jq '.[] | {name, conclusion, url}' <<< "$failed_json" >&2 || true
-      print_failed_run_summary "${run_id}"
-      return 1
+      if [[ "$wait_for_terminal" != "true" ]]; then
+        print_failed_run_summary "${run_id}"
+        return 1
+      fi
     fi
     if [[ -n "${started_job}" && -n "${jobs_json}" ]]; then
       started_jobs="$(jq -c --arg name "${started_job}" '[.[] | select(.name == $name)]' <<< "${jobs_json}")" || return 1
@@ -765,7 +768,7 @@ write_clawhub_runtime_state() {
   local output_path="$1"
   local force_skip_clawhub=false
   # Verification and release notes project the same joined child outcomes.
-  if [[ "${clawhub_failed}" != "0" ]]; then
+  if [[ "${RELEASE_NPM_DIST_TAG}" == "extended-stable" || "${clawhub_failed}" != "0" ]]; then
     force_skip_clawhub=true
   fi
   node --import tsx \
@@ -783,6 +786,7 @@ render_github_release_notes() {
   local output_file="$1"
   local verification_file="${2:-}"
   local metadata_file="${3:-}"
+  local regular_stable_version=""
   local -a render_args=(
     node --import tsx "${GITHUB_WORKSPACE}/.release-harness/scripts/render-github-release-notes.mts"
     --root "${GITHUB_WORKSPACE}" --ref "${TARGET_SHA}"
@@ -796,6 +800,10 @@ render_github_release_notes() {
   fi
   if [[ -n "${metadata_file}" ]]; then
     render_args+=(--metadata-output "${metadata_file}")
+  fi
+  if [[ "${RELEASE_NPM_DIST_TAG:-}" == "extended-stable" ]]; then
+    regular_stable_version="$(jq -er '.version | strings' "${GITHUB_WORKSPACE}/.release-harness/package.json")"
+    render_args+=(--regular-stable-version "${regular_stable_version}")
   fi
   "${render_args[@]}"
 }

@@ -111,40 +111,25 @@ describe("systemd gateway identity (openclaw#119648)", () => {
     expect(result).toBeNull();
   });
 
-  it("default profile does not adopt an unrelated named-profile marker unit", async () => {
+  it("keeps Linux profile unit names case-sensitive", async () => {
     mockUnitFileLayout({ system: false });
     findSystemGatewayServicesMock.mockResolvedValueOnce([
       {
         platform: "linux",
-        label: "openclaw-darlene.service",
-        detail: "unit: /etc/systemd/system/openclaw-darlene.service",
+        label: "openclaw-gateway-lisa.service",
+        detail: "unit: /etc/systemd/system/openclaw-gateway-lisa.service",
         scope: "system",
         marker: "openclaw",
       },
     ]);
     const result = await findInstalledSystemdGatewayScope({
       HOME: TEST_MANAGED_HOME,
-      OPENCLAW_PROFILE: "default",
+      OPENCLAW_PROFILE: "Lisa",
     });
     expect(result).toBeNull();
   });
 
-  it("default profile without OPENCLAW_PROFILE also refuses unrelated marker units", async () => {
-    mockUnitFileLayout({ system: false });
-    findSystemGatewayServicesMock.mockResolvedValueOnce([
-      {
-        platform: "linux",
-        label: "openclaw-darlene.service",
-        detail: "unit: /etc/systemd/system/openclaw-darlene.service",
-        scope: "system",
-        marker: "openclaw",
-      },
-    ]);
-    const result = await findInstalledSystemdGatewayScope({ HOME: TEST_MANAGED_HOME });
-    expect(result).toBeNull();
-  });
-
-  it("default profile does not adopt arbitrary custom marker units without override", async () => {
+  it("does not let an isolated home adopt a custom system unit", async () => {
     mockUnitFileLayout({ system: false });
     findSystemGatewayServicesMock.mockResolvedValueOnce([
       {
@@ -221,6 +206,28 @@ describe("systemd gateway identity (openclaw#119648)", () => {
     expect(result?.unitName).toBe("openclaw-gateway-lisa.service");
     expect(result?.unitPath).toContain("/.config/systemd/user/openclaw-gateway-lisa.service");
   });
+
+  it.each(["my-gateway@.service", "my-gateway@gateway.service"])(
+    "does not expand an explicit plain unit into %s",
+    async (label) => {
+      mockUnitFileLayout({ system: false });
+      findSystemGatewayServicesMock.mockResolvedValueOnce([
+        {
+          platform: "linux",
+          label,
+          detail: `unit: /etc/systemd/system/${label}`,
+          scope: "system",
+          marker: "openclaw",
+        },
+      ]);
+      await expect(
+        findInstalledSystemdGatewayScope({
+          HOME: TEST_MANAGED_HOME,
+          OPENCLAW_SYSTEMD_UNIT: "my-gateway",
+        }),
+      ).resolves.toBeNull();
+    },
+  );
 
   it("explicit instance override resolves a template-only system install", async () => {
     mockUnitFileLayout({ system: false });

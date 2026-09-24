@@ -13,7 +13,9 @@ import {
   matchesScope,
   taskIdsInScope,
   type PendingTaskRegistryMutation,
+  type TaskRegistryReadIdentity,
 } from "./task-registry.process-state.js";
+import type { TaskRegistryStore } from "./task-registry.store.js";
 import type {
   TaskRegistryMutationScope,
   TaskRegistryStoreSnapshot,
@@ -26,8 +28,10 @@ export type TaskRegistryWorkerMutationContext = {
   admission: OpenClawStateDatabaseReadAdmission;
   publicationRecords: () => ReadonlyMap<string, TaskRecord>;
   readEventTarget?: () => TaskAgentEventTarget | undefined;
-  /** Only a producer whose write contract preserves task routing, access, and detail. */
-  readIdentity?: "preserved";
+  /** Producer-owned identity writes; canonical readback and discovery retain the full scope. */
+  readIdentity?: TaskRegistryReadIdentity;
+  /** Prepare current rows before this mutation invalidates their projection. */
+  prepare?: () => Promise<void>;
   taskRowsWritten?: () => boolean;
   beforeObservers?: (assertCurrent: () => void) => Promise<void>;
   recoverPublication?: (snapshot: TaskRegistryStoreSnapshot) => TaskRecord | undefined;
@@ -62,21 +66,23 @@ function captureTaskRegistryWorkerSnapshot(
   return captured;
 }
 
-export function createTaskRegistryPublicationRecovery(
+function createTaskRegistryPublicationRecovery(
   pending: PendingTaskRegistryMutation,
   recover: (snapshot: TaskRegistryStoreSnapshot) => TaskRecord | undefined,
 ) {
   const witness = { writtenTaskIds: new Set<string>(), replaced: false };
   pending.recoveryWitness = witness;
   let expected: TaskRecord | undefined;
+  const superseded = new Error("Task publication was superseded by a current write");
   return {
+    isSuperseded: (error: unknown) => error === superseded,
     begin() {
       witness.writtenTaskIds.clear();
       witness.replaced = false;
     },
-    recover,
-    bindExpected(record: TaskRecord | undefined) {
-      expected = record;
+    recover: (snapshot: TaskRegistryStoreSnapshot) => {
+      expected = recover(snapshot);
+      return expected;
     },
     assertCurrent() {
       if (!expected) {
@@ -89,7 +95,7 @@ export function createTaskRegistryPublicationRecovery(
         !current ||
         !isEquivalentTaskRecord(current, expected)
       ) {
-        throw new Error("Task publication was superseded by a current write");
+        throw superseded;
       }
     },
   };
@@ -292,7 +298,12 @@ export function claimTaskRegistryPublication(
     ready: new Set(),
     invalidated: new Set(),
   };
+  const recovery = pending.recoveryWitness;
   for (const [taskId, record] of pending.publication.records) {
+    // Competing writes can precede the receipt's publication claim.
+    if (recovery?.replaced || recovery?.writtenTaskIds.has(taskId)) {
+      pending.publication.invalidated.add(taskId);
+    }
     const previous = pending.published.get(taskId);
     for (const other of getTaskRegistryProcessState().projection.pending) {
       if (
@@ -309,11 +320,29 @@ export function claimTaskRegistryPublication(
 }
 
 export function createPendingTaskRegistryMutation(
-  scope: TaskRegistryMutationScope,
+  {
+    scope,
+    admission,
+    readIdentity,
+    recoverPublication,
+  }: Pick<
+    TaskRegistryWorkerMutationContext,
+    "scope" | "admission" | "readIdentity" | "recoverPublication"
+  >,
+  store: TaskRegistryStore,
   readEventTarget?: () => TaskAgentEventTarget | undefined,
-): PendingTaskRegistryMutation {
+) {
+  const readSettlement = readIdentity === "preserved" ? undefined : createDeferredCore();
   const pending: PendingTaskRegistryMutation = {
     scope,
+    readIdentity,
+    ...(readSettlement && {
+      readSettlement: {
+        databaseKey: admission.identity.key,
+        store,
+        promise: readSettlement.promise,
+      },
+    }),
     published: new Map(
       Array.from(currentTasksInScope(scope), (task) => [
         task.taskId,
@@ -350,5 +379,8 @@ export function createPendingTaskRegistryMutation(
         : undefined;
     };
   }
-  return pending;
+  const recovery = recoverPublication
+    ? createTaskRegistryPublicationRecovery(pending, recoverPublication)
+    : undefined;
+  return { pending, recovery, settle: readSettlement?.resolve };
 }

@@ -15,6 +15,7 @@ import {
   resolveGatewaySupervisorLogPaths,
 } from "../../daemon/restart-logs.js";
 import { buildGatewayRuntimeRecoveryHints } from "../../daemon/runtime-hints.js";
+import { SERVICE_RUNTIME_AUDIT_CODES } from "../../daemon/service-audit-runtime.js";
 import { formatServiceInspectionReason } from "../../daemon/service-inspection-error.js";
 import { isSystemdStartLimitHit } from "../../daemon/service-runtime.js";
 import {
@@ -156,48 +157,41 @@ export function printDaemonStatus(status: DaemonStatus, opts: { json: boolean; d
       const detail = issue.detail ? ` (${issue.detail})` : "";
       defaultRuntime.error(`${warnText("Service config issue:")} ${issue.message}${detail}`);
     }
+    const runtimeNeedsAttention = service.configAudit.issues.some((issue) =>
+      Object.values(SERVICE_RUNTIME_AUDIT_CODES).some((code) => code === issue.code),
+    );
     const recommendation = managerUnavailable
       ? `Run "${formatCliCommand("openclaw doctor")}" for guidance about this recorded service unit.`
       : (installBlock ??
-        `Recommendation: run "${formatCliCommand("openclaw doctor")}" interactively for guided checks, or reinstall with "${reinstallCommand}".`);
+        (runtimeNeedsAttention
+          ? `Recommendation: run "${formatCliCommand("openclaw doctor")}" interactively to resolve the runtime findings before reinstalling. Reinstalling alone may select the same runtime.`
+          : `Recommendation: run "${formatCliCommand("openclaw doctor")}" interactively for guided checks, or reinstall with "${reinstallCommand}".`));
     defaultRuntime.error(warnText(recommendation));
   }
 
   if (status.config) {
-    const cliCfg = `${shortenHomePath(status.config.cli.path)}${status.config.cli.exists ? "" : " (missing)"}${status.config.cli.valid ? "" : " (invalid)"}`;
-    defaultRuntime.log(`${label("Config (cli):")} ${infoText(cliCfg)}`);
-    if (!status.config.cli.valid && status.config.cli.issues?.length) {
-      for (const issue of status.config.cli.issues.slice(0, 5)) {
-        defaultRuntime.error(
-          `${errorText("Config issue:")} ${formatConfigIssueLine(issue, "", { normalizeRoot: true })}`,
-        );
+    for (const [kind, config] of [
+      ["cli", status.config.cli],
+      ["service", status.config.daemon],
+    ] as const) {
+      if (!config) {
+        continue;
       }
-    }
-    if (status.config.cli.warnings?.length) {
-      defaultRuntime.error(warnText("Config warnings:"));
-      for (const warning of status.config.cli.warnings.slice(0, 5)) {
-        defaultRuntime.error(
-          warnText(formatConfigIssueLine(warning, "-", { normalizeRoot: true })),
-        );
-      }
-    }
-    if (status.config.daemon) {
-      const daemonCfg = `${shortenHomePath(status.config.daemon.path)}${status.config.daemon.exists ? "" : " (missing)"}${status.config.daemon.valid ? "" : " (invalid)"}`;
-      defaultRuntime.log(`${label("Config (service):")} ${infoText(daemonCfg)}`);
-      if (!status.config.daemon.valid && status.config.daemon.issues?.length) {
-        for (const issue of status.config.daemon.issues.slice(0, 5)) {
+      const configPath = `${shortenHomePath(config.path)}${config.exists ? "" : " (missing)"}${config.valid ? "" : " (invalid)"}`;
+      defaultRuntime.log(`${label(`Config (${kind}):`)} ${infoText(configPath)}`);
+      if (!config.valid && config.issues?.length) {
+        const issueLabel = kind === "cli" ? "Config issue:" : "Service config issue:";
+        for (const issue of config.issues.slice(0, 5)) {
           defaultRuntime.error(
-            `${errorText("Service config issue:")} ${formatConfigIssueLine(issue, "", { normalizeRoot: true })}`,
+            `${errorText(issueLabel)} ${formatConfigIssueLine(issue, "", { normalizeRoot: true })}`,
           );
         }
       }
-      if (status.config.daemon !== status.config.cli && status.config.daemon.warnings?.length) {
+      if (config.warnings?.length && (kind === "cli" || config !== status.config.cli)) {
         const warningsLabel =
-          status.config.daemon.path === status.config.cli.path
-            ? "Config warnings:"
-            : "Service config warnings:";
+          config.path === status.config.cli.path ? "Config warnings:" : "Service config warnings:";
         defaultRuntime.error(warnText(warningsLabel));
-        for (const warning of status.config.daemon.warnings.slice(0, 5)) {
+        for (const warning of config.warnings.slice(0, 5)) {
           defaultRuntime.error(
             warnText(formatConfigIssueLine(warning, "-", { normalizeRoot: true })),
           );
@@ -251,12 +245,7 @@ export function printDaemonStatus(status: DaemonStatus, opts: { json: boolean; d
     spacer();
   }
 
-  printDaemonStatusVersions(
-    status,
-    { label, infoText, warnText },
-    installBlock ??
-      `Compare the service entrypoint with \`which openclaw\`, then reinstall the service from the install you want with \`${reinstallCommand}\`.`,
-  );
+  printDaemonStatusVersions(status, { label, infoText, warnText });
 
   const runtimeLine = formatRuntimeStatus(
     service.inspectionReason ? { ...service.runtime, detail: undefined } : service.runtime,

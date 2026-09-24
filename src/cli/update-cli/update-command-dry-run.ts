@@ -4,7 +4,7 @@ import type { UpdateFailureFact } from "../../infra/update-failure-facts.js";
 import { canResolveRegistryVersionForPackageTarget } from "../../infra/update-global.js";
 import { getUpdateRun } from "../../infra/update-run-ledger.js";
 import type { UpdateRunRecord } from "../../infra/update-run-record.js";
-import type { UpdateRunResult } from "../../infra/update-runner.js";
+import type { UpdateRunResult } from "../../infra/update-runner-types.js";
 import { defaultRuntime } from "../../runtime.js";
 import type { UpdateRecoveryStep } from "../../shared/update-outcome.js";
 import type { OpenClawDatabaseSchemaPreflight } from "../../state/openclaw-database-preflight.js";
@@ -107,7 +107,7 @@ function printDryRunPreview(preview: UpdateDryRunPreview, jsonMode: boolean): vo
   }
 }
 
-export function printUpdateDryRun(params: {
+export async function printUpdateDryRun(params: {
   runId: string;
   root: string;
   installKind: "git" | "package" | "unknown";
@@ -133,7 +133,7 @@ export function printUpdateDryRun(params: {
   preflightNotes?: readonly string[];
   preflightFailures?: readonly UpdateDryRunFailure[];
   opts: Pick<UpdateCommandOptions, "tag" | "json" | "run">;
-}): void {
+}): Promise<void> {
   const actions: string[] = [];
   if (params.requestedChannel && params.requestedChannel !== params.storedChannel) {
     actions.push(`Persist update.channel=${params.requestedChannel} in config`);
@@ -225,7 +225,7 @@ export function printUpdateDryRun(params: {
     Boolean(params.opts.json),
   );
   if (!params.opts.json) {
-    printResult(
+    await printResult(
       {
         runId: params.runId,
         status: "skipped",

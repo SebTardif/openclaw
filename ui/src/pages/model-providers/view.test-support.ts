@@ -1,4 +1,4 @@
-import { render } from "lit";
+import { nothing, render } from "lit";
 import type { ModelProviderCard } from "./data.ts";
 import { renderModelProviders } from "./view.ts";
 
@@ -46,7 +46,6 @@ export function props(overrides: Partial<ModelProvidersViewProps> = {}): ModelPr
     catalogDiscovering: false,
     catalogDiscoveryError: null,
     configBusy: false,
-    quickAddSupported: true,
     unconfiguredProviders: [{ id: "anthropic", displayName: "Anthropic" }],
     canViewProfiles: true,
     canMutate: true,
@@ -63,6 +62,7 @@ export function props(overrides: Partial<ModelProvidersViewProps> = {}): ModelPr
     addProviderOpen: false,
     addProviderId: "",
     addProviderKey: "",
+    installedAgents: nothing,
     onRefresh: () => undefined,
     onOpenKeyEditor: () => undefined,
     onCloseKeyEditor: () => undefined,
@@ -73,7 +73,6 @@ export function props(overrides: Partial<ModelProvidersViewProps> = {}): ModelPr
     onRequestLogout: () => undefined,
     onProfileOrderChange: () => undefined,
     onAddProviderToggle: () => undefined,
-    onAddProviderIdChange: () => undefined,
     onAddProviderKeyChange: () => undefined,
     onAddProvider: () => undefined,
     onPrimaryChange: () => undefined,

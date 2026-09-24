@@ -262,17 +262,7 @@ export function renderUsage(props: UsageProps) {
     !data.error &&
     data.sessions.length === 0 &&
     (data.totals?.totalTokens ?? 0) === 0;
-  const hasMissingCost =
-    (displayTotals?.missingCostEntries ?? 0) > 0 ||
-    (displayTotals
-      ? displayTotals.totalTokens > 0 &&
-        displayTotals.totalCost === 0 &&
-        displayTotals.input +
-          displayTotals.output +
-          displayTotals.cacheRead +
-          displayTotals.cacheWrite >
-          0
-      : false);
+  const hasMissingCost = (displayTotals?.missingCostEntries ?? 0) > 0;
   const datePresets = [
     { label: t("usage.presets.today"), days: 1 },
     { label: t("usage.presets.last7d"), days: 7 },
@@ -402,7 +392,6 @@ export function renderUsage(props: UsageProps) {
                 ${renderSettingsSegmented({
                   mode: "buttons",
                   variant: "accent",
-                  ariaPressed: false,
                   value: filters.scope,
                   onChange: filterActions.onScopeChange,
                   onReselect: filterActions.onScopeChange,
@@ -422,7 +411,6 @@ export function renderUsage(props: UsageProps) {
                 ${renderSettingsSegmented({
                   mode: "buttons",
                   variant: "accent",
-                  ariaPressed: false,
                   value: isTokenMode ? "tokens" : "cost",
                   onChange: displayActions.onChartModeChange,
                   onReselect: displayActions.onChartModeChange,
@@ -540,6 +528,7 @@ export function renderUsage(props: UsageProps) {
                   class="usage-query-input"
                   type="text"
                   .value=${filters.queryDraft}
+                  aria-label=${t("usage.query.placeholder")}
                   placeholder=${t("usage.query.placeholder")}
                   @input=${(e: Event) =>
                     filterActions.onQueryDraftChange((e.target as HTMLInputElement).value)}

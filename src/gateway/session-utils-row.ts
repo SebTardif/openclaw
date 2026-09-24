@@ -50,6 +50,7 @@ import {
   projectSessionParticipants,
 } from "./session-identity-projection.js";
 import { isSessionPermissionChangePending } from "./session-permission-change.js";
+import { projectSessionProviderReview } from "./session-provider-review-projection.js";
 import { readSessionRowModelFacts } from "./session-row-model-facts.js";
 import { buildSessionSwarmSummary } from "./session-swarm-summary.js";
 import { readSessionTitleFieldsFromTranscript as readScopedSessionTitleFieldsFromTranscript } from "./session-transcript-title-reader.js";
@@ -65,7 +66,6 @@ import {
   buildStoreChildSessionLinksWork,
   type SessionChildLink,
   resolveSessionChildOwners,
-  resolveSessionCompactionSummary,
 } from "./session-utils-core.js";
 import {
   resolveGatewaySessionDisplayName,
@@ -93,6 +93,7 @@ export function readSessionRowInputs(params: {
   modelSource?: GatewaySessionModelSource;
   key: string;
   entry?: InternalSessionEntry;
+  preparedAcpMeta?: SessionEntry["acp"] | null;
   modelCatalog?: SessionListModelCatalog | ModelCatalogEntry[];
   now?: number;
   includeDerivedTitles?: boolean;
@@ -119,6 +120,7 @@ export function readSessionRowInputs(params: {
       cfg,
       key,
       entry,
+      preparedAcpMeta: params.preparedAcpMeta,
       source: params.modelSource ?? { entry, readSourceEntry: (parentKey) => store[parentKey] },
       agentId,
       rowContext,
@@ -297,7 +299,7 @@ export function buildGatewaySessionRow(
   return presentSessionRow(materializeSessionRow(inputs), presentation);
 }
 
-function resolveGatewaySessionActiveModel(params: {
+export function resolveGatewaySessionActiveModel(params: {
   cfg: OpenClawConfig;
   active?: boolean;
   activeModel?: { provider: string; model: string } | null;
@@ -435,7 +437,6 @@ export function materializeSessionRow(input: ReturnType<typeof readSessionRowInp
     entry?.pinnedAt !== undefined && isPinnableSessionEntry(key, entry)
       ? entry.pinnedAt
       : undefined;
-  const compactionSummary = resolveSessionCompactionSummary(entry);
 
   // Reserve temporal fields in wire order; presentation fills a fresh copy.
   const row: GatewaySessionRow = {
@@ -452,6 +453,8 @@ export function materializeSessionRow(input: ReturnType<typeof readSessionRowInp
     workspaceDir: entry?.spawnedCwd ?? entry?.spawnedWorkspaceDir,
     projectId: entry?.projectId,
     permissionMode: entry?.permissionMode,
+    sandboxMode: entry?.sandboxMode,
+    nativeRuntimeConsent: entry?.nativeRuntimeConsent,
     permissionModePending: input.permissionModePending,
     ...(entry?.permissionMode !== undefined && entry.sessionRoot !== undefined
       ? { sessionRoot: entry.sessionRoot }
@@ -549,6 +552,7 @@ export function materializeSessionRow(input: ReturnType<typeof readSessionRowInp
     endedAt: undefined,
     runtimeMs: undefined,
     lastRunError: entry?.lastRunError,
+    providerReview: projectSessionProviderReview(entry, key),
     lastRunId: entry?.lastRunId,
     hasAutomation: input.hasAutomation,
     // Navigation lineage is persisted; runtime control is exposed separately above.
@@ -590,8 +594,6 @@ export function materializeSessionRow(input: ReturnType<typeof readSessionRowInp
     lastTo: deliveryFields.lastTo,
     lastAccountId: deliveryFields.lastAccountId,
     lastThreadId: deliveryFields.lastThreadId,
-    compactionCheckpointCount: compactionSummary.compactionCheckpointCount,
-    latestCompactionCheckpoint: compactionSummary.latestCompactionCheckpoint,
     pluginExtensions: input.pluginExtensions.length > 0 ? input.pluginExtensions : undefined,
   };
   return { row, source: input };

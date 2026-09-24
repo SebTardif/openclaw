@@ -4,7 +4,7 @@ import {
   attachStateLifecycleDelegate,
   withStateDatabaseCoordinatorRuntimeDirectory,
 } from "../../infra/state-database-coordinator.js";
-import { serveWorkerTasks } from "../../infra/worker-task-pool.js";
+import { serveWorkerTasks } from "../../infra/worker-task-server.js";
 import {
   claimOpenClawAgentDatabaseLease,
   releaseOpenClawAgentDatabaseLease,
@@ -42,7 +42,7 @@ type ReconcileWorkerPlanInput = ReconcileWorkerOwner & {
 export type SessionTranscriptReconcileWorkerInput =
   | (ReconcileWorkerPlanInput & { mode: "disk"; leaseId: string })
   | { mode: "memory"; sessionIds: string[] }
-  | (ReconcileWorkerOwner & { mode: "release"; leaseId: string });
+  | (ReconcileWorkerOwner & { mode: "release"; leaseId: string; path: string });
 
 export type SessionTranscriptReconcileWorkerTask = {
   input: SessionTranscriptReconcileWorkerInput;
@@ -94,8 +94,12 @@ function parseWorkerInput(value: unknown): SessionTranscriptReconcileWorkerInput
     return undefined;
   }
   const owner = { stateDir: input.stateDir, externallySupervised: input.externallySupervised };
-  if (input.mode === "release" && typeof input.leaseId === "string") {
-    return { ...owner, mode: "release", leaseId: input.leaseId };
+  if (
+    input.mode === "release" &&
+    typeof input.leaseId === "string" &&
+    typeof input.path === "string"
+  ) {
+    return { ...owner, mode: "release", leaseId: input.leaseId, path: input.path };
   }
   if (typeof input.agentId !== "string" || typeof input.path !== "string") {
     return undefined;
@@ -134,10 +138,18 @@ function resolveLeaseEnvironment(owner: ReconcileWorkerOwner) {
   };
 }
 
-function releaseLease(owner: ReconcileWorkerOwner & { leaseId: string }, port: MessagePort): void {
+function releaseLease(
+  owner: ReconcileWorkerOwner & { leaseId: string; path: string },
+  port: MessagePort,
+  readOnlyClosed = false,
+): void {
   let failure: Error | undefined;
   try {
-    releaseOpenClawAgentDatabaseLease(owner.leaseId, { env: resolveLeaseEnvironment(owner) });
+    releaseOpenClawAgentDatabaseLease(
+      owner.leaseId,
+      { env: resolveLeaseEnvironment(owner), initializationAgentPaths: [owner.path] },
+      readOnlyClosed ? "read-only" : undefined,
+    );
   } catch (error) {
     failure = error instanceof Error ? error : new Error(String(error));
   } finally {
@@ -351,7 +363,7 @@ async function run(input: SessionTranscriptReconcileWorkerInput, port: MessagePo
         });
       });
       // Port callbacks do not inherit the delegate's runtime and live custody.
-      releaseLease(reconcileInput, port);
+      releaseLease(reconcileInput, port, closeDatabase !== undefined);
     }
   } finally {
     if (reconcileInput.mode === "memory") {

@@ -86,6 +86,8 @@ const enCommandPalette = {
     },
     labels: {
       commandPalette: "Open command palette",
+      newSession: "Open New Session",
+      archiveSession: "Archive current session",
       paletteStartSession: "Start a background session (in the command palette)",
       keyboardShortcuts: "Show keyboard shortcuts",
       toggleSidebar: "Toggle sidebar",
@@ -107,6 +109,8 @@ const enCommandPalette = {
       zoomIn: "Zoom in",
       zoomOut: "Zoom out",
       zoomReset: "Reset zoom",
+      panImageHorizontal: "Pan image horizontally",
+      panImageVertical: "Pan image vertically",
       terminalPanel: "Toggle terminal panel",
       homePanel: "Talk to your Home agent",
       workspaceFiles: "Toggle workspace files",

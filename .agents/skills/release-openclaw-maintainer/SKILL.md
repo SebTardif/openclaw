@@ -16,7 +16,7 @@ Read only the references needed for the selected phase:
 
 - Regular beta/stable preparation or publication: [regular release](references/regular-release.md), which routes preparation and phase-specific proof. If the request does not specify stable/full, default to beta; beta authorization does not authorize later stable promotion.
 - Backport discovery: [candidate inventory](references/backport-discovery.md). For extended-stable also read [backport preparation](references/extended-stable-backports.md); SDK/config changes need a visible maintenance-risk warning and maintainer decision.
-- Extended-stable `.33+` Gateway publication: [extended-stable publication](references/extended-stable-publish.md). Do not use the regular release sequence or inherit GitHub Release/native-app publication.
+- Extended-stable `.33+` Gateway publication: [extended-stable publication](references/extended-stable-publish.md). Use the shared publisher with extended-stable inputs; its non-Latest GitHub Release carries evidence without native-app or ClawHub publication.
 - Validation selection or failed proof: [validation and confidence](references/validation.md), with `$release-openclaw-ci` for workflow execution and immutable manifests.
 - Interrupted publication or registry promotion: [publication recovery](references/publication-recovery.md).
 - Native assets: [platform publication](references/platform-publication.md), with `$release-openclaw-mac` for macOS operations.
@@ -64,6 +64,15 @@ root-only receipts retain `changelog-only-release-v1`.
 Keep trusted **Tooling SHA** separate; tooling or infrastructure failures do
 not justify changing the candidate.
 
+Once a candidate is cut, its base is the operator's decision. Never re-cut
+(re-base the candidate on newer `main`) unless Peter explicitly asks for it in
+that release. Without asking, cherry-pick already-merged `main` commits onto
+the release branch only to fix a confirmed release blocker: a required lane
+failing deterministically on the frozen candidate, or an update/install/
+publish-bytes defect. Name each cherry-pick in the handoff record. Not allowed:
+opportunistic backports, feature reverts, or a new base taken to "pick up" a
+fix that cherry-picks cleanly enough with a small conflict resolution.
+
 Published versions and final tags are immutable. Reuse successful exact-source
 artifacts; do not rebuild or republish as an implicit retry. The active release
 is the work queue: no opportunistic moving-main fixes or backports. Classify
@@ -71,6 +80,12 @@ failures, repair their owner, retry the affected surface, then reassess rather
 than repeating the full release.
 
 Required checks and enforced environment approvals remain required. A passing
-sibling lane cannot waive a failure. Native platforms have independent gates;
-pending app assets do not hold npm/GitHub finalization or main closeout. Report
-proof gaps and pending platforms accurately.
+sibling lane cannot waive a failure. npm + ClawHub publication is the priority
+path. macOS/Windows/Linux/Android native publication runs in parallel and never
+gates npm/ClawHub publication, GitHub release finalization, or main closeout.
+Platform publisher failures are classified and repaired in parallel. Selected
+normal CI lanes, including macOS Swift and Windows Node, remain required.
+Linux, Windows, and macOS Gateway cross-OS install and upgrade failures block
+beta, stable, and full release validation. Repair required failures and rerun
+the affected lanes before publication. Report proof gaps and pending platforms
+accurately.

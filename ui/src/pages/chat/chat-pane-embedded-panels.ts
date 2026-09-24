@@ -11,6 +11,8 @@ import { EMPTY_LINK_READERS } from "../../components/link-reader-target.ts";
 import { renderPanelLoadingSkeleton } from "../../components/panel-loading-skeleton.ts";
 import { t } from "../../i18n/index.ts";
 import { registerBackgroundTasksEnglish } from "../../i18n/locales/en-background-tasks.ts";
+import { registerFilePreviewEnglish } from "../../i18n/locales/en-file-preview.ts";
+import type { ChatAttachment } from "../../lib/chat/chat-types.ts";
 import { canCallGatewayMethod } from "../../lib/gateway-methods.ts";
 import { formatKeyboardShortcutCombo } from "../../lib/keyboard-shortcut-catalog.ts";
 import type { ControlUiRegistration } from "../../plugins/control-ui-capability.ts";
@@ -22,7 +24,6 @@ import type {
   ChatSessionCompanionTurn,
 } from "./chat-session-companion.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
-import { openTaskDetailId } from "./components/chat-detail-slot.ts";
 import {
   getSessionWorkspace,
   selectSessionWorkspacePreview,
@@ -34,12 +35,12 @@ import type {
   SidebarPanelTemplates,
 } from "./components/chat-sidebar-region-types.ts";
 import type { SidebarContent } from "./components/chat-sidebar.ts";
-import { resetTaskDetail } from "./components/chat-task-detail-state.ts";
 import type { SessionDiscussionPanelConfig } from "./components/session-discussion-panel.ts";
 import type { SidebarSlotId } from "./sidebar-layout-types.ts";
 import { sidebarMainPanel } from "./sidebar-layout.ts";
 
 registerBackgroundTasksEnglish();
+registerFilePreviewEnglish();
 
 type SidebarPanelDefinitionParams = {
   state: ChatPageHost;
@@ -77,6 +78,7 @@ type SidebarPanelDefinitionParams = {
   companionFocusRequest: (() => boolean) | undefined;
   onCompanionSubmit: (question: string | ChatSessionCompanionTurn) => void;
   onCompanionDraftChange: (draft: string) => void;
+  onCompanionAttachmentsChange?: (attachments: ChatAttachment[]) => void;
   onCompanionVisibilityChange: (visible: boolean) => void;
   connected: boolean;
   onClearCompanion: () => void;
@@ -114,10 +116,6 @@ export function sidebarPanelDefinitions(
   params?: SidebarPanelDefinitionParams,
 ): SidebarPanelDefinition[] {
   const state = params?.state;
-  // Review owns task history; rendering Files must not retire that selection.
-  if (state && openTaskDetailId(state.sidebarContent, state.sidebarLayout) === undefined) {
-    resetTaskDetail(state);
-  }
   // Metadata-only definitions have no pane context, so they describe types without offering tabs.
   const panelContext = params && {
     ...params,
@@ -213,6 +211,8 @@ export function sidebarPanelDefinitions(
         .sendShortcut=${state?.settings.chatSendShortcut ?? "enter"}
         .onSubmit=${params.onCompanionSubmit}
         .onDraftChange=${params.onCompanionDraftChange}
+        .onAttachmentsChange=${params.onCompanionAttachmentsChange}
+        .attachmentLimits=${state?.hello?.policy?.attachments}
         .onVisibilityChange=${params.onCompanionVisibilityChange}
       ></openclaw-chat-session-rail>`
     : null;
@@ -251,14 +251,8 @@ export function sidebarPanelDefinitions(
   const workspace = state ? getSessionWorkspace(state) : null;
   // The region owns mounting and visibility. Hidden Review tabs must keep the
   // same cached diff loader so their live content and selection survive.
-  const taskId = state ? openTaskDetailId(state.sidebarContent, state.sidebarLayout) : undefined;
   const detailContent =
-    state?.sidebarContent ??
-    (taskId !== undefined
-      ? { kind: "task" as const, taskId }
-      : state
-        ? resolveSessionDiffSidebarContent(state)
-        : null);
+    state?.sidebarContent ?? (state ? resolveSessionDiffSidebarContent(state) : null);
   const workspaceContent =
     state && params && workspace
       ? html`<openclaw-chat-files-panel

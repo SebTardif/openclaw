@@ -8,7 +8,7 @@ import { resolveGatewayService } from "../../daemon/service.js";
 import { resolveUpdateInstallRoot } from "../../infra/update-install-root.js";
 import type { UpdateRecoveryFence } from "../../infra/update-run-recovery.js";
 import { UPDATE_RUNNER_TIMEOUT_MS } from "../../infra/update-run-timeouts.js";
-import type { UpdateRunResult } from "../../infra/update-runner.js";
+import type { UpdateRunResult } from "../../infra/update-runner-types.js";
 import { CommandProcessCleanupError } from "../../process/exec-result.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import { resolveNodeRunner, type UpdateCommandOptions } from "./shared.js";
@@ -17,7 +17,7 @@ import {
   withUpdateCommandExecutorChild,
   type UpdateCommandChildGrant,
 } from "./update-command-executor.js";
-import { UpdateCommandRecoveryPendingError } from "./update-command-recovery.js";
+import { UpdateCommandRecoveryPendingError } from "./update-command-recovery-error.js";
 import { withRetainedUpdateServiceAuthority } from "./update-command-retained-service.js";
 import type {
   OriginalManagedServiceRuntime,
@@ -27,11 +27,6 @@ import {
   resolveUpdatedInstallCommandEnv,
   stripGatewayServiceMarkerEnv,
 } from "./update-command-service-env.js";
-import {
-  runGatewayInstallWithLoadBoundary,
-  UpdateServiceLoadPreMutationError,
-  type UpdateServiceLoadBoundary,
-} from "./update-command-service-load.js";
 
 export const DEFINITION_DENIAL = /\bSERVICE_DEFINITION_(?:SEALED|UNKNOWN):[^\n]*/;
 
@@ -141,11 +136,11 @@ export async function runUpdatedInstallGatewayCommand(
     serviceEnv?: NodeJS.ProcessEnv;
     serviceInstallEnv?: NodeJS.ProcessEnv | null;
     nodeRunner?: string;
+    gatewayPort?: number;
     timeoutMs?: number;
     invocationCwd?: string;
     signal?: AbortSignal;
     assertCurrent?: () => void;
-    serviceLoadBoundary?: UpdateServiceLoadBoundary;
     definitionRecovery?: UpdateServiceDefinitionRecovery;
     onWarnings?: (warnings: string[]) => void;
     originalManagedServiceRuntime?: OriginalManagedServiceRuntime;
@@ -174,6 +169,9 @@ export async function runUpdatedInstallGatewayCommand(
   const args = ["gateway", action];
   if (installing) {
     args.push("--force");
+    if (params.gatewayPort !== undefined) {
+      args.push("--port", String(params.gatewayPort));
+    }
   } else {
     // Update retries must not bypass the installer's backup and drift audit.
     args.push("--preserve-definition");
@@ -227,13 +225,7 @@ export async function runUpdatedInstallGatewayCommand(
       }
     }
   };
-  const boundary = params.serviceLoadBoundary;
   const installTimeoutMs = params.timeoutMs ?? UPDATE_RUNNER_TIMEOUT_MS;
-  if (installing && boundary && params.originalManagedServiceRuntime) {
-    throw new UpdateServiceLoadPreMutationError(
-      "Retained rebind requires the original definition receipt; deferred load cannot provide it.",
-    );
-  }
   if (run && !executor) {
     throw new UpdateCommandRecoveryPendingError(
       "Native command requires its original update executor.",
@@ -278,24 +270,6 @@ export async function runUpdatedInstallGatewayCommand(
 
   if (installing && params.definitionRecovery) {
     params.definitionRecovery.unverified = true;
-  }
-  if (installing && boundary) {
-    return await runGatewayInstallWithLoadBoundary({
-      onResult: receiveInstallResult,
-      argv: [nodeRunner, entrypoint, ...args, "--defer-activation"],
-      cwd: params.result.root,
-      env: commandEnv,
-      signal: params.signal,
-      timeoutMs: installTimeoutMs,
-      boundary: {
-        ...boundary,
-        // The handoff adds an executor fence; it must not replace the repair owner.
-        assertCurrent: () => {
-          assertCurrent();
-          boundary.assertCurrent();
-        },
-      },
-    });
   }
 
   const runChild = async (

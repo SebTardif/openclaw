@@ -1314,7 +1314,7 @@ describe("active-memory plugin", () => {
     });
     expect(runEmbeddedAgent).toHaveBeenCalledTimes(1);
 
-    await requireHook("agent_end")({ runId: context.runId, messages: [], success: true }, context);
+    await requireHook("agent_end")({ runId: context.runId, messages: [], success: false }, context);
     await runPromptBuild({ prompt: "what wings should i order?" }, context);
     expect(runEmbeddedAgent).toHaveBeenCalledTimes(2);
   });
@@ -2677,18 +2677,11 @@ describe("active-memory plugin", () => {
   });
 
   it("preserves leading digits in a plain-text summary", async () => {
-    runEmbeddedAgent.mockImplementationOnce(async (params: { sessionFile: string }) => {
-      await writeUsableMemoryTranscript(params.sessionFile, "2024 trip to tokyo and 2% milk");
-      return {
-        payloads: [{ text: "2024 trip to tokyo and 2% milk both matter here." }],
-      };
-    });
-
-    const result = await runPromptBuild({
+    const prependContext = await runRecallWithSummary({
       prompt: "what should i remember from my 2024 trip and should i buy 2% milk?",
+      summary: "2024 trip to tokyo and 2% milk both matter here.",
+      memoryText: "2024 trip to tokyo and 2% milk",
     });
-
-    const prependContext = requirePrependContext(result);
     expect(prependContext).toContain("Context:");
     expect(prependContext).toContain("2024 trip to tokyo");
     expect(prependContext).toContain("2% milk");
@@ -3927,10 +3920,7 @@ describe("active-memory plugin", () => {
     );
 
     expect(runEmbeddedAgent).toHaveBeenCalledTimes(2);
-    const infoLines = vi
-      .mocked(api.logger.info)
-      .mock.calls.map((call: unknown[]) => String(call[0]));
-    expect(infoLines.join("\n")).not.toContain("cached status=");
+    expect(hasInfoLine("cached status=")).toBe(false);
   });
 
   it("does not cache timeout results", async () => {
@@ -3968,10 +3958,7 @@ describe("active-memory plugin", () => {
 
     expect(hoisted.updateSessionStore).toHaveBeenCalledTimes(2);
     expect(lastAbortSignal?.aborted).toBe(true);
-    const infoLines = vi
-      .mocked(api.logger.info)
-      .mock.calls.map((call: unknown[]) => String(call[0]));
-    expectLinesNotToContain(infoLines, " cached ");
+    expect(hasInfoLine(" cached ")).toBe(false);
   });
 
   it("releases memory search managers after active-memory timeouts", async () => {
@@ -4086,10 +4073,7 @@ describe("active-memory plugin", () => {
       ([params]) => (params as { sessionKey?: string }).sessionKey,
     );
     expect(new Set(sessionKeys).size).toBeGreaterThanOrEqual(2);
-    const infoLines = vi
-      .mocked(api.logger.info)
-      .mock.calls.map((call: unknown[]) => String(call[0]));
-    expectLinesNotToContain(infoLines, " cached ");
+    expect(hasInfoLine(" cached ")).toBe(false);
   });
 
   it("ignores late subagent payloads once the active-memory timeout signal has fired", async () => {
@@ -4160,37 +4144,45 @@ describe("active-memory plugin", () => {
 
     expect(result?.prependContext).toContain("remember the ramen place");
     expect(lastEmbeddedRunParams().timeoutMs).toBe(CONFIGURED_TIMEOUT_MS + SETUP_GRACE_TIMEOUT_MS);
-    const infoLines = vi
-      .mocked(api.logger.info)
-      .mock.calls.map((call: unknown[]) => String(call[0]));
-    expectLinesNotToContain(infoLines, "status=timeout");
+    expect(hasInfoLine("status=timeout")).toBe(false);
   });
 
   it("returns timeout within a hard deadline even when the subagent never checks the abort signal", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
     const CONFIGURED_TIMEOUT_MS = 25;
-    const HARD_DEADLINE_MARGIN_MS = 1_500;
+    const PARTIAL_DATA_GRACE_MS = 5;
     testing.setMinimumTimeoutMsForTests(1);
     testing.setSetupGraceTimeoutMsForTests(0);
+    testing.setTimeoutPartialDataGraceMsForTests(PARTIAL_DATA_GRACE_MS);
     registerPluginConfig({ timeoutMs: CONFIGURED_TIMEOUT_MS, logging: true });
+    const embeddedStarted = createDeferred<AbortSignal | undefined>();
     // Simulate a subagent that never cooperatively checks the abort signal.
-    runEmbeddedAgent.mockImplementationOnce(() => new Promise<never>(() => {}));
+    runEmbeddedAgent.mockImplementationOnce((params: { abortSignal?: AbortSignal }) => {
+      embeddedStarted.resolve(params.abortSignal);
+      return new Promise<never>(() => {});
+    });
 
-    const startedAt = Date.now();
-    const result = await runPromptBuild(
+    let settled = false;
+    const resultPromise = runPromptBuild(
       { prompt: "what wings should i order? hard deadline test" },
       {
         sessionKey: "agent:main:hard-deadline",
       },
-    );
-    const wallClockMs = Date.now() - startedAt;
+    ).finally(() => {
+      settled = true;
+    });
+    const abortSignal = expectDefined(await embeddedStarted.promise, "embedded abort signal");
 
-    expect(result).toBeUndefined();
-    const infoLines = vi
-      .mocked(api.logger.info)
-      .mock.calls.map((call: unknown[]) => String(call[0]));
-    expectLinesToContain(infoLines, "status=timeout");
-    // Hard deadline: wall-clock time must be near timeoutMs, not 30s.
-    expect(wallClockMs).toBeLessThan(CONFIGURED_TIMEOUT_MS + HARD_DEADLINE_MARGIN_MS);
+    await vi.advanceTimersByTimeAsync(CONFIGURED_TIMEOUT_MS - 1);
+    expect(abortSignal.aborted).toBe(false);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(abortSignal.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(PARTIAL_DATA_GRACE_MS);
+
+    await expect(resultPromise).resolves.toBeUndefined();
+    expect(hasInfoLine("status=timeout")).toBe(true);
   });
 
   it("does not fast-fail terminal zero-hit memory_search results as empty", async () => {
@@ -5871,16 +5863,11 @@ describe("active-memory plugin", () => {
   });
 
   it("trusts the subagent's relevance decision for explicit preference recall prompts", async () => {
-    runEmbeddedAgent.mockImplementationOnce(async (params: { sessionFile: string }) => {
-      await writeUsableMemoryTranscript(params.sessionFile, "aisle seats and connection buffer");
-      return {
-        payloads: [{ text: "User prefers aisle seats and extra buffer on connections." }],
-      };
+    const prependContext = await runRecallWithSummary({
+      prompt: "u remember my flight preferences",
+      summary: "User prefers aisle seats and extra buffer on connections.",
+      memoryText: "aisle seats and connection buffer",
     });
-
-    const result = await runPromptBuild({ prompt: "u remember my flight preferences" });
-
-    const prependContext = requirePrependContext(result);
     expect(prependContext).toContain("aisle seat");
     expect(prependContext).toContain("extra buffer on connections");
   });

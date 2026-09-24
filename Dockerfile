@@ -76,6 +76,7 @@ COPY node-version.mjs ./
 COPY node-sqlite.mjs ./
 COPY node-runtime-update.mjs ./
 COPY node-runtime-recovery.mjs ./
+COPY cli-root-options.mjs gateway-run-argv.mjs gateway-shutdown-budget.mjs ./
 COPY node-host-launcher.mjs ./
 COPY openclaw.mjs ./
 COPY ui/package.json ./ui/package.json
@@ -108,6 +109,8 @@ FROM dependency-inputs AS build
 ARG OPENCLAW_DOCKER_BUILD_NODE_OPTIONS
 ARG OPENCLAW_DOCKER_BUILD_TSDOWN_MAX_OLD_SPACE_MB
 ARG OPENCLAW_DOCKER_BUILD_SKIP_DTS
+# Build checks inherit CI severity without changing the runtime image environment.
+ARG GITHUB_ACTIONS=false
 
 # Copy pinned Bun binary from the official image instead of fetching via curl.
 COPY --from=bun-binary /usr/local/bin/bun /usr/local/bin/bun
@@ -281,6 +284,7 @@ COPY --from=runtime-assets --chown=node:node /app/node-version.mjs .
 COPY --from=runtime-assets --chown=node:node /app/node-sqlite.mjs .
 COPY --from=runtime-assets --chown=node:node /app/node-runtime-update.mjs .
 COPY --from=runtime-assets --chown=node:node /app/node-runtime-recovery.mjs .
+COPY --from=runtime-assets --chown=node:node /app/cli-root-options.mjs /app/gateway-run-argv.mjs /app/gateway-shutdown-budget.mjs ./
 COPY --from=runtime-assets --chown=node:node /app/node-host-launcher.mjs .
 COPY --from=runtime-assets --chown=node:node /app/openclaw.mjs .
 COPY --from=runtime-assets --chown=node:node /app/${OPENCLAW_BUNDLED_PLUGIN_DIR} ./${OPENCLAW_BUNDLED_PLUGIN_DIR}

@@ -72,7 +72,7 @@ describe("CodexAppServerEventProjector command output projection", () => {
       role: "toolResult",
       toolCallId: "cmd-1",
       toolName: "bash",
-      content: [{ type: "text", text: "status passed\njson /tmp/scenario.json" }],
+      content: [{ type: "text", text: "status passed\njson /tmp/scenario.json\n" }],
     });
     expect(trajectoryRecorder.recordEvent).toHaveBeenCalledWith(
       "tool.result",
@@ -90,10 +90,9 @@ describe("CodexAppServerEventProjector command output projection", () => {
     expect(toolResult.result).toEqual({ status: "completed", exitCode: 0, durationMs: 42 });
   });
 
-  it("keeps final command output UTF-16 safe at the transcript limit", async () => {
+  it("preserves complete final command output across the old UTF-16 transcript boundary", async () => {
     const projector = await createProjector();
-    // Position the surrogate pair so it straddles the transcript cap: the
-    // truncation boundary must drop the whole emoji, never split it in half.
+    // The old mirror cap cut this emoji and discarded the entire suffix.
     const prefix = "a".repeat(9_886);
     const aggregatedOutput = `${prefix}😀${"a".repeat(400)}`;
 
@@ -120,59 +119,7 @@ describe("CodexAppServerEventProjector command output projection", () => {
     const content = requireArray(message.content, "tool result content");
     const item = requireRecord(content[0], "tool result content item");
     expect(item.type).toBe("text");
-    expect(item.text).toBe(
-      `${prefix}\n...(OpenClaw truncated Codex native tool output: original 10288 chars, showing 10000; rerun with narrower args.)`,
-    );
-    // A split surrogate would leave a lone code unit behind.
-    expect(item.text).not.toMatch(/[\uD800-\uDFFF]/);
-  });
-
-  it("keeps streamed command output UTF-16 safe at the transcript limit", async () => {
-    const projector = await createProjector();
-    // The surrogate pair straddles the transcript cap in the first delta so the
-    // bounded prefix must drop the whole emoji rather than split it.
-    const prefix = "a".repeat(9_886);
-
-    await projector.handleNotification(
-      forCurrentTurn("item/commandExecution/outputDelta", {
-        itemId: "cmd-utf16-streamed",
-        delta: `${prefix}😀${"a".repeat(400)}`,
-      }),
-    );
-    await projector.handleNotification(
-      forCurrentTurn("item/commandExecution/outputDelta", {
-        itemId: "cmd-utf16-streamed",
-        delta: "must not resurrect a split surrogate",
-      }),
-    );
-    await projector.handleNotification(
-      turnCompleted([
-        {
-          type: "commandExecution",
-          id: "cmd-utf16-streamed",
-          command: "printf output",
-          cwd: "/workspace",
-          processId: null,
-          source: "agent",
-          status: "completed",
-          commandActions: [],
-          aggregatedOutput: null,
-          exitCode: 0,
-          durationMs: 42,
-        },
-      ]),
-    );
-
-    const result = projector.buildResult(buildEmptyToolTelemetry());
-    const message = requireRecord(result.messagesSnapshot[2], "tool result message");
-    const content = requireArray(message.content, "tool result content");
-    const item = requireRecord(content[0], "tool result content item");
-    // A split surrogate would leave a lone code unit behind; the streamed output
-    // must stay well-formed while still carrying the truncation notice.
-    expect(item.type).toBe("text");
-    expect(item.text).not.toMatch(/[\uD800-\uDFFF]/);
-    expect(item.text).toContain("OpenClaw truncated Codex native tool output");
-    expect(item.text).toContain("showing 10000");
+    expect(item.text).toBe(aggregatedOutput);
   });
 
   it.each([
@@ -283,116 +230,6 @@ describe("CodexAppServerEventProjector command output projection", () => {
     expect(result.currentAttemptAssistant).toBeUndefined();
   });
 
-  it("keeps streaming after output text includes the truncation notice prefix", async () => {
-    const trajectoryRecorder = {
-      filePath: "trajectory.jsonl",
-      recordEvent: vi.fn(),
-      flush: vi.fn(async () => undefined),
-    };
-    const projector = await createProjector(await createParams(), {
-      trajectoryRecorder,
-    });
-    const userOutputWithNotice =
-      "...(OpenClaw truncated Codex native tool output is a literal line from the process)\n";
-
-    await projector.handleNotification(
-      forCurrentTurn("item/commandExecution/outputDelta", {
-        itemId: "cmd-notice-prefix",
-        delta: userOutputWithNotice,
-      }),
-    );
-    await projector.handleNotification(
-      forCurrentTurn("item/commandExecution/outputDelta", {
-        itemId: "cmd-notice-prefix",
-        delta: "second line must survive\n",
-      }),
-    );
-    await projector.handleNotification(
-      turnCompleted([
-        {
-          type: "commandExecution",
-          id: "cmd-notice-prefix",
-          command: "python scripts/run_demo_scenario.py",
-          cwd: "/workspace",
-          processId: null,
-          source: "agent",
-          status: "completed",
-          commandActions: [],
-          aggregatedOutput: null,
-          exitCode: 0,
-          durationMs: 42,
-        },
-      ]),
-    );
-
-    const result = projector.buildResult(buildEmptyToolTelemetry());
-    const toolResultMessage = requireRecord(result.messagesSnapshot[2], "tool result message");
-    expect(toolResultMessage.content).toEqual([
-      { type: "text", text: `${userOutputWithNotice}second line must survive` },
-    ]);
-    expect(trajectoryRecorder.recordEvent).toHaveBeenCalledWith(
-      "tool.result",
-      expect.objectContaining({
-        itemId: "cmd-notice-prefix",
-        output: `${userOutputWithNotice}second line must survive`,
-      }),
-    );
-  });
-
-  it("does not parse user output as a prior truncation notice when streaming crosses the cap", async () => {
-    const trajectoryRecorder = {
-      filePath: "trajectory.jsonl",
-      recordEvent: vi.fn(),
-      flush: vi.fn(async () => undefined),
-    };
-    const projector = await createProjector(await createParams(), {
-      trajectoryRecorder,
-    });
-    const userOutputWithNotice =
-      "before user marker\n...(OpenClaw truncated Codex native tool output: original literal process text)\nsecond line must survive\n";
-
-    await projector.handleNotification(
-      forCurrentTurn("item/commandExecution/outputDelta", {
-        itemId: "cmd-user-notice-prefix",
-        delta: userOutputWithNotice,
-      }),
-    );
-    await projector.handleNotification(
-      forCurrentTurn("item/commandExecution/outputDelta", {
-        itemId: "cmd-user-notice-prefix",
-        delta: "x".repeat(12_000),
-      }),
-    );
-    await projector.handleNotification(
-      turnCompleted([
-        {
-          type: "commandExecution",
-          id: "cmd-user-notice-prefix",
-          command: "python scripts/run_demo_scenario.py",
-          cwd: "/workspace",
-          processId: null,
-          source: "agent",
-          status: "completed",
-          commandActions: [],
-          aggregatedOutput: null,
-          exitCode: 0,
-          durationMs: 42,
-        },
-      ]),
-    );
-
-    const output = (
-      trajectoryRecorder.recordEvent.mock.calls.find(([type]) => type === "tool.result")?.[1] as
-        | { output?: string }
-        | undefined
-    )?.output;
-    expect(output).toHaveLength(10_000);
-    expect(output).toContain("OpenClaw truncated Codex native tool output");
-    expect(output).toContain("original 12124 chars");
-    expect(output).toContain("before user marker");
-    expect(output).toContain("second line must survive");
-  });
-
   it("caps streamed command output used for replay when snapshots omit aggregated output", async () => {
     const trajectoryRecorder = {
       filePath: "trajectory.jsonl",
@@ -456,6 +293,9 @@ describe("CodexAppServerEventProjector command output projection", () => {
     expect(toolResultContentItem.type).toBe("text");
     expect(toolResultContentItem.text).toHaveLength(10_000);
     expect(toolResultContentItem.text).toContain("OpenClaw truncated Codex native tool output");
+    expect(toolResultMessage).toMatchObject({
+      __openclaw: { toolOutput: { source: "execution", captureTruncated: true } },
+    });
   });
 
   it("uses streamed command output for failed native tool errors", async () => {

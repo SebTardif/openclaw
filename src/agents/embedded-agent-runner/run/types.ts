@@ -219,6 +219,8 @@ export type EmbeddedRunAttemptParams = EmbeddedRunAttemptBase & {
   observeToolTerminal?: EmbeddedRunAttemptToolTerminalObserver;
   /** Host-issued scope for harnesses that mirror native child runs into task state. */
   agentHarnessTaskRuntimeScope?: AgentHarnessTaskRuntimeScope;
+  /** Host-only originals retained across native image projection. */
+  inputAttachmentMedia?: RunEmbeddedAgentParams["media"];
   /** Storage-aware trajectory recorder owned by the OpenClaw host. */
   trajectoryRecorder?: EmbeddedRunAttemptTrajectoryRecorder | null;
   /** Live observer called after wrapped tool outcomes are recorded. */
@@ -361,6 +363,8 @@ export type EmbeddedRunAttemptResult = {
   modelIterations?: number;
   /** Saved provider retry setting resolved by the prepared session owner. */
   providerRetryMaxRetries?: number;
+  /** Saved retry.provider.maxRetryDelayMs from the same owner; 0 disables the cap. */
+  providerRetryMaxDelayMs?: number;
   messagesSnapshot: AgentMessage[];
   pluginRuntimeRefreshMessages?: AgentMessage[];
   /** Owner-eligible settled finalization, with frozen evidence or an unavailable projection. */
@@ -370,6 +374,8 @@ export type EmbeddedRunAttemptResult = {
     | { readonly source: "unavailable" };
   beforeAgentFinalizeRevisionReason?: string;
   assistantTexts: string[];
+  /** Immutable delivery facts prepared before a remote harness releases its file reader. */
+  preparedReplyMedia?: import("../../../auto-reply/reply/reply-media-paths.js").PreparedReplyMedia;
   latestMcpAppChannelView?: McpAppChannelView;
   latestMcpConnectAction?: McpConnectAction;
   lastAssistantTextMessageIndex?: number;

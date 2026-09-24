@@ -49,6 +49,8 @@ beforeAll(() => {
     "scripts/lib/docker-e2e-plan.mts",
     "scripts/lib/docker-e2e-scenarios.mts",
     "scripts/lib/official-external-channel-catalog.json",
+    "scripts/lib/update-compat-inventory.json",
+    "scripts/lib/update-first-hop-lanes.mjs",
     "scripts/lib/upgrade-survivor-policy.mjs",
     "scripts/lib/upgrade-survivor-scenarios.json",
     "scripts/lib/release-version.mjs",
@@ -121,6 +123,7 @@ type WorkflowStep = {
 type WorkflowJob = {
   "continue-on-error"?: boolean | string;
   "runs-on"?: string;
+  environment?: string;
   env?: Record<string, string>;
   if?: string;
   needs?: string | string[];
@@ -915,7 +918,7 @@ describe("release validation no-push transport", () => {
     ["qa-live", "qa-live-matrix", ""],
     ["live-e2e", " Repo-E2E,\trepo-smoke ", ""],
     ["cross-os", "", " Windows/Packaged-Upgrade "],
-    ["all", "", " Ubuntu,macOS "],
+    ["all", "", " Ubuntu,Windows,macOS "],
   ])(
     "parent accepts rerun_group=%s with its owned selector",
     (group, liveSuiteFilter, crossOsSuiteFilter) => {
@@ -1028,8 +1031,8 @@ describe("release validation no-push transport", () => {
 
   it.each([
     ["cross-os", "windows/packaged-upgrade"],
-    ["all", "ubuntu,macos"],
-    ["all", "ubuntu/packaged-fresh,ubuntu/installer-fresh,ubuntu/packaged-upgrade"],
+    ["all", "ubuntu,windows,macos"],
+    ["all", "packaged-fresh,installer-fresh,packaged-upgrade"],
   ])("accepts cross-OS selection %s/%s without changing scheduled groups", (group, filter) => {
     const outputs = runReleaseGroupCapture(group, false, "", filter);
     const unfiltered = runReleaseGroupCapture(group);
@@ -1037,15 +1040,22 @@ describe("release validation no-push transport", () => {
     expect(outputs.cross_os_scheduled).toBe("true");
   });
 
-  it.each(["windows,macos", "packaged-fresh", "ubuntu/packaged-upgrade"])(
-    "rejects all-group selection %s that omits required Linux suites at either entry point",
+  it.each([
+    "ubuntu",
+    "ubuntu,macos",
+    "ubuntu,windows",
+    "windows,macos",
+    "packaged-fresh",
+    "ubuntu/packaged-upgrade",
+  ])(
+    "rejects all-group selection %s that omits required OS suites at either entry point",
     (filter) => {
       for (const { result } of [
         executeParentFilterValidation("all", "", filter),
         executeReleaseGroupCapture("all", false, "", filter),
       ]) {
         expect(result.status).not.toBe(0);
-        expect(result.stderr).toContain("requires all Linux cross-OS suites");
+        expect(result.stderr).toContain("requires all Linux, Windows, and macOS cross-OS suites");
       }
     },
   );
@@ -1965,6 +1975,18 @@ describe("release validation no-push transport", () => {
     const releasePublishPath = ".github/workflows/openclaw-release-publish.yml";
     const releasePublish = readWorkflow(releasePublishPath);
     const dockerCall = job(releasePublish, "publish_docker");
+    const resolveTarget = job(releasePublish, "resolve_release_target");
+    const validateInputs = step(resolveTarget, "Validate inputs");
+    const validateEvidence = step(resolveTarget, "Validate full release validation manifest");
+    const validateReleaseBranch = step(
+      resolveTarget,
+      "Validate release tag is reachable from a trusted release branch",
+    );
+    const publishJob = job(releasePublish, "publish");
+    const resolveClawHubPlan = step(publishJob, "Resolve ClawHub release plan");
+    const dispatchPublish = step(publishJob, "Dispatch publish workflows");
+    const dispatchRun = dispatchPublish.run ?? "";
+    const coreStart = step(publishJob, "Start core npm publication");
 
     expect(dockerRelease.on?.push).toBeUndefined();
     expect(dockerRelease.on?.workflow_dispatch).toBeUndefined();
@@ -1990,13 +2012,34 @@ describe("release validation no-push transport", () => {
     // approval; its own guard test covers those safety properties.
     expect(callers).toEqual(["docker-image-refresh.yml", "openclaw-release-publish.yml"]);
 
+    expect(validateInputs.id).toBe("inputs");
+    expect(validateInputs.run).toContain(
+      'expected_validation_branch="extended-stable/${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.33"',
+    );
+    expect(validateInputs.run).not.toContain(
+      "Extended-stable core npm publication stays on the canonical extended-stable release flow",
+    );
+    expect(validateInputs.run).toContain(
+      'if [[ "${RELEASE_NPM_DIST_TAG}" == "extended-stable" ]]; then',
+    );
+    expect(publishJob.if).toBe("${{ !inputs.publish_docker_only }}");
+    expect(validateEvidence.env?.EXPECTED_WORKFLOW_BRANCH).toBe("${{ github.ref_name }}");
+    expect(validateReleaseBranch.run).toContain(
+      'expected_ref="refs/remotes/origin/${EXPECTED_VALIDATION_BRANCH}"',
+    );
+    expect(validateReleaseBranch.run).toContain(
+      "must be reachable from ${EXPECTED_VALIDATION_BRANCH}",
+    );
+
     expect(dockerCall.needs).toEqual([
       "resolve_release_target",
       "publish",
       "verify_core_npm_registry",
       "finalize_github_release_before_docker",
     ]);
+    expect(dockerCall.if).toContain("inputs.publish_openclaw_npm");
     expect(dockerCall.if).toContain("needs.publish.result == 'success'");
+    expect(dockerCall.if).toContain("inputs.publish_docker_only");
     expect(dockerCall.if).toContain("needs.verify_core_npm_registry.result == 'success'");
     expect(dockerCall.with).toEqual({
       tag: "${{ inputs.tag }}",
@@ -2031,6 +2074,19 @@ describe("release validation no-push transport", () => {
       job(releasePublish, "resolve_release_target"),
       "Validate full release validation manifest",
     );
+    expect(resolveClawHubPlan.run).toContain("plan_args+=(--skip-clawhub)");
+    expect(dispatchRun).toContain("-f npm_dist_tag=extended-stable");
+    expect(coreStart.run).toContain('-f plugin_npm_run_id="${plugin_npm_run_id}"');
+    for (const nativeJob of [
+      "qualify_android_native",
+      "publish_android",
+      "publish_linux",
+      "publish_windows",
+    ]) {
+      expect(job(releasePublish, nativeJob).if).toContain(
+        "inputs.npm_dist_tag != 'extended-stable'",
+      );
+    }
     expect(validation.env?.EXPECTED_SHA).toBe("${{ steps.ref.outputs.sha }}");
     expect(validation.run).toContain('--consumer publisher --manifest "$manifest"');
     expect(job(releasePublish, "finalize_github_release").needs).toEqual([
@@ -2052,6 +2108,64 @@ describe("release validation no-push transport", () => {
     expect(reusablePermissionViolations(releasePublishPath, "publish_docker")).toEqual([]);
     expect(reusablePermissionViolations(DOCKER_RELEASE, "prepare")).toEqual([]);
   });
+
+  it.each([
+    ["v2026.9.1", "latest", true],
+    ["v2026.9.1-beta.1", "beta", false],
+    ["v2026.8.35", "extended-stable", false],
+  ] as const)(
+    "finalizes %s through the shared owner with explicit latest intent",
+    (tag, distTag, latest) => {
+      const workflow = readWorkflow(".github/workflows/openclaw-release-publish.yml");
+      const script = step(
+        job(workflow, "finalize_github_release"),
+        "Publish the verified draft release",
+      ).run;
+      const root = tempDirs.make("release-finalize-track-");
+      const calls = join(root, "calls");
+      for (const finalizerExit of [0, 1]) {
+        writeFileSync(calls, "");
+        const result = spawnSync(
+          "bash",
+          [
+            "-c",
+            `
+          gh() { printf '%s\\n' "$SOURCE_SHA"; }
+          node() {
+            if [[ "$1 $2" == "scripts/linux-app-channel.mjs finalize-core" ]]; then
+              printf '%s\\n' "$*" >> "$CALLS"
+              return "$FINALIZER_EXIT"
+            fi
+          }
+          ${script}
+        `,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              PATH: process.env.PATH,
+              CALLS: calls,
+              FINALIZER_EXIT: String(finalizerExit),
+              RUNNER_TEMP: root,
+              GITHUB_REPOSITORY: "openclaw/openclaw",
+              RELEASE_TAG: tag,
+              RELEASE_NPM_DIST_TAG: distTag,
+              SOURCE_SHA: "a".repeat(40),
+              GITHUB_WORKFLOW_SHA: "b".repeat(40),
+              GITHUB_REF_NAME: "release-publish/bbbbbbbbbbbb-123",
+              GITHUB_REF: "refs/tags/release-publish/bbbbbbbbbbbb-123",
+              GITHUB_RUN_ID: "456",
+              GITHUB_RUN_ATTEMPT: "1",
+            },
+          },
+        );
+        expect(readFileSync(calls, "utf8")).toContain(
+          `finalize-core --tag ${tag} --source-sha ${"a".repeat(40)} --latest ${latest}`,
+        );
+        expect(result.status, result.stderr).toBe(finalizerExit);
+      }
+    },
+  );
 
   it("keeps Docker required by default and activates early only after explicit approval", () => {
     const workflow = readWorkflow(".github/workflows/openclaw-release-publish.yml");

@@ -13,7 +13,7 @@ import type {
 } from "../../../packages/gateway-protocol/src/schema/sessions.js";
 import type { SessionAgentAttentionIconId } from "../../../packages/gateway-protocol/src/session-agent-status.js";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
-import type { SessionRunStatus } from "../api/types.ts";
+import type { GatewaySessionRow, SessionRunStatus } from "../api/types.ts";
 import type { ApplicationContext } from "../app/context.ts";
 import type { BoardFace } from "../lib/board/settings.ts";
 import type { SessionChannelPresentation } from "../lib/session-channel.ts";
@@ -45,12 +45,6 @@ export type SidebarSessionAttention =
   | { kind: "approval"; requests: readonly SidebarAttentionRequest[] }
   | { kind: "agent"; note: string; icon: SessionAgentAttentionIconId }
   | { kind: "error"; reason: string; childLabel?: string };
-
-/** Client-owned attention that can name a session before its row is loaded. */
-export type SidebarKnownSessionAttention = {
-  sessionKey: string;
-  attention: Extract<SidebarSessionAttention, { kind: "question" } | { kind: "approval" }>;
-};
 
 export const SIDEBAR_SESSION_NO_ATTENTION: SidebarSessionAttention = { kind: "none" };
 
@@ -130,6 +124,7 @@ export type SidebarRecentSession = {
   pinnable: boolean;
   archived?: boolean;
   visibility?: SessionVisibility;
+  sharingRole?: GatewaySessionRow["sharingRole"];
   draftOwnedBySelf?: boolean;
   category?: string;
   icon?: string;
@@ -164,13 +159,12 @@ export type SidebarRecentSession = {
   /** Own state remains distinct from the collapsed-tree projection. */
   ownAttention?: SidebarSessionAttention;
   ownWorkspaceConflictCount?: number;
-  childAttention?: readonly SidebarSessionAttention[];
   unreadChildCount?: number;
   queuedChildCount?: number;
   /** Hidden run state remains visible when persistent children are expanded. */
   subagentSummary?: Pick<
     SidebarRecentSession,
-    | "childAttention"
+    | "attention"
     | "unreadChildCount"
     | "queuedChildCount"
     | "runningChildCount"
@@ -225,7 +219,8 @@ export type SidebarSessionHovercardRow = Pick<
   | "startedAt"
   | "updatedAt"
   | "workContext"
->;
+> &
+  Partial<Pick<SidebarRecentSession, "attention">>;
 
 export const enum RowVisibilityReason {
   Any = 0,

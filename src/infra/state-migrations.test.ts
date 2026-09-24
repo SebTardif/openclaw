@@ -70,10 +70,7 @@ import {
   migrateLegacyCurrentConversationBindings,
   migrateLegacyPluginBindingApprovals,
 } from "./state-migrations.runtime-state.js";
-import {
-  resetAutoMigrateLegacyStateDirForTest,
-  resetAutoMigrateLegacyTaskStateSidecarsForTest,
-} from "./state-migrations.state-dir.js";
+import { resetAutoMigrateLegacyStateDirForTest } from "./state-migrations.state-dir.js";
 import { loadVoiceWakeRoutingConfig } from "./voicewake-routing.js";
 import { loadVoiceWakeConfig, setVoiceWakeTriggers } from "./voicewake.js";
 
@@ -807,7 +804,6 @@ async function createLegacyStateFixture(params?: { includePreKey?: boolean }) {
 afterEach(async () => {
   vi.useRealTimers();
   pluginDoctorStateMigrationEntries.entries = [];
-  resetAutoMigrateLegacyTaskStateSidecarsForTest();
   resetAutoMigrateLegacyStateDirForTest();
   await closeDatabaseTestCohorts(migrationDatabaseClosers);
   resetPluginRuntimeStateForTest();
@@ -1293,10 +1289,11 @@ describe("state migrations", () => {
 
   it("preserves retired config locators before an advisory transcript migration return", async () => {
     const { root, stateDir, env } = createMigrationContext(await createTempDir());
+    openOpenClawStateDatabase({ env });
     const databasePath = path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite");
     fsSync.mkdirSync(path.dirname(databasePath), { recursive: true });
-    const database = new DatabaseSync(databasePath);
-    try {
+    {
+      using database = new DatabaseSync(databasePath);
       ensureOpenClawAgentDatabaseSchema(database, {
         agentId: "main",
         env,
@@ -1308,8 +1305,6 @@ describe("state migrations", () => {
           "INSERT INTO schema_meta(meta_key,role,schema_version,agent_id,app_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
         )
         .run("historical-transcript-directives-v1", "agent", 1, "main", "invalid-json", 1, 1);
-    } finally {
-      database.close();
     }
     const store = path.join(root, "legacy-jobs.json");
     const cfg: OpenClawConfig & { cron: { store: string } } = {
@@ -4068,9 +4063,16 @@ describe("state migrations", () => {
       homedir: () => root,
       doctorOnlyStateMigrations: true,
     });
-    db.exec("PRAGMA query_only = ON;");
-
-    const result = await runLegacyStateMigrations({ detected, config: cfg, env });
+    const result = await runLegacyStateMigrations({
+      detected,
+      config: cfg,
+      env,
+      onStepReceipt: (receipt) => {
+        if (receipt.id === "plugin-install-index") {
+          openOpenClawStateDatabase({ env }).db.exec("PRAGMA query_only = ON;");
+        }
+      },
+    });
 
     expect(result.stepReceipts.find((receipt) => receipt.id === "managed-worktrees")).toMatchObject(
       {
@@ -4089,10 +4091,9 @@ describe("state migrations", () => {
         refusal: { code: "blocked-by-prior-refusal" },
       },
     );
-    expect(db.prepare("SELECT id FROM worktrees ORDER BY id").all()).toEqual([
-      { id: "legacy-a" },
-      { id: "legacy-b" },
-    ]);
+    expect(
+      openOpenClawStateDatabase({ env }).db.prepare("SELECT id FROM worktrees ORDER BY id").all(),
+    ).toEqual([{ id: "legacy-a" }, { id: "legacy-b" }]);
   });
 
   it("does not run plugin doctor migrations after shared state schema repair fails", async () => {
@@ -5546,27 +5547,18 @@ describe("state migrations", () => {
       '"retryCount":2',
     );
     await expectMissingPath(path.join(queueDir, "outbound-completed.delivered"));
+    const migratedDb = openOpenClawStateDatabase({ env }).db;
     expect(
-      db
+      migratedDb
         .prepare(
-          "SELECT retry_count FROM delivery_queue_entries WHERE queue_name = 'outbound' AND id = 'outbound-1'",
+          "SELECT id, retry_count, failed_at FROM delivery_queue_entries WHERE queue_name = 'outbound' ORDER BY id",
         )
-        .get(),
-    ).toEqual({ retry_count: 0 });
-    expect(
-      db
-        .prepare(
-          "SELECT retry_count FROM delivery_queue_entries WHERE queue_name = 'outbound' AND id = 'outbound-2'",
-        )
-        .get(),
-    ).toEqual({ retry_count: 1 });
-    expect(
-      db
-        .prepare(
-          "SELECT retry_count, failed_at FROM delivery_queue_entries WHERE queue_name = 'outbound' AND id = 'outbound-failed'",
-        )
-        .get(),
-    ).toEqual({ retry_count: 3, failed_at: 12 });
+        .all(),
+    ).toEqual([
+      { id: "outbound-1", retry_count: 0, failed_at: null },
+      { id: "outbound-2", retry_count: 1, failed_at: null },
+      { id: "outbound-failed", retry_count: 3, failed_at: 12 },
+    ]);
 
     vi.setSystemTime(2_000);
     const rerunDetected = await detectLegacyStateMigrations({ cfg, env, homedir: () => root });

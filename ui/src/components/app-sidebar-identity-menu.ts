@@ -37,7 +37,7 @@ type SidebarIdentityMenuParams = {
   gatewayVersion: string | null;
   updateAttentionDismissed: boolean;
   profileViewer?: PresenceViewer;
-  offline: boolean;
+  canRetryConnection: boolean;
   themeMode: ThemeMode;
   triggerWidth: number;
   onTabAway: () => void;
@@ -278,7 +278,7 @@ export function renderSidebarIdentityMenu(params: SidebarIdentityMenuParams) {
       <div class="sidebar-customize-menu__separator" role="separator"></div>
       ${renderSidebarHelpMenu()}
       ${
-        params.offline
+        params.canRetryConnection
           ? html`<div class="sidebar-customize-menu__separator" role="separator"></div>
               <wa-dropdown-item
                 class="sidebar-customize-menu__item sidebar-identity-menu__retry"
@@ -301,7 +301,10 @@ export function renderSidebarIdentityMenu(params: SidebarIdentityMenuParams) {
           }}
         ></openclaw-sidebar-build-chip>
         <span class="sidebar-mode-switch">
-          <openclaw-theme-mode-toggle .mode=${params.themeMode}></openclaw-theme-mode-toggle>
+          <openclaw-theme-mode-toggle
+            .mode=${params.themeMode}
+            .menuItem=${true}
+          ></openclaw-theme-mode-toggle>
         </span>
       </div>
     </wa-dropdown>
