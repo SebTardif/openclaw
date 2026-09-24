@@ -7,8 +7,6 @@ import {
   ServiceInspectionError,
   type ServiceInspectionReason,
 } from "./service-inspection-error.js";
-import type { GatewayServiceEnvArgs, GatewayServiceLoadState } from "./service-types.js";
-import type { GatewayService } from "./service.js";
 export type SystemdUserTransport =
   | { kind: "session-bus" | "runtime-bus" | "private"; address: string; runtimeDir: string }
   | { kind: "machine"; user: string };
@@ -60,25 +58,6 @@ export type GatewayServiceRuntime = {
   };
   systemd?: GatewayServiceSystemdRuntime;
 };
-
-export async function readGatewayServiceLoadState(
-  service: Pick<GatewayService, "isLoaded">,
-  args: GatewayServiceEnvArgs = {},
-): Promise<GatewayServiceLoadState> {
-  try {
-    return { status: (await service.isLoaded(args)) ? "loaded" : "not-loaded" };
-  } catch (error) {
-    const refusal = findServiceOwnershipRefusal(error);
-    if (refusal) {
-      throw refusal;
-    }
-    return {
-      status: "unknown",
-      detail: String(error),
-      ...(error instanceof ServiceInspectionError ? { inspectionReason: error.reason } : {}),
-    };
-  }
-}
 
 const SERVICE_RUNTIME_INSPECTION_ERROR_MAX_CHARS = 500;
 const SERVICE_RUNTIME_INSPECTION_FAILED_DETAIL = "service runtime inspection failed";

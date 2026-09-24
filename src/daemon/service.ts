@@ -40,6 +40,7 @@ import {
   ServiceOwnershipRefusalError,
   findServiceOwnershipRefusal,
 } from "./service-inspection-error.js";
+import { readGatewayServiceLoadState } from "./service-load-state.js";
 import {
   withGatewayServiceOperationLock,
   withSystemdServiceReadBinding,
@@ -47,7 +48,6 @@ import {
 import { captureGatewayServiceRebind } from "./service-rebind.js";
 import {
   createServiceRuntimeInspectionFailure,
-  readGatewayServiceLoadState,
   type GatewayServiceRuntime,
 } from "./service-runtime.js";
 import { collectGatewayServiceStartRepairIssues } from "./service-start-repair.js";
@@ -58,6 +58,7 @@ import type {
   GatewayServiceEnv,
   GatewayServiceEnvArgs,
   GatewayServiceInstallArgs,
+  GatewayServiceLoadStateReader,
   GatewayServiceManageArgs,
   GatewayServiceReadOptions,
   GatewayServiceRestartResult,
@@ -102,7 +103,7 @@ function ignoreServiceWriteResult<TArgs extends GatewayServiceInstallArgs>(
   };
 }
 
-export type GatewayService = {
+export type GatewayService = GatewayServiceLoadStateReader & {
   label: string;
   loadedText: string;
   notLoadedText: string;
@@ -112,7 +113,6 @@ export type GatewayService = {
   start: (args: GatewayServiceControlArgs) => Promise<void>;
   stop: (args: GatewayServiceControlArgs) => Promise<void>;
   restart: (args: GatewayServiceControlArgs) => Promise<GatewayServiceRestartResult>;
-  isLoaded: (args: GatewayServiceEnvArgs) => Promise<boolean>;
   isEnabled?: (args: GatewayServiceEnvArgs) => Promise<boolean>;
   hasInstalledDefinition?: (args: GatewayServiceEnvArgs) => Promise<boolean>;
   isAbsent?: (args: GatewayServiceEnvArgs & { strictCommandAbsent?: true }) => Promise<boolean>;

@@ -3,7 +3,7 @@ import type { Writable } from "node:stream";
 import { readBestEffortConfig } from "../../config/config.js";
 import { resolveIsNixMode } from "../../config/paths.js";
 import { checkTokenDrift } from "../../daemon/service-audit.js";
-import { readGatewayServiceLoadState } from "../../daemon/service-runtime.js";
+import { readGatewayServiceLoadState } from "../../daemon/service-load-state.js";
 import type { GatewayServiceRestartResult } from "../../daemon/service-types.js";
 import type {
   GatewayServiceStartRepairIssue,
