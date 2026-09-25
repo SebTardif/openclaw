@@ -34,7 +34,13 @@ export async function maybeResolveDuelingSystemdGatewayScopes(
   if (process.platform !== "linux") {
     return;
   }
-  const installation = await findSystemdGatewayInstallation(process.env).catch(() => null);
+  const installation = await findSystemdGatewayInstallation(process.env).catch(() => {
+    note(
+      "Could not verify the effective Gateway service identities. Nothing was removed; inspect both units with openclaw gateway status --deep.",
+      "Gateway cleanup needs an owner decision",
+    );
+    return null;
+  });
   if (installation?.kind !== "dueling") {
     return;
   }
@@ -98,6 +104,22 @@ export async function maybeResolveDuelingSystemdGatewayScopes(
     if (hints.length > 0) {
       note(hints.map((hint) => `- ${hint}`).join("\n"), "Cleanup hints");
     }
+    return;
+  }
+
+  const current = await findSystemdGatewayInstallation(process.env).catch(() => null);
+  if (
+    current?.kind !== "dueling" ||
+    current.user.unitName !== user.unitName ||
+    current.user.unitPath !== user.unitPath ||
+    current.system.unitName !== system.unitName ||
+    current.system.unitPath !== system.unitPath ||
+    !(await isSystemUnitActiveAndEnabled(process.env, system.unitName).catch(() => false))
+  ) {
+    note(
+      "Gateway service ownership changed or could not be verified after confirmation. Nothing was removed; inspect both units and run Doctor again.",
+      "Gateway cleanup needs an owner decision",
+    );
     return;
   }
 

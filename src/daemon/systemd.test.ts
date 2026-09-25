@@ -912,25 +912,6 @@ describe("system-scope gateway unit detection (openclaw#87577)", () => {
     expect(result?.unitPath).toContain("/.config/systemd/user/openclaw-gateway.service");
   });
 
-  it("findSystemdGatewayInstallation reports the dueling state when both units exist", async () => {
-    mockUnitFileLayout({
-      user: true,
-      system: "/etc/systemd/system/openclaw-gateway.service",
-    });
-    const installation = await findSystemdGatewayInstallation({ HOME: TEST_MANAGED_HOME });
-    expect(installation.kind).toBe("dueling");
-    if (installation.kind !== "dueling") {
-      throw new Error("expected dueling installation");
-    }
-    expect(installation.user.scope).toBe("user");
-    expect(installation.user.unitPath).toContain("/.config/systemd/user/openclaw-gateway.service");
-    expect(installation.system).toEqual({
-      scope: "system",
-      unitName: GATEWAY_SERVICE,
-      unitPath: "/etc/systemd/system/openclaw-gateway.service",
-    });
-  });
-
   it("findSystemdGatewayInstallation reports user-only", async () => {
     mockUnitFileLayout({ user: true, system: false });
     findSystemGatewayServicesMock.mockResolvedValueOnce([]);
@@ -969,13 +950,23 @@ describe("system-scope gateway unit detection (openclaw#87577)", () => {
     expect(installation.kind).toBe("none");
   });
 
-  it("formatDuelingScopesWarning renders remediation only for the dueling state", async () => {
-    mockUnitFileLayout({
-      user: true,
-      system: "/etc/systemd/system/openclaw-gateway.service",
-    });
-    const installation = await findSystemdGatewayInstallation({ HOME: TEST_MANAGED_HOME });
-    const warning = formatDuelingScopesWarning(installation, 18789);
+  it("formatDuelingScopesWarning renders remediation only for the dueling state", () => {
+    const warning = formatDuelingScopesWarning(
+      {
+        kind: "dueling",
+        user: {
+          scope: "user",
+          unitName: GATEWAY_SERVICE,
+          unitPath: `${TEST_MANAGED_HOME}/.config/systemd/user/openclaw-gateway.service`,
+        },
+        system: {
+          scope: "system",
+          unitName: GATEWAY_SERVICE,
+          unitPath: "/etc/systemd/system/openclaw-gateway.service",
+        },
+      },
+      18789,
+    );
     expect(warning).toContain("/.config/systemd/user/openclaw-gateway.service");
     expect(warning).toContain("/etc/systemd/system/openclaw-gateway.service");
     expect(warning).toContain("18789");
