@@ -36,7 +36,11 @@ async function isIMessagePairingStoreRequired(params: {
 }): Promise<boolean> {
   // Shared ingress admits open/allowlist DMs, groups, and configured allowFrom
   // matches (including accessGroup members) without stored pairing approval.
-  if (params.dmPolicy === "open" || params.dmPolicy === "allowlist") {
+  if (
+    params.dmPolicy === "open" ||
+    params.dmPolicy === "allowlist" ||
+    params.dmPolicy === "disabled"
+  ) {
     return false;
   }
   if (params.message.is_group) {

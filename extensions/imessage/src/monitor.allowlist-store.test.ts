@@ -334,4 +334,15 @@ describe("iMessage inbound pairing-store read failures", () => {
     expect(sendClient.request).not.toHaveBeenCalled();
     expect(runtime.error).not.toHaveBeenCalled();
   });
+
+  it("does not read the pairing store when direct messages are disabled", async () => {
+    await runInboundStoreCase({
+      message: {
+        guid: "pairing-store-disabled-dm-guid-1",
+        imessage: { dmPolicy: "disabled" },
+      },
+    });
+
+    expect(readChannelAllowFromStoreMock).not.toHaveBeenCalled();
+  });
 });
