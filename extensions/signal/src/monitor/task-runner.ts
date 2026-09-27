@@ -24,7 +24,11 @@ function createIdleTimeoutPromise(timeoutMs: number): {
 
 export function createSignalMonitorTaskRunner(runtime: RuntimeEnv) {
   const inFlight = new Set<Promise<void>>();
+  let deliveryRetired = false;
   return {
+    isDeliveryRetired(): boolean {
+      return deliveryRetired;
+    },
     runTask(task: () => Promise<void>): Promise<void> {
       const trackedTask = Promise.resolve().then(task);
       inFlight.add(trackedTask);
@@ -66,6 +70,9 @@ export function createSignalMonitorTaskRunner(runtime: RuntimeEnv) {
         ]);
         timeout.clear();
         if (outcome === "timeout") {
+          // The replacement monitor can recover this claim. Do not let the
+          // abandoned callback send after teardown gives up the drain.
+          deliveryRetired = true;
           const remaining = inFlight.size;
           const ingressPending = pendingExtras.size > 0;
           runtime.error?.(

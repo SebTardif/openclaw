@@ -546,6 +546,7 @@ export async function monitorSignalProvider(opts: MonitorSignalOpts = {}): Promi
       runtime,
       channelRuntime: opts.channelRuntime,
       abortSignal: daemonLifecycle.abortSignal,
+      isDeliveryRetired: () => monitorTaskRunner.isDeliveryRetired(),
       runTrackedTask: (task) => {
         void monitorTaskRunner.runTask(task);
       },

@@ -466,6 +466,9 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
     };
     const delivery: ChannelInboundTurnPlan["delivery"] = {
       deliver: async (payload, _info) => {
+        if (deps.isDeliveryRetired?.()) {
+          throw new Error("signal delivery retired before send");
+        }
         await deps.deliverReplies({
           cfg,
           replies: [payload],
@@ -491,6 +494,9 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
           replyToMode,
         });
         const send: typeof sendMessageSignal = async (to, text, options) => {
+          if (deps.isDeliveryRetired?.()) {
+            throw new Error("signal delivery retired before send");
+          }
           entry.turnAdoptionLifecycle?.abortSignal.throwIfAborted();
           deps.abortSignal?.throwIfAborted();
           const result = await sendMessageSignal(to, text, {

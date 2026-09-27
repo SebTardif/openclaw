@@ -96,6 +96,7 @@ export type SignalEventHandlerDeps = {
   channelRuntime?: PluginRuntime["channel"];
   statusReactionTiming?: Required<StatusReactionTiming>;
   abortSignal?: AbortSignal;
+  isDeliveryRetired?: () => boolean;
   runTrackedTask?: (task: () => Promise<void>) => void;
   cfg: OpenClawConfig;
   baseUrl: string;

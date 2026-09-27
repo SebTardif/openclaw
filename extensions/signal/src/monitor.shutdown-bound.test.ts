@@ -92,12 +92,9 @@ describe("monitorSignalProvider hung-receive shutdown", () => {
       throw new Error("expected hung reply resolver");
     }
     resolveReply({ text: "late reply after retirement" });
-    await vi.waitFor(() => expect(sendMock).toHaveBeenCalledTimes(1));
-    expect(sendMock).toHaveBeenCalledWith(
-      "+15550001111",
-      "PFX late reply after retirement",
-      expect.anything(),
-    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sendMock).not.toHaveBeenCalled();
   });
 
   it("keeps an accepted hung attachment claim when teardown hits the idle window", async () => {
