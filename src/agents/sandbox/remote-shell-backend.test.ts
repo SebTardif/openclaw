@@ -381,6 +381,17 @@ describe.runIf(process.platform === "linux" || process.platform === "darwin")(
       },
     );
 
+    it("gives workspace bootstrap upload a deadline signal", async () => {
+      const fixture = await createFixture();
+      let uploadSignal: AbortSignal | undefined;
+      const backend = await fixture.createBackend("deadline", async (params, upload) => {
+        uploadSignal = params.signal;
+        await upload(params);
+      });
+      await backend.runShellCommand({ script: "true" });
+      expect(uploadSignal?.aborted).toBe(false);
+    });
+
     it("adopts existing unmarked remote workspaces without reseeding them", async () => {
       const fixture = await createFixture();
       const backend = await fixture.createBackend("source");

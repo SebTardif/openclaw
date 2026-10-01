@@ -17,6 +17,10 @@ export const DEFAULT_SANDBOX_MAX_AGE_DAYS = 7;
 // Bound sandbox-controlled output before it can exhaust the host heap.
 export const SANDBOX_COMMAND_MAX_BUFFER_BYTES = 100 * 1024 * 1024;
 
+// Remote workspace bootstrap has no caller deadline. Ten minutes covers a
+// large tree on a slow link and still ends a hung tar extract.
+export const SANDBOX_WORKSPACE_BOOTSTRAP_TIMEOUT_MS = 10 * 60 * 1000;
+
 export const DEFAULT_TOOL_ALLOW = [
   "exec",
   "process",

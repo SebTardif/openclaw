@@ -101,4 +101,27 @@ describe.runIf(process.platform !== "win32")("provider-owned remote shell transp
     ).rejects.toThrow("remote exited from signal SIGTERM");
     await session.dispose();
   });
+
+  it("stops an upload when its deadline aborts", async () => {
+    const root = await fs.realpath(tempDirs.make("remote-shell-deadline-"));
+    const localDir = path.join(root, "local");
+    await fs.mkdir(localDir);
+    await fs.writeFile(path.join(localDir, "payload"), "payload-bytes");
+    const session = createRemoteShellSandboxSession({
+      buildCommand: () => ({
+        argv: ["/bin/sh", "-c", "sleep 30"],
+        env: { ...process.env },
+        cwd: root,
+      }),
+    });
+    await expect(
+      session.uploadDirectory({
+        localDir,
+        remoteDir: path.join(root, "remote"),
+        remoteRootDir: root,
+        signal: AbortSignal.timeout(200),
+      }),
+    ).rejects.toThrow(/abort/i);
+    await session.dispose();
+  });
 });
