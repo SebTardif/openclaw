@@ -193,6 +193,14 @@ async function createFixture() {
       params: RemoteShellUploadParams,
       run: (params: RemoteShellUploadParams) => Promise<void>,
     ) => Promise<void>,
+    runCommand?: (
+      params: { remoteCommand: string; signal?: AbortSignal; allowFailure?: boolean },
+      run: (params: {
+        remoteCommand: string;
+        signal?: AbortSignal;
+        allowFailure?: boolean;
+      }) => Promise<{ stdout: Buffer; stderr: Buffer; code: number }>,
+    ) => Promise<{ stdout: Buffer; stderr: Buffer; code: number }>,
   ) => {
     const workspaceDir = path.join(root, label, "workspace");
     const agentWorkspaceDir = path.join(root, label, "agent");
@@ -222,6 +230,10 @@ async function createFixture() {
               upload
                 ? upload(params, (input) => session.uploadDirectory(input))
                 : session.uploadDirectory(params),
+            runCommand: (params) =>
+              runCommand
+                ? runCommand(params, (input) => session.runCommand(input))
+                : session.runCommand(params),
           };
         },
       },
@@ -380,6 +392,35 @@ describe.runIf(process.platform === "linux" || process.platform === "darwin")(
         }
       },
     );
+
+    it("rejects bootstrap when staging cleanup does not finish", async () => {
+      const fixture = await createFixture();
+      const backend = await fixture.createBackend(
+        "cleanup-bound",
+        async () => {
+          throw new Error("synthetic upload failure");
+        },
+        async (params, run) => {
+          if (!params.remoteCommand.includes("remove_owned_stage(sys.argv[1])")) {
+            return await run(params);
+          }
+          if (!params.signal) {
+            throw new Error("staging cleanup has no deadline");
+          }
+          return await new Promise<never>((_resolve, reject) => {
+            const abort = () => reject(new Error("cleanup aborted"));
+            if (params.signal?.aborted) {
+              abort();
+              return;
+            }
+            params.signal?.addEventListener("abort", abort, { once: true });
+          });
+        },
+      );
+      await expect(backend.runShellCommand({ script: "true" })).rejects.toThrow(
+        "synthetic upload failure",
+      );
+    });
 
     it("gives workspace bootstrap upload a deadline signal", async () => {
       const fixture = await createFixture();

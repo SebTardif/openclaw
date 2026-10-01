@@ -7,7 +7,10 @@ import type {
   SandboxBackendCommandResult,
 } from "./backend-handle.types.js";
 import type { CreateSandboxBackendParams, SandboxBackendHandle } from "./backend.types.js";
-import { SANDBOX_WORKSPACE_BOOTSTRAP_TIMEOUT_MS } from "./constants.js";
+import {
+  SANDBOX_WORKSPACE_BOOTSTRAP_CLEANUP_TIMEOUT_MS,
+  SANDBOX_WORKSPACE_BOOTSTRAP_TIMEOUT_MS,
+} from "./constants.js";
 import { hashTextSha256 } from "./hash.js";
 import {
   createRemoteShellSandboxFsBridge,
@@ -264,19 +267,28 @@ class RemoteShellSandboxBackendImpl {
     } finally {
       clearTimeout(bootstrapTimer);
       if (stagingRoot) {
-        // Preserve the original failure. An unreachable orphan never becomes a
-        // completed workspace, and cleanup must not guess at other publishers.
-        await session
-          .runCommand({
-            remoteCommand: buildRemoteCommand([
-              "python3",
-              "-c",
-              CLEANUP_REMOTE_WORKSPACE_STAGE,
-              stagingRoot,
-            ]),
-            allowFailure: true,
-          })
-          .catch(() => undefined);
+        // Preserve the original failure. Cleanup has its own budget so a hung
+        // remove cannot keep the shared bootstrap promise open.
+        const cleanupAbort = new AbortController();
+        const cleanupTimer = setTimeout(() => {
+          cleanupAbort.abort(new Error("Sandbox workspace bootstrap cleanup timed out"));
+        }, SANDBOX_WORKSPACE_BOOTSTRAP_CLEANUP_TIMEOUT_MS);
+        try {
+          await session
+            .runCommand({
+              remoteCommand: buildRemoteCommand([
+                "python3",
+                "-c",
+                CLEANUP_REMOTE_WORKSPACE_STAGE,
+                stagingRoot,
+              ]),
+              allowFailure: true,
+              signal: cleanupAbort.signal,
+            })
+            .catch(() => undefined);
+        } finally {
+          clearTimeout(cleanupTimer);
+        }
       }
       await session.dispose();
     }
