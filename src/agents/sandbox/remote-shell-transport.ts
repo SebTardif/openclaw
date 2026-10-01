@@ -228,7 +228,7 @@ async function uploadDirectoryToRemoteCommand(
       { name: "remote", process: remote },
     ].map((child) =>
       Object.assign(child, {
-        stderr: [] as Buffer[],
+        stderr: new Array<Buffer>(),
         stderrBytes: 0,
         closed: false,
         code: 0,
