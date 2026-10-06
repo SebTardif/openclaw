@@ -1,8 +1,20 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { constants, tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inspectManagedProcessGroup } from "../lib/managed-child-process.mts";
 
 const SIGNAL_GRACE_MS = 5000;
 const KILL_DRAIN_MS = 5000;
@@ -21,6 +33,50 @@ if (process.platform === "win32") {
 }
 
 const repoRoot = resolve(repoRootArg);
+// Only the mktemp creator survives both execs as this supervisor. No child may
+// inherit cleanup authority, and an inherited pathname is never a deletion input.
+const anchorCreator = process.env.OPENCLAW_PR_ANCHOR_CREATOR_PID;
+const anchorFd = process.env.OPENCLAW_PR_ANCHOR_FD;
+delete process.env.OPENCLAW_PR_ANCHOR_CREATOR_PID;
+delete process.env.OPENCLAW_PR_ANCHOR_FD;
+let ownedAnchor;
+if (anchorCreator === String(process.pid) && anchorFd === "9") {
+  let directoryFd = false;
+  try {
+    const path = dirname(dirname(resolve(script)));
+    const held = fstatSync(9, { bigint: true });
+    directoryFd = held.isDirectory();
+    const current = lstatSync(path, { bigint: true });
+    if (
+      basename(path).startsWith("openclaw-pr-anchor.") &&
+      resolve(script) === join(path, "scripts", "pr") &&
+      realpathSync(script) === resolve(script) &&
+      realpathSync(fileURLToPath(import.meta.url)) ===
+        join(path, "scripts", "pr-lib", "process-group-runner.mjs") &&
+      held.isDirectory() &&
+      current.isDirectory() &&
+      held.dev === current.dev &&
+      held.ino === current.ino &&
+      held.uid === BigInt(process.getuid()) &&
+      (held.mode & 0o777n) === 0o700n &&
+      held.mode === current.mode &&
+      held.uid === current.uid
+    ) {
+      ownedAnchor = { path, dev: held.dev, ino: held.ino, uid: held.uid, mode: held.mode };
+    }
+  } catch {
+    // Missing or replaced creation evidence is retain-only.
+  }
+  if (directoryFd) {
+    process.once("exit", () => {
+      try {
+        closeSync(9);
+      } catch {
+        // A missing creation FD never grants cleanup authority.
+      }
+    });
+  }
+}
 // The supervisor must not retain a cwd inside a worktree the operation may
 // delete. Start the child in this same owner so early Git/gh reads use the
 // repository selected by the wrapper, before any PR worktree is entered.
@@ -42,7 +98,7 @@ if (process.platform === "darwin") {
       lockScript,
       String(process.pid),
     ],
-    { encoding: "utf8", timeout: 5000, maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] },
+    { encoding: "utf8", timeout: 15_000, maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] },
   );
   if (identity.status !== 0 || !identity.stdout?.trim()) {
     console.error(
@@ -68,6 +124,32 @@ process.once("exit", () => {
 });
 // merge-run can delete this revision's script directory before lock release.
 writeFileSync(lockScriptSnapshot, readFileSync(lockScript));
+writeFileSync(
+  join(lockSnapshotDir, "host-tools.sh"),
+  readFileSync(new URL("./host-tools.sh", import.meta.url)),
+);
+// GC may delete the linked wrapper before reading the next PR. Retain this
+// stdlib-only adapter under the same supervisor-owned cleanup lifetime.
+for (const relative of [
+  "pr-lib/github.sh",
+  "pr-lib/github.mjs",
+  "pr-lib/gh-api-preflight.mjs",
+  "lib/plain-gh.mjs",
+  "lib/direct-run.mjs",
+]) {
+  const target = join(lockSnapshotDir, "scripts", relative);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, readFileSync(new URL(`../${relative}`, import.meta.url)));
+}
+// Imported Git owners and package-manager children use PATH. Keep the selected
+// binary available even after merge cleanup removes the wrapper's worktree.
+const selectedGit = process.env.OPENCLAW_PR_GIT || process.env.GIT_EXEC;
+const childPath = selectedGit
+  ? `${lockSnapshotDir}${delimiter}${process.env.PATH ?? ""}`
+  : process.env.PATH;
+if (selectedGit) {
+  symlinkSync(selectedGit, join(lockSnapshotDir, "git"));
+}
 if (process.platform === "darwin") {
   // Keep the complete stdlib-only provider beside the release shell. No app
   // node_modules, dynamic package loader or deleted source path is retained.
@@ -112,25 +194,21 @@ function exitCodeForSignal(signal) {
   return typeof signalNumber === "number" ? 128 + signalNumber : 1;
 }
 
-function processGroupStatus(pgid) {
+function processGroupStatus() {
   if (operationGroupGone) {
     return "dead";
   }
-  if (!Number.isSafeInteger(pgid) || pgid <= 1 || pgid > 0x7fffffff) {
-    return "indeterminate";
+  // The shared owner distinguishes exited Linux threads awaiting reaping from
+  // live descendants. Only this supervisor's observed child exit permits that check.
+  const state = inspectManagedProcessGroup(child, {
+    deadlineAt: killDeadline,
+    errorPolicy: "indeterminate",
+  });
+  if (state === "dead") {
+    // Never let later PGID reuse redirect a delayed signal or liveness probe.
+    operationGroupGone = true;
   }
-  try {
-    process.kill(-pgid, 0);
-    return "live";
-  } catch (error) {
-    if (error?.code === "ESRCH") {
-      // Once absent, this operation group is gone forever. Never let later
-      // PGID reuse redirect a delayed signal or liveness probe.
-      operationGroupGone = true;
-      return "dead";
-    }
-    return "indeterminate";
-  }
+  return state;
 }
 
 function processGroupRows(pgid) {
@@ -257,10 +335,12 @@ const child = spawn(script, args, {
   detached: true,
   env: {
     ...process.env,
+    PATH: childPath,
     GIT_CONFIG_PARAMETERS: gitConfigParameters,
     OPENCLAW_PR_DEDICATED_PROCESS_GROUP: "1",
     OPENCLAW_PR_LOCK_NOTIFY_FD: "3",
     OPENCLAW_PR_LOCK_SUPERVISOR_PID: String(process.pid),
+    OPENCLAW_PR_GITHUB_SNAPSHOT_ROOT: lockSnapshotDir,
   },
   stdio: ["inherit", "inherit", "inherit", "pipe"],
 });
@@ -324,10 +404,14 @@ function consumeNotificationLine(line) {
     return;
   }
 
-  const owner = spawnSync("git", ["-C", repoRoot, "cat-file", "blob", ownerOid], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  });
+  const owner = spawnSync(
+    process.env.OPENCLAW_PR_GIT || process.env.GIT_EXEC || "git",
+    ["-C", repoRoot, "cat-file", "blob", ownerOid],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    },
+  );
   const ownerMatch =
     owner.status === 0
       ? /^version=3\nstate=active\npgid=([1-9][0-9]*)\nsupervisor_pid=([1-9][0-9]*)\nsupervisor_birth=[^\t\n]+\ntoken=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\n?$/u.exec(
@@ -448,7 +532,7 @@ function childResultAllowsLockRelease() {
   return completedCleanly || failedDuringValidation;
 }
 
-const postExitGroupStatus = child.pid ? processGroupStatus(child.pid) : "dead";
+const postExitGroupStatus = child.pid ? processGroupStatus() : "dead";
 if (postExitGroupStatus === "indeterminate") {
   notificationFailure ??= new Error("scripts/pr process-group state became indeterminate");
 } else if (postExitGroupStatus === "live") {
@@ -467,7 +551,7 @@ if (postExitGroupStatus === "indeterminate") {
 
 async function waitForOperationDrain() {
   while (true) {
-    const groupStatus = child.pid ? processGroupStatus(child.pid) : "dead";
+    const groupStatus = child.pid ? processGroupStatus() : "dead";
     if (groupStatus === "indeterminate") {
       throw new Error("scripts/pr process-group state became indeterminate");
     }
@@ -666,6 +750,35 @@ if (drained && childResultAllowsLockRelease()) {
 }
 for (const { lock, releaseError } of retainedLocks) {
   reportRetainedLock(lock, releaseError, releaseFailures);
+}
+
+if (
+  ownedAnchor &&
+  drainResult === "drained" &&
+  childResultAllowsLockRelease() &&
+  retainedLocks.length === 0 &&
+  !notificationFailure
+) {
+  try {
+    const held = fstatSync(9, { bigint: true });
+    const current = lstatSync(ownedAnchor.path, { bigint: true });
+    if (
+      current.isDirectory() &&
+      realpathSync(ownedAnchor.path) === ownedAnchor.path &&
+      [held, current].every(
+        (value) =>
+          value.dev === ownedAnchor.dev &&
+          value.ino === ownedAnchor.ino &&
+          value.uid === ownedAnchor.uid &&
+          value.mode === ownedAnchor.mode,
+      )
+    ) {
+      // rm does not follow the materializer's external dependency symlinks.
+      rmSync(ownedAnchor.path, { recursive: true });
+    }
+  } catch {
+    console.error("Warning: retaining the materialized PR wrapper after anchor cleanup failed.");
+  }
 }
 
 if (notificationFailure) {

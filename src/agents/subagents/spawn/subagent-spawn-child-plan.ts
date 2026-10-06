@@ -16,55 +16,16 @@ import type {
   SpawnSubagentParams,
   SpawnSubagentResult,
 } from "./subagent-spawn-contract.js";
-import { resolveSubagentModelAndThinkingPlan, splitModelRef } from "./subagent-spawn-plan.js";
+import { resolveSubagentModelAndThinkingPlan } from "./subagent-spawn-plan.js";
 import {
   readRequesterFastMode,
-  readRequesterModel,
-  readRequesterThinkingLevel,
+  readRequesterPreferences,
 } from "./subagent-spawn-requester-prefs.js";
 import {
   normalizeDeliveryContext,
   resolveAgentConfig,
   resolveSandboxRuntimeStatus,
 } from "./subagent-spawn.runtime.js";
-
-function buildResolvedSubagentModelMetadata(resolvedModel?: string): {
-  resolvedModel?: string;
-  resolvedProvider?: string;
-} {
-  const modelRef = resolvedModel?.trim();
-  if (!modelRef) {
-    return {};
-  }
-  const { provider } = splitModelRef(modelRef);
-  return {
-    resolvedModel: modelRef,
-    ...(provider ? { resolvedProvider: provider } : {}),
-  };
-}
-
-type ResolvedSubagentChildPlan = {
-  spawnedCwd?: string;
-  toolSpawnMetadata: ReturnType<typeof mapToolContextToSpawnedRunMetadata>;
-  spawnedWorkspaceDir?: string;
-  requesterOrigin: ReturnType<typeof normalizeDeliveryContext>;
-  childSessionOrigin: ReturnType<typeof resolveRequesterOriginForChild>;
-  incognito: boolean;
-  childSessionKey: string;
-  childRuntimeSandboxed: boolean;
-  creationPolicy: ReturnType<typeof inheritSessionCreationPolicy>;
-  targetAgentDir: string;
-  modelPlan: Extract<
-    Awaited<ReturnType<typeof resolveSubagentModelAndThinkingPlan>>,
-    { status: "ok" }
-  >;
-  launchAuthorization?: SubagentLaunchAuthorization;
-  resolvedModelMetadata: ReturnType<typeof buildResolvedSubagentModelMetadata>;
-};
-
-type ResolveSubagentChildPlanResult =
-  | { ok: false; result: SpawnSubagentResult }
-  | { ok: true; resolved: ResolvedSubagentChildPlan };
 
 export async function resolveSubagentChildPlan(params: {
   request: SpawnSubagentParams;
@@ -78,9 +39,26 @@ export async function resolveSubagentChildPlan(params: {
   /** Active requester sandbox classification from the spawn tool, preferred over key-derived
    * status so durable-lineage key substitution does not weaken sandbox admission. */
   requesterSandboxed?: boolean;
-}): Promise<ResolveSubagentChildPlanResult> {
+}) {
   const requestedCwd = normalizeOptionalString(params.request.cwd);
-  const spawnedCwd = requestedCwd ? resolveUserPath(requestedCwd) : undefined;
+  const senderRestricted = params.ctx.inheritedToolPolicySource === "sender";
+  const requesterRoot = params.ctx.sessionPermissionPolicy?.root ?? params.ctx.workspaceDir;
+  if (
+    senderRestricted &&
+    (params.request.worktree ||
+      params.request.projectId ||
+      (requestedCwd &&
+        (!requesterRoot || resolveUserPath(requestedCwd) !== resolveUserPath(requesterRoot))))
+  ) {
+    return {
+      ok: false as const,
+      result: {
+        status: "forbidden",
+        error:
+          "This sender's helpers must keep the requester's workspace and session root. Omit cwd, projectId, and worktree.",
+      } satisfies SpawnSubagentResult,
+    };
+  }
   const toolSpawnMetadata = mapToolContextToSpawnedRunMetadata({
     agentGroupId: params.ctx.agentGroupId,
     agentGroupChannel: params.ctx.agentGroupChannel,
@@ -137,6 +115,9 @@ export async function resolveSubagentChildPlan(params: {
   const childRuntimeSandboxed =
     creationPolicy.sandbox === "required" ||
     resolveSandboxRuntimeStatus({ cfg: params.cfg, sessionKey: childSessionKey }).sandboxed;
+  const childCwd =
+    requestedCwd ?? (senderRestricted && !childRuntimeSandboxed ? requesterRoot : undefined);
+  const spawnedCwd = childCwd ? resolveUserPath(childCwd) : undefined;
   const sandboxError = resolveSpawnSandboxError({
     backend: "subagent",
     // Prefer the explicit active classification from the spawn tool; fall back to key-derived
@@ -147,41 +128,42 @@ export async function resolveSubagentChildPlan(params: {
     sandbox: params.sandboxMode,
   });
   if (sandboxError) {
-    return { ok: false, result: { status: "forbidden", error: sandboxError } };
+    return {
+      ok: false as const,
+      result: { status: "forbidden", error: sandboxError } satisfies SpawnSubagentResult,
+    };
   }
   const spawnedWorkspaceCwd = spawnedWorkspaceDir
     ? resolveUserPath(spawnedWorkspaceDir)
     : undefined;
   if (childRuntimeSandboxed && spawnedCwd && spawnedCwd !== spawnedWorkspaceCwd) {
     return {
-      ok: false,
+      ok: false as const,
       result: {
         status: "forbidden",
         error:
           "cwd override is not supported for sandboxed subagent runs; omit cwd or use the target agent workspace as cwd",
-      },
+      } satisfies SpawnSubagentResult,
     };
   }
   const targetAgentDir = resolveAgentDir(params.cfg, params.targetAgentId);
   const requesterAgentConfig = resolveAgentConfig(params.cfg, params.requesterAgentId);
   const targetAgentConfig = resolveAgentConfig(params.cfg, params.targetAgentId);
-  // The active turn owns inherited effort; saved preferences may already describe
-  // a later turn and cannot represent one-shot overrides.
-  const callerThinkingRaw =
-    params.ctx.requesterThinkingLevel ??
-    readRequesterThinkingLevel({
-      cfg: params.cfg,
-      requesterInternalKey: params.requesterInternalKey,
-      requesterAgentId: params.requesterAgentId,
-    });
-  const inheritedFastMode =
-    params.swarmEnabled && params.request.fastMode === undefined
-      ? readRequesterFastMode({
+  const requesterPreferences =
+    params.ctx.requesterThinkingLevel === undefined ||
+    (params.targetAgentId === params.requesterAgentId && !params.ctx.requesterModel)
+      ? await readRequesterPreferences({
           cfg: params.cfg,
           requesterInternalKey: params.requesterInternalKey,
           requesterAgentId: params.requesterAgentId,
+          assertActive: params.ctx.assertActive,
         })
-      : params.request.fastMode;
+      : undefined;
+  params.ctx.assertActive?.();
+  // The active turn owns inherited effort; saved preferences may already describe
+  // a later turn and cannot represent one-shot overrides.
+  const callerThinkingRaw =
+    params.ctx.requesterThinkingLevel ?? requesterPreferences?.thinkingLevel;
   const modelPlan = await resolveSubagentModelAndThinkingPlan({
     cfg: params.cfg,
     targetAgentId: params.targetAgentId,
@@ -192,40 +174,43 @@ export async function resolveSubagentChildPlan(params: {
     callerThinkingRaw,
     inheritedModel:
       params.targetAgentId === params.requesterAgentId
-        ? (params.ctx.requesterModel ??
-          readRequesterModel({
-            cfg: params.cfg,
-            requesterInternalKey: params.requesterInternalKey,
-            requesterAgentId: params.requesterAgentId,
-          }))
+        ? (params.ctx.requesterModel ?? requesterPreferences?.model)
         : undefined,
-    fastMode: inheritedFastMode,
+    fastMode: params.request.fastMode,
     workspaceDir: spawnedWorkspaceDir,
     requiresTools: params.request.outputSchema !== undefined,
   });
+  params.ctx.assertActive?.();
   if (modelPlan.status === "error") {
     return {
-      ok: false,
+      ok: false as const,
       result: {
         status: "error",
         error: modelPlan.error,
         ...(params.request.outputSchema ? { childSessionKey } : {}),
-      },
+      } satisfies SpawnSubagentResult,
     };
   }
   const { resolvedModel } = modelPlan;
-  const resolvedLaunchModel = splitModelRef(resolvedModel);
-  const launchAuthorization: SubagentLaunchAuthorization | undefined =
-    params.request.model?.trim() && resolvedLaunchModel.model
-      ? {
-          modelOverride: {
-            ...(resolvedLaunchModel.provider ? { provider: resolvedLaunchModel.provider } : {}),
-            model: resolvedLaunchModel.model,
-          },
-        }
-      : undefined;
+  if (params.swarmEnabled && params.request.fastMode === undefined) {
+    const fastMode = await readRequesterFastMode({
+      cfg: params.cfg,
+      requesterInternalKey: params.requesterInternalKey,
+      requesterAgentId: params.requesterAgentId,
+      requesterModel: params.ctx.requesterModel,
+      childModel: resolvedModel,
+      assertActive: params.ctx.assertActive,
+    });
+    params.ctx.assertActive?.();
+    if (fastMode !== undefined) {
+      modelPlan.initialSessionPatch.fastMode = fastMode;
+    }
+  }
+  const launchAuthorization: SubagentLaunchAuthorization | undefined = params.request.model?.trim()
+    ? { modelOverride: modelPlan.modelRef }
+    : undefined;
   return {
-    ok: true,
+    ok: true as const,
     resolved: {
       spawnedCwd,
       toolSpawnMetadata,
@@ -239,7 +224,10 @@ export async function resolveSubagentChildPlan(params: {
       targetAgentDir,
       modelPlan,
       launchAuthorization,
-      resolvedModelMetadata: buildResolvedSubagentModelMetadata(resolvedModel),
+      resolvedModelMetadata: {
+        resolvedModel,
+        resolvedProvider: modelPlan.modelRef.provider,
+      },
     },
   };
 }

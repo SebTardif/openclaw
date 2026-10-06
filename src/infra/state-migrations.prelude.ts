@@ -17,32 +17,30 @@ import {
   resolveLegacyProfileWorkspaceMigrationPaths,
   resolvePendingLegacyProfileWorkspaceMigrationPaths,
 } from "./state-migrations.state-dir.js";
-import { migrateHistoricalTranscriptDirectives } from "./state-migrations.transcript-directives.js";
 import type {
   LegacyStateMigrationEndpoint,
+  LegacyStateMigrationInvocationPurpose,
   LegacyStateMigrationMode,
   LegacyStateMigrationStep,
 } from "./state-migrations.types.js";
 
 export function buildUnresolvedBlockedPreludeSteps(
   mode: LegacyStateMigrationMode,
+  invocationPurpose: LegacyStateMigrationInvocationPurpose,
 ): LegacyStateMigrationStep[] {
-  const ids =
-    mode === "automatic"
-      ? ["transcript-directives"]
-      : [
-          "media-persistence",
-          "transcript-directives",
-          "profile-workspace",
-          "plugin-migration-preparation",
-          "orphan-session-keys",
-        ];
+  const ids = [
+    ...(mode === "doctor" ? ["media-persistence", "session-entry-state"] : []),
+    ...(invocationPurpose === "doctor" ? ["transcript-directives"] : []),
+    ...(mode === "doctor"
+      ? ["profile-workspace", "plugin-migration-preparation", "orphan-session-keys"]
+      : []),
+  ];
   return ids.map((id) => ({
     id,
     phase: "shared",
     source: [],
     target: [],
-    requiredness: "conditional",
+    requiredness: id === "session-entry-state" ? "required" : "conditional",
     reversibility: "checkpoint-required",
     run: () => ({ changes: [], warnings: [] }),
   }));
@@ -86,6 +84,36 @@ export function createConfigMigrationSources(
   );
 }
 
+export function createAgentTargetDiscoveryStep(params: {
+  configPath: string;
+  configIncludedPaths: readonly string[];
+  stateDir: string;
+  env: NodeJS.ProcessEnv;
+  run: LegacyStateMigrationStep["run"];
+  refusal?: PreparedLegacyStateMigrationStep["refusal"];
+}): LegacyStateMigrationStep {
+  return {
+    id: "agent-migration-targets",
+    phase: "shared",
+    source: [
+      ...createConfigMigrationSources(params.configPath, params.configIncludedPaths),
+      {
+        kind: "sqlite",
+        path: resolveOpenClawStateSqlitePath({
+          ...params.env,
+          OPENCLAW_STATE_DIR: params.stateDir,
+        }),
+      },
+      { kind: "path", path: path.join(params.stateDir, "agents") },
+    ],
+    target: [],
+    requiredness: "required",
+    reversibility: "not-applicable",
+    ...(params.refusal ? { refusal: params.refusal } : {}),
+    run: params.run,
+  };
+}
+
 export function inspectOrphanSessionStoreEndpoints(params: {
   config: OpenClawConfig;
   env: NodeJS.ProcessEnv;
@@ -123,6 +151,7 @@ export function inspectOrphanSessionStoreEndpoints(params: {
 
 export function buildLegacyStateMigrationPreludeSteps(params: {
   mode: LegacyStateMigrationMode;
+  invocationPurpose: LegacyStateMigrationInvocationPurpose;
   config: OpenClawConfig;
   configPath: string;
   configIncludedPaths: readonly string[];
@@ -166,6 +195,7 @@ export function buildLegacyStateMigrationPreludeSteps(params: {
     target,
     requiredness,
     reversibility: "checkpoint-required",
+    collectNotices: id === "profile-workspace",
     ...(refusal ? { refusal } : {}),
     run,
   });
@@ -186,21 +216,52 @@ export function buildLegacyStateMigrationPreludeSteps(params: {
           },
         }),
       ),
+      sharedStep(
+        "session-entry-state",
+        agentPersistence,
+        agentPersistence,
+        async () => {
+          const { repairLegacySessionEntryStates } =
+            await import("../commands/doctor-session-delivery-state.js");
+          const report = await repairLegacySessionEntryStates({
+            apply: true,
+            cfg: params.config,
+            env: stateEnv,
+          });
+          return {
+            changes:
+              report.repaired > 0
+                ? [`Canonicalized entry state for ${report.repaired} durable session row(s).`]
+                : [],
+            warnings: [],
+          };
+        },
+        undefined,
+        "required",
+      ),
     );
   }
-  steps.push(
-    sharedStep("transcript-directives", agentPersistence, agentPersistence, () =>
-      migrateHistoricalTranscriptDirectives({ ...agentMigrationOptions, preparedTargets }),
-    ),
-  );
+  if (params.invocationPurpose === "doctor") {
+    steps.push(
+      sharedStep("transcript-directives", agentPersistence, agentPersistence, async () => {
+        const { migrateHistoricalTranscriptDirectives } =
+          await import("./state-migrations.transcript-directives.js");
+        return await migrateHistoricalTranscriptDirectives({
+          ...agentMigrationOptions,
+          preparedTargets,
+        });
+      }),
+    );
+  }
   if (params.mode !== "doctor") {
     return steps;
   }
+  const profileParams = { config: params.config, env: params.env, homedir: params.homedir };
   const profileWorkspace = (
     params.readOnlyPlanning
       ? resolveLegacyProfileWorkspaceMigrationPaths
       : resolvePendingLegacyProfileWorkspaceMigrationPaths
-  )({ env: params.env, homedir: params.homedir });
+  )(profileParams);
   const profileRefusal =
     profileWorkspace && params.readOnlyPlanning
       ? {
@@ -214,7 +275,7 @@ export function buildLegacyStateMigrationPreludeSteps(params: {
       "profile-workspace",
       profileWorkspace ? [{ kind: "path", path: profileWorkspace.source }] : [],
       profileWorkspace ? [{ kind: "path", path: profileWorkspace.target }] : [],
-      () => migrateLegacyProfileWorkspace({ env: params.env, homedir: params.homedir }),
+      () => migrateLegacyProfileWorkspace(profileParams),
       profileRefusal,
       profileWorkspace ? "conditional" : "not-required",
     ),
@@ -226,7 +287,7 @@ export function buildLegacyStateMigrationPreludeSteps(params: {
   if (!orphanSessionStores) {
     // Early failures still close this stable step; its sources are prepared after prerequisites.
     steps.push(
-      ...buildUnresolvedBlockedPreludeSteps(params.mode).filter(
+      ...buildUnresolvedBlockedPreludeSteps(params.mode, params.invocationPurpose).filter(
         (step) => step.id === "orphan-session-keys",
       ),
     );

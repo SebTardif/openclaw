@@ -6,6 +6,8 @@ import { afterEach, beforeEach, expect, vi } from "vitest";
 import {
   codexTestTurnIds,
   createFakeCodexAppServerClient,
+  threadStartResult as nativeThreadStartResult,
+  turnStartResult as nativeTurnStartResult,
 } from "./codex-app-server.test-fixtures.js";
 import {
   createCodexTestHostCapabilities,
@@ -190,28 +192,9 @@ export function extractRelayIdFromThreadConfig(config: unknown): string {
 }
 
 function threadResult(threadId: string) {
+  const { thread } = nativeThreadStartResult(threadId, "/tmp/workspace");
   return {
-    thread: {
-      id: threadId,
-      sessionId: threadId,
-      forkedFromId: null,
-      preview: "",
-      ephemeral: true,
-      modelProvider: "openai",
-      createdAt: 1,
-      updatedAt: 1,
-      status: { type: "idle" },
-      path: null,
-      cwd: "/tmp/workspace",
-      projectId: null,
-      cliVersion: "0.149.0",
-      source: "unknown",
-      agentNickname: null,
-      agentRole: null,
-      gitInfo: null,
-      name: null,
-      turns: [],
-    },
+    thread: { ...thread, sessionId: threadId, ephemeral: true, cliVersion: "0.149.0" },
     model: "gpt-5.5",
     modelProvider: "openai",
     cwd: "/tmp/workspace",
@@ -222,18 +205,7 @@ function threadResult(threadId: string) {
 }
 
 function turnStartResult(turnId: string) {
-  return {
-    turn: {
-      id: turnId,
-      threadId: "side-thread",
-      status: "inProgress",
-      items: [],
-      error: null,
-      startedAt: null,
-      completedAt: null,
-      durationMs: null,
-    },
-  };
+  return { turn: { ...nativeTurnStartResult(turnId).turn, threadId: "side-thread" } };
 }
 
 function agentDelta(threadId: string, turnId: string, delta: string): CodexServerNotification {
@@ -254,14 +226,9 @@ function turnCompleted(
     params: {
       threadId,
       turn: {
-        id: turnId,
+        ...nativeTurnStartResult(turnId, status).turn,
         threadId,
-        status,
         items: [{ id: "agent-1", type: "agentMessage", text }],
-        error: null,
-        startedAt: null,
-        completedAt: null,
-        durationMs: null,
       },
     },
   };
@@ -279,9 +246,35 @@ const TEST_HOST_CAPABILITIES: SideQuestionParams["hostCapabilities"] = Object.fr
   waitForApproval: async () => undefined,
 });
 
+export function platformPreparedRuntimeAuth(resolvedApiKey?: string) {
+  return {
+    plan: {
+      providerForAuth: "openai",
+      authProfileProviderForAuth: "openai",
+      selectedAuthMode: "api-key",
+      modelRoute: {
+        provider: "openai",
+        modelId: "gpt-5.6",
+        api: "openai-responses",
+        baseUrl: "https://api.openai.com/v1",
+        authRequirement: "api-key",
+        requestTransportOverrides: "none",
+      },
+    },
+    authProfileStore: {
+      version: 1 as const,
+      profiles: {},
+      order: { openai: [] },
+    },
+    authStorage: {} as never,
+    modelRegistry: {} as never,
+    ...(resolvedApiKey ? { resolvedApiKey } : {}),
+  } satisfies Parameters<typeof runCodexAppServerSideQuestion>[0]["preparedRuntimeAuth"];
+}
+
 function sideParams(overrides: Partial<SideQuestionParams> = {}): SideQuestionParams {
   let hostCapabilities = overrides.hostCapabilities ?? TEST_HOST_CAPABILITIES;
-  if (!hostCapabilities.createToolSurface) {
+  if (!hostCapabilities.createToolSurfaceAsync) {
     hostCapabilities = createCodexTestHostCapabilities(hostCapabilities);
     setCodexTestToolFactory({ hostCapabilities }, createOpenClawCodingToolsMock);
   }
@@ -391,16 +384,12 @@ export function useSideQuestionTestSetup() {
     ]);
 
     readCodexAppServerBindingMock.mockReturnValue({
-      schemaVersion: 1,
       threadId: "parent-thread",
-      sessionFile: "/tmp/session-1.jsonl",
       cwd: "/tmp/workspace",
       authProfileId: "openai:work",
       model: "gpt-5.5",
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
-      createdAt: new Date(0).toISOString(),
-      updatedAt: new Date(0).toISOString(),
     });
     isCodexAppServerNativeAuthProfileMock.mockReturnValue(true);
     getSharedCodexAppServerClientMock.mockResolvedValue(createFakeClient());
@@ -496,4 +485,25 @@ export async function runSideQuestionWithManagedWebSearchCall(
   const forkCall = client.request.mock.calls.find(([method]) => method === "thread/fork");
   const forkConfig = (forkCall?.[1] as { config?: Record<string, unknown> } | undefined)?.config;
   return { forkConfig, result, toolResponse };
+}
+
+export function createPendingClient({ interrupt = true } = {}) {
+  const client = createFakeClient({ completeTurn: false });
+  client.request.mockImplementation(async (method: string) => {
+    if (method === "thread/fork") {
+      return threadResult("side-thread");
+    }
+    if (method === "turn/start") {
+      return turnStartResult("turn-1");
+    }
+    if (
+      method === "thread/inject_items" ||
+      method === "thread/unsubscribe" ||
+      (interrupt && method === "turn/interrupt")
+    ) {
+      return {};
+    }
+    throw new Error(`unexpected request: ${method}`);
+  });
+  return client;
 }

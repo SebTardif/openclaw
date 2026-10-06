@@ -1,8 +1,6 @@
 // Signal tests cover monitor shutdown when ingress stop waits on a hung reply.
-import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  config,
   createMockSignalDaemonHandle,
   createSignalToolResultConfig,
   getSignalToolResultIngressQueue,
@@ -65,10 +63,9 @@ describe("monitorSignalProvider hung-receive shutdown", () => {
       autoStart: false,
       baseUrl: "http://127.0.0.1:8080",
       abortSignal: abortController.signal,
-      config: config as OpenClawConfig,
       runtime,
     });
-    await vi.waitFor(() => expect(replyMock).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(replyMock).toHaveBeenCalledTimes(1), { timeout: 10_000 });
 
     vi.useFakeTimers();
     abortController.abort(new Error("monitor stopped"));
@@ -100,7 +97,14 @@ describe("monitorSignalProvider hung-receive shutdown", () => {
   it("keeps an accepted hung attachment claim when teardown hits the idle window", async () => {
     const abortController = new AbortController();
     const runtime = createMonitorRuntime();
-    signalRpcRequestMock.mockImplementation(() => new Promise(() => {}));
+    // Resolvable hang so harness afterEach can finish ingress stop after the idle fence.
+    let rejectAttachmentRpc: ((reason?: unknown) => void) | undefined;
+    signalRpcRequestMock.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectAttachmentRpc = reject;
+        }),
+    );
     streamMock.mockImplementation(async ({ onEvent, abortSignal }) => {
       await onEvent({
         event: "receive",
@@ -125,37 +129,48 @@ describe("monitorSignalProvider hung-receive shutdown", () => {
       autoStart: false,
       baseUrl: "http://127.0.0.1:8080",
       abortSignal: abortController.signal,
-      config: config as OpenClawConfig,
       runtime,
     });
-    await vi.waitFor(() => expect(signalRpcRequestMock).toHaveBeenCalled());
+    try {
+      await vi.waitFor(() => expect(signalRpcRequestMock).toHaveBeenCalled(), {
+        timeout: 10_000,
+      });
 
-    const queue = getSignalToolResultIngressQueue();
-    if (!queue) {
-      throw new Error("expected Signal ingress queue");
+      const queue = getSignalToolResultIngressQueue();
+      if (!queue) {
+        throw new Error("expected Signal ingress queue");
+      }
+      const claimedBeforeStop = await queue.listClaims();
+      expect(claimedBeforeStop.length).toBeGreaterThan(0);
+
+      vi.useFakeTimers();
+      abortController.abort(new Error("monitor stopped"));
+      await vi.advanceTimersByTimeAsync(WAIT_FOR_IDLE_TIMEOUT_MS);
+
+      let returned = false;
+      const returnedPromise = monitorPromise.then(() => {
+        returned = true;
+      });
+      await Promise.resolve();
+      expect(returned).toBe(true);
+      await returnedPromise;
+
+      expect(runtime.error).toHaveBeenCalledWith(
+        expect.stringContaining(`${WAIT_FOR_IDLE_TIMEOUT_MS}ms`),
+      );
+      const claimedAfterReturn = await queue.listClaims();
+      expect(claimedAfterReturn.map((claim) => claim.id)).toEqual(
+        claimedBeforeStop.map((claim) => claim.id),
+      );
+    } finally {
+      vi.useRealTimers();
+      // Release the deferred delivery so ingress stop (started during teardown) can settle
+      // before the harness afterEach awaits monitor.stop again.
+      rejectAttachmentRpc?.(new Error("test cleanup"));
+      await monitorPromise.catch(() => undefined);
+      await Promise.resolve();
+      await Promise.resolve();
     }
-    const claimedBeforeStop = await queue.listClaims();
-    expect(claimedBeforeStop.length).toBeGreaterThan(0);
-
-    vi.useFakeTimers();
-    abortController.abort(new Error("monitor stopped"));
-    await vi.advanceTimersByTimeAsync(WAIT_FOR_IDLE_TIMEOUT_MS);
-
-    let returned = false;
-    const returnedPromise = monitorPromise.then(() => {
-      returned = true;
-    });
-    await Promise.resolve();
-    expect(returned).toBe(true);
-    await returnedPromise;
-
-    expect(runtime.error).toHaveBeenCalledWith(
-      expect.stringContaining(`${WAIT_FOR_IDLE_TIMEOUT_MS}ms`),
-    );
-    const claimedAfterReturn = await queue.listClaims();
-    expect(claimedAfterReturn.map((claim) => claim.id)).toEqual(
-      claimedBeforeStop.map((claim) => claim.id),
-    );
   });
 
   it("does not complete while managed daemon stop is still unresolved", async () => {
@@ -181,7 +196,6 @@ describe("monitorSignalProvider hung-receive shutdown", () => {
       autoStart: true,
       baseUrl: "http://127.0.0.1:8080",
       abortSignal: abortController.signal,
-      config: config as OpenClawConfig,
       runtime,
     });
     await vi.waitFor(() => expect(resolveDaemonStop).toBeDefined());

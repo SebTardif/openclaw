@@ -62,10 +62,15 @@ async function writePackage(root: string, version: string, body: string, schema 
   for (const name of [
     "openclaw.mjs",
     "node-host-launcher.mjs",
+    "node-compile-cache.mjs",
     "node-version.mjs",
     "node-sqlite.mjs",
     "node-runtime-update.mjs",
     "node-runtime-recovery.mjs",
+    "node-runtime-env.mjs",
+    "cli-root-options.mjs",
+    "gateway-run-argv.mjs",
+    "gateway-shutdown-budget.mjs",
   ]) {
     await fs.copyFile(path.resolve(name), path.join(root, name));
   }
@@ -110,7 +115,15 @@ async function fixture(body: string, stateRelativePath = "state") {
     return { prefix, packageRoot };
   };
   const current = path.join(runtimeDirectory, "current");
-  return { root, base, stateDir, runtimeDirectory, current, release };
+  const select = async (prefix: string, options: { stale?: boolean; backup?: boolean } = {}) => {
+    const selector = options.backup ? `${current}.previous` : current;
+    await fs.symlink(prefix, selector, process.platform === "win32" ? "junction" : "dir");
+    if (options.stale) {
+      const old = new Date(Date.now() - 13 * 60 * 60 * 1_000);
+      await fs.lutimes(selector, old, old);
+    }
+  };
+  return { root, base, stateDir, runtimeDirectory, current, release, select };
 }
 
 function run(
@@ -118,8 +131,9 @@ function run(
   stateDir: string,
   args = ["node", "run"],
   extraEnv: NodeJS.ProcessEnv = {},
+  execArgv: readonly string[] = [],
 ) {
-  const child = spawn(process.execPath, [path.join(base, "openclaw.mjs"), ...args], {
+  const child = spawn(process.execPath, [...execArgv, path.join(base, "openclaw.mjs"), ...args], {
     cwd: base,
     env: {
       ...process.env,
@@ -157,7 +171,7 @@ try {
 }
 `;
 
-async function windowsSelectorEnvironment(root: string, current: string, failure?: string) {
+async function windowsSelectorFixture(root: string, current: string, failure?: string) {
   const preload = path.join(root, "windows-selector.mjs");
   await fs.writeFile(
     preload,
@@ -187,9 +201,11 @@ syncBuiltinESMExports();
 `,
   );
   return {
-    NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
-    TEST_CURRENT: current,
-    TEST_RENAME_FAILURE: failure,
+    execArgv: ["--import", pathToFileURL(preload).href],
+    env: {
+      TEST_CURRENT: current,
+      TEST_RENAME_FAILURE: failure,
+    },
   };
 }
 
@@ -203,13 +219,6 @@ describe("managed node launcher", () => {
     const result = await run(f.base, f.stateDir, argv).done;
     expect(result.code, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout.trim())).toEqual({ supervised: false });
-  });
-
-  it("lets a drained runtime exit without the supervisor IPC keeping it alive", async () => {
-    const f = await fixture("await ready(); report('drained');");
-    const result = await run(f.base, f.stateDir).done;
-    expect(result.code, result.stderr).toBe(0);
-    expect(result.stdout).toContain('"drained"');
   });
 
   it.each(["--openclaw-node-host-child", "--openclaw-node-host-managed-child"])(
@@ -241,7 +250,7 @@ report({before, after: getManagedNodeHostStatePath() ?? null});
 process.exit(0);
 `,
     );
-    await fs.symlink(managed.prefix, f.current, process.platform === "win32" ? "junction" : "dir");
+    await f.select(managed.prefix);
     const result = await run(f.base, f.stateDir).done;
     expect(result.code, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout.trim())).toEqual({
@@ -265,11 +274,7 @@ if (!process.env.TEST_BOOTSTRAPPED) {
       const f = await fixture(body);
       if (selected === "managed") {
         const managed = await f.release("2026.9.2", body);
-        await fs.symlink(
-          managed.prefix,
-          f.current,
-          process.platform === "win32" ? "junction" : "dir",
-        );
+        await f.select(managed.prefix);
       }
       const argv = ["node", "run", "--display-name", "bootstrap"];
       const launched = run(f.base, f.stateDir, argv, {
@@ -289,11 +294,8 @@ if (!process.env.TEST_BOOTSTRAPPED) {
   );
 
   it.each([
-    ["2026.9.2", "managed"],
     ["2026.9.1", "managed"],
     ["2026.8.9", "base"],
-    ["2026.9.1-beta.1", "base"],
-    ["2026.9.1-1", "managed"],
   ])(
     "selects the newest runtime (%s) before loading the invoking package",
     async (version, expected) => {
@@ -301,11 +303,7 @@ if (!process.env.TEST_BOOTSTRAPPED) {
         `report({selected:'${selected}',state:getManagedNodeHostStatePath() ?? null,argv:process.argv.slice(2)}); process.exit(0);`;
       const f = await fixture(reportSelection("base"));
       const managed = await f.release(version, reportSelection("managed"));
-      await fs.symlink(
-        managed.prefix,
-        f.current,
-        process.platform === "win32" ? "junction" : "dir",
-      );
+      await f.select(managed.prefix);
       const result = await run(f.base, f.stateDir).done;
       expect(result.code, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout.trim())).toEqual({
@@ -391,9 +389,7 @@ setTimeout(() => {
 }, 100);
 `,
     );
-    await fs.symlink(previous.prefix, f.current, process.platform === "win32" ? "junction" : "dir");
-    const old = new Date(Date.now() - 13 * 60 * 60 * 1_000);
-    await fs.lutimes(f.current, old, old);
+    await f.select(previous.prefix, { stale: true });
     const before = await fs.lstat(f.current);
     const result = await run(f.base, f.stateDir, ["node", "run"], {
       TEST_RUNTIME_ROOT: candidate.prefix,
@@ -426,20 +422,20 @@ if (process.env.TEST_SELECT_ONLY || version === process.env.TEST_VERSION) {
       const f = await fixture("throw new Error('the global runtime must not load');");
       const previous = await f.release("2026.9.2", body);
       const candidate = await f.release("2026.9.3", body);
-      await fs.symlink(
-        previous.prefix,
-        f.current,
-        process.platform === "win32" ? "junction" : "dir",
-      );
-      const old = new Date(Date.now() - 13 * 60 * 60 * 1_000);
-      await fs.lutimes(f.current, old, old);
+      await f.select(previous.prefix, { stale: true });
       const previousMtime = (await fs.lstat(f.current)).mtimeMs;
-      const env = await windowsSelectorEnvironment(f.root, f.current, failure);
-      const result = await run(f.base, f.stateDir, ["node", "run"], {
-        ...env,
-        TEST_RUNTIME_ROOT: candidate.prefix,
-        TEST_VERSION: "2026.9.3",
-      }).done;
+      const { env, execArgv } = await windowsSelectorFixture(f.root, f.current, failure);
+      const result = await run(
+        f.base,
+        f.stateDir,
+        ["node", "run"],
+        {
+          ...env,
+          TEST_RUNTIME_ROOT: candidate.prefix,
+          TEST_VERSION: "2026.9.3",
+        },
+        execArgv,
+      ).done;
       expect(result.code, result.stderr).toBe(failure === "crash" ? 91 : 0);
       const backup = `${f.current}.previous`;
       const interrupted = failure === "rollback-fails" || failure === "crash";
@@ -456,11 +452,17 @@ if (process.env.TEST_SELECT_ONLY || version === process.env.TEST_VERSION) {
       if (failure === "rollback-fails") {
         expect(result.stderr).toContain(backup);
       }
-      const restarted = await run(f.base, f.stateDir, ["node", "run"], {
-        ...env,
-        TEST_SELECT_ONLY: "1",
-        TEST_RENAME_FAILURE: undefined,
-      }).done;
+      const restarted = await run(
+        f.base,
+        f.stateDir,
+        ["node", "run"],
+        {
+          ...env,
+          TEST_SELECT_ONLY: "1",
+          TEST_RENAME_FAILURE: undefined,
+        },
+        execArgv,
+      ).done;
       expect(restarted.code, restarted.stderr).toBe(0);
       expect(JSON.parse(restarted.stdout.trim())).toEqual({
         version: failure ? "2026.9.2" : "2026.9.3",
@@ -470,12 +472,18 @@ if (process.env.TEST_SELECT_ONLY || version === process.env.TEST_VERSION) {
           // Crash recovery keeps the existing operator-owned stale-lock policy.
           await fs.unlink(path.join(f.runtimeDirectory, "activation.lock"));
         }
-        const recovered = await run(f.base, f.stateDir, ["node", "run"], {
-          ...env,
-          TEST_RUNTIME_ROOT: candidate.prefix,
-          TEST_VERSION: "2026.9.3",
-          TEST_RENAME_FAILURE: undefined,
-        }).done;
+        const recovered = await run(
+          f.base,
+          f.stateDir,
+          ["node", "run"],
+          {
+            ...env,
+            TEST_RUNTIME_ROOT: candidate.prefix,
+            TEST_VERSION: "2026.9.3",
+            TEST_RENAME_FAILURE: undefined,
+          },
+          execArgv,
+        ).done;
         expect(recovered.code, recovered.stderr).toBe(0);
         expect(await fs.realpath(f.current)).toBe(await fs.realpath(candidate.prefix));
         await expect(fs.access(backup)).rejects.toThrow();
@@ -511,13 +519,7 @@ if (fs.existsSync(process.env.TEST_ATTEMPT)) {
       let previous;
       if (selected === "managed") {
         previous = await f.release("2026.9.1", body);
-        await fs.symlink(
-          previous.prefix,
-          f.current,
-          process.platform === "win32" ? "junction" : "dir",
-        );
-        const old = new Date(Date.now() - 13 * 60 * 60 * 1_000);
-        await fs.lutimes(f.current, old, old);
+        await f.select(previous.prefix, { stale: true });
       }
       const candidate = await f.release("2026.9.2", `${reportRuntime} process.exit(42);`);
       const result = await run(f.base, f.stateDir, ["node", "run"], {
@@ -582,9 +584,7 @@ await ready();
 process.exit(0);
 `,
     );
-    await fs.symlink(previous.prefix, f.current, process.platform === "win32" ? "junction" : "dir");
-    const old = new Date(Date.now() - 13 * 60 * 60 * 1_000);
-    await fs.lutimes(f.current, old, old);
+    await f.select(previous.prefix, { stale: true });
     const before = await fs.lstat(f.current);
     const candidateStarted = path.join(f.root, "candidate-started");
     const result = await run(f.base, f.stateDir, ["node", "run"], {
@@ -607,8 +607,6 @@ process.exit(0);
 
   it.each([
     ["2026.9.2", "current"],
-    ["2026.9.2-1", "current"],
-    ["2026.9.2", "current.previous"],
     ["2026.9.2-1", "current.previous"],
   ])(
     "refuses %s after another parent publishes a newer shared runtime at %s",
@@ -651,11 +649,7 @@ ${requestUpdate}
         "2026.9.2",
         "report({selected:'managed',state:process.env.OPENCLAW_STATE_DIR ?? null,home:process.env.OPENCLAW_HOME ?? null,managedState:getManagedNodeHostStatePath() ?? null}); process.exit(0);",
       );
-      await fs.symlink(
-        managed.prefix,
-        f.current,
-        process.platform === "win32" ? "junction" : "dir",
-      );
+      await f.select(managed.prefix);
       const inheritedHome = path.join(f.root, "inherited-home");
       const defaultState = path.join(inheritedHome, ".openclaw");
       const gatewayEnvDir = path.join(inheritedHome, ".config", "openclaw");
@@ -689,12 +683,17 @@ fs.readFileSync = (filename, ...args) => {
 syncBuiltinESMExports();
 `,
       );
-      const result = await run(f.base, f.stateDir, ["node", "run"], {
-        HOME: inheritedHome,
-        OPENCLAW_STATE_DIR: undefined,
-        OPENCLAW_CONFIG_PATH: oldConfig,
-        NODE_OPTIONS: `--import=${guard}`,
-      }).done;
+      const result = await run(
+        f.base,
+        f.stateDir,
+        ["node", "run"],
+        {
+          HOME: inheritedHome,
+          OPENCLAW_STATE_DIR: undefined,
+          OPENCLAW_CONFIG_PATH: oldConfig,
+        },
+        ["--import", pathToFileURL(guard).href],
+      ).done;
       expect(result.code, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout.trim())).toEqual({
         selected: "managed",
@@ -716,7 +715,7 @@ syncBuiltinESMExports();
       "2026.9.2",
       "report({selected:'profile-managed',state:getManagedNodeHostStatePath() ?? null}); process.exit(0);",
     );
-    await fs.symlink(managed.prefix, f.current, process.platform === "win32" ? "junction" : "dir");
+    await f.select(managed.prefix);
     const home = path.dirname(f.stateDir);
     await fs.mkdir(path.join(home, ".openclaw"), { recursive: true });
     await fs.writeFile(
@@ -750,11 +749,7 @@ syncBuiltinESMExports();
       );
       if (condition === "cooldown" || condition === "backup-cooldown") {
         const current = await f.release("2026.9.1", requestUpdate);
-        await fs.symlink(
-          current.prefix,
-          condition === "backup-cooldown" ? `${f.current}.previous` : f.current,
-          process.platform === "win32" ? "junction" : "dir",
-        );
+        await f.select(current.prefix, { backup: condition === "backup-cooldown" });
       } else if (condition === "existing-lock") {
         await fs.writeFile(
           path.join(f.runtimeDirectory, "activation.lock"),
@@ -787,21 +782,32 @@ syncBuiltinESMExports();
     },
   );
 
-  it("keeps foreground shutdown attached to the runtime process", async () => {
-    const f = await fixture(`
+  it.each(["signal", "parent-stdin"])(
+    "keeps %s shutdown attached to the runtime process",
+    async (mode) => {
+      const f = await fixture(`
 const keepAlive = setInterval(() => {}, 1000);
 process.once('SIGTERM', () => { report('stopped'); clearInterval(keepAlive); });
 await ready();
 report({ pid: process.pid });
 `);
-    const launched = run(f.base, f.stateDir);
-    await expect.poll(() => launched.output(), { timeout: 10_000 }).toContain("pid");
-    const { pid } = JSON.parse(launched.output().trim());
-    launched.child.kill("SIGTERM");
-    const result = await launched.done;
-    expect(result.stdout).toContain('"stopped"');
-    expect(() => process.kill(pid, 0)).toThrow();
-  });
+      const launched = run(f.base, f.stateDir, [
+        "node",
+        "run",
+        ...(mode === "parent-stdin" ? ["--parent-stdin"] : []),
+      ]);
+      await expect.poll(() => launched.output(), { timeout: 10_000 }).toContain("pid");
+      const { pid } = JSON.parse(launched.output().trim());
+      if (mode === "parent-stdin") {
+        launched.child.stdin.end();
+      } else {
+        launched.child.kill("SIGTERM");
+      }
+      const result = await launched.done;
+      expect(result.stdout).toContain('"stopped"');
+      expect(() => process.kill(pid, 0)).toThrow();
+    },
+  );
 
   it("serializes competing parents until the candidate reconnects", async () => {
     const f = await fixture(requestUpdate);

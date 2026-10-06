@@ -5,6 +5,7 @@ import { isSecretRef } from "../../config/types.secrets.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import { cloneAuthProfileStore } from "./clone.js";
 import { AUTH_STORE_VERSION } from "./constants.js";
+import { observeCanonicalAuthProfileCredentials } from "./credential-observation.js";
 import {
   assertAuthProfileMigrationCandidates,
   assertAuthProfileMigrationStateAtDatabasePath,
@@ -27,8 +28,13 @@ import {
   getRuntimeExternalCliProfileIds,
   setRuntimeExternalCliProfileIds,
 } from "./runtime-external-profile-references.js";
-import { resolveAuthProfileDatabasePath, type AuthProfileStoreOwner } from "./sqlite.js";
-import type { AuthProfileStore, RuntimeAuthProfileStore } from "./types.js";
+import { resolveAuthProfileDatabasePath } from "./sqlite.js";
+import type {
+  AuthProfileCredential,
+  AuthProfileStore,
+  AuthProfileStoreOwner,
+  RuntimeAuthProfileStore,
+} from "./types.js";
 
 export function createEmptyAuthProfileStore(): AuthProfileStore {
   return { version: AUTH_STORE_VERSION, profiles: {} };
@@ -59,14 +65,22 @@ export function markRuntimePersistedProfiles(
 }
 
 export function setRuntimeLocalProfileMetadata(
-  store: AuthProfileStore,
+  store: RuntimeAuthProfileStore,
   localProfileIds: Iterable<string>,
   runtimeInheritsMainState = false,
+  localStore?: AuthProfileStore,
 ): RuntimeAuthProfileStore {
   return {
     ...store,
     runtimeLocalProfileIds: [...new Set(localProfileIds)].toSorted(),
     ...(runtimeInheritsMainState ? { runtimeInheritsMainState: true } : {}),
+    ...(localStore
+      ? {
+          runtimeHasLocalOAuthProfiles: Object.values(localStore.profiles).some(
+            (credential) => credential.type === "oauth",
+          ),
+        }
+      : {}),
   };
 }
 
@@ -115,7 +129,70 @@ export function mergeLocalAuthProfileStoreWithInheritedStore(
     stripRuntimeExternalProfileMetadata(merged),
     listRuntimeLocalProfileIds(localStore, inheritedStore),
     runtimeStoreInheritsMainState(merged, localStore),
+    localStore,
   );
+}
+
+/** Unchanged local rows and selection state need only the committed shared credentials. */
+export function updateRuntimeAuthProfileStoreInheritedCredentials(
+  store: RuntimeAuthProfileStore,
+  inherited: AuthProfileStore,
+  mutation: { stateChanged: boolean; profileSetChanged?: boolean; profileIds: Iterable<string> },
+): RuntimeAuthProfileStore | undefined {
+  if (
+    store.runtimeHasLocalOAuthProfiles !== false ||
+    !store.runtimeLocalProfileIds ||
+    mutation.stateChanged ||
+    mutation.profileSetChanged
+  ) {
+    return undefined;
+  }
+  const local = new Set(store.runtimeLocalProfileIds);
+  const changed = [...mutation.profileIds].filter((id) => !local.has(id));
+  return replaceRuntimeAuthProfileStoreCredentials(store, inherited, changed);
+}
+
+/** Replace only admitted credential identities, retaining the host's same-ref materializations. */
+export function replaceRuntimeAuthProfileStoreCredentials(
+  store: RuntimeAuthProfileStore,
+  committed: AuthProfileStore,
+  changed: readonly string[],
+): RuntimeAuthProfileStore | undefined {
+  if (changed.length === 0) {
+    return store;
+  }
+  const profiles = { ...store.profiles };
+  const external = new Set(store.runtimeExternalProfileIds);
+  for (const id of changed) {
+    const next = committed.profiles[id];
+    const credential = next && preserveResolvedCredential(next, profiles[id]);
+    if (!profiles[id] || !credential) {
+      return undefined;
+    }
+    if (!isDeepStrictEqual(profiles[id], credential)) {
+      external.delete(id);
+    }
+    profiles[id] = credential;
+  }
+  const next: RuntimeAuthProfileStore = {
+    ...store,
+    version: Math.max(store.version, committed.version),
+    profiles,
+    runtimePersistedProfileIds: [
+      ...new Set([...(store.runtimePersistedProfileIds ?? []), ...changed]),
+    ].toSorted(),
+    runtimeExternalProfileIds:
+      external.size > 0 || store.runtimeExternalProfileIdsAuthoritative
+        ? [...external].toSorted()
+        : undefined,
+  };
+  setRuntimeExternalCliProfileIds(
+    next,
+    getRuntimeExternalCliProfileIds(store).filter(
+      (id) => !changed.includes(id) || external.has(id),
+    ),
+  );
+  return next;
 }
 
 /** Compose the selected durable owner without publishing or discovering an ambient environment. */
@@ -138,6 +215,9 @@ export function loadRuntimeAuthProfileOwnerSnapshot(
         loadPersistedAuthProfileStoreAtDatabasePath(owner.sharedDatabasePath, sharedKind) ??
           createEmptyAuthProfileStore(),
       ));
+  if (sharedStore && !options.inheritedStore) {
+    observeCanonicalAuthProfileCredentials(owner.sharedDatabasePath, sharedStore.profiles);
+  }
   if (options.candidates && sharedStore) {
     // Check committed shared facts before a fallible local read can enter publication recovery.
     assertAuthProfileMigrationCandidates({
@@ -152,6 +232,7 @@ export function loadRuntimeAuthProfileOwnerSnapshot(
       isShared ? sharedKind : "agent",
     ) ?? createEmptyAuthProfileStore(),
   );
+  observeCanonicalAuthProfileCredentials(owner.databasePath, localStore.profiles);
   if (options.candidates) {
     assertAuthProfileMigrationCandidates({
       databasePath: owner.databasePath,
@@ -249,16 +330,22 @@ export function runtimeAuthProfileSnapshotSharesOwner(
   snapshot: RuntimeAuthSharedOwner,
   owner: Pick<AuthProfileStoreOwner, "location" | "sharedDatabasePath">,
 ): boolean {
+  return resolveRuntimeAuthSharedOwnerPath(snapshot, owner.location) === owner.sharedDatabasePath;
+}
+
+/** Resolve a captured owner's path without opening a cold scope or consulting ambient state. */
+export function resolveRuntimeAuthSharedOwnerPath(
+  snapshot: RuntimeAuthSharedOwner,
+  location: AuthProfileStoreOwner["location"],
+): string {
   if (snapshot.kind === "resolved") {
-    return snapshot.sharedDatabasePath === owner.sharedDatabasePath;
+    return snapshot.sharedDatabasePath;
   }
   // Resolve forward from captured cold facts and the known producer's storage
   // location; never open the cold scope or infer ownership from directory ancestry.
-  const candidate =
-    owner.location === "state-db"
-      ? resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: snapshot.scope.stateDir })
-      : path.join(snapshot.scope.sharedMainDir, "openclaw-agent.sqlite");
-  return candidate === owner.sharedDatabasePath;
+  return location === "state-db"
+    ? resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: snapshot.scope.stateDir })
+    : path.join(snapshot.scope.sharedMainDir, "openclaw-agent.sqlite");
 }
 
 export function runtimeAuthSharedOwnerRebound(
@@ -380,26 +467,37 @@ export function preserveResolvedSecretBackedCredentials(params: {
 }): AuthProfileStore {
   const next = cloneAuthProfileStore(params.next);
   for (const [profileId, credential] of Object.entries(next.profiles)) {
-    const existing = params.existing.profiles[profileId];
-    if (
-      credential.type === "api_key" &&
-      existing?.type === "api_key" &&
-      credential.key === undefined &&
-      existing.key !== undefined &&
-      isSecretRef(credential.keyRef) &&
-      isDeepStrictEqual(credential.keyRef, existing.keyRef)
-    ) {
-      next.profiles[profileId] = { ...credential, key: existing.key };
-    } else if (
-      credential.type === "token" &&
-      existing?.type === "token" &&
-      credential.token === undefined &&
-      existing.token !== undefined &&
-      isSecretRef(credential.tokenRef) &&
-      isDeepStrictEqual(credential.tokenRef, existing.tokenRef)
-    ) {
-      next.profiles[profileId] = { ...credential, token: existing.token };
-    }
+    next.profiles[profileId] = preserveResolvedCredential(
+      credential,
+      params.existing.profiles[profileId],
+    );
   }
   return next;
+}
+
+function preserveResolvedCredential(
+  credential: AuthProfileCredential,
+  existing: AuthProfileCredential | undefined,
+): AuthProfileCredential {
+  if (
+    credential.type === "api_key" &&
+    existing?.type === "api_key" &&
+    credential.key === undefined &&
+    existing.key !== undefined &&
+    isSecretRef(credential.keyRef) &&
+    isDeepStrictEqual(credential.keyRef, existing.keyRef)
+  ) {
+    return { ...credential, key: existing.key };
+  }
+  if (
+    credential.type === "token" &&
+    existing?.type === "token" &&
+    credential.token === undefined &&
+    existing.token !== undefined &&
+    isSecretRef(credential.tokenRef) &&
+    isDeepStrictEqual(credential.tokenRef, existing.tokenRef)
+  ) {
+    return { ...credential, token: existing.token };
+  }
+  return credential;
 }

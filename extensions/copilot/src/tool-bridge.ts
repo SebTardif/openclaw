@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   convertMcpCallToolResult,
   type Tool as SdkTool,
@@ -23,14 +24,13 @@ import {
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { createAgentHarnessToolSurfaceRuntime } from "openclaw/plugin-sdk/agent-harness-tool-runtime";
 import { toStringifiedError as toCopilotToolError } from "openclaw/plugin-sdk/error-runtime";
+import { asOptionalRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { textResult } from "openclaw/plugin-sdk/tool-results";
 import { isRawCopilotModelRun } from "./attempt-mode.js";
 
 type CreateOpenClawCodingTools =
-  (typeof import("openclaw/plugin-sdk/agent-harness"))["createOpenClawCodingTools"];
+  (typeof import("openclaw/plugin-sdk/agent-harness"))["createOpenClawCodingToolsAsync"];
 type OpenClawCodingToolsOptions = NonNullable<Parameters<CreateOpenClawCodingTools>[0]>;
-type CreateOpenClawCodingToolsForBridge = (
-  options?: OpenClawCodingToolsOptions,
-) => ReturnType<CreateOpenClawCodingTools> | Promise<ReturnType<CreateOpenClawCodingTools>>;
 type AgentHarnessToolSurfaceRuntime = ReturnType<typeof createAgentHarnessToolSurfaceRuntime>;
 type CatalogExecuteParams = Parameters<
   NonNullable<AgentHarnessToolSurfaceRuntime["toolSearchCatalogExecutor"]>
@@ -40,14 +40,7 @@ type ScheduleToolExecution = (
   execute: () => Promise<ToolResultObject>,
 ) => Promise<ToolResultObject>;
 
-/**
- * Mutable holder populated by `attempt.ts` *after* `client.createSession()`
- * (or `client.resumeSession()`) succeeds, so that the tool bridge — which is
- * constructed *before* the SDK session exists — can route `onYield` events
- * to the live session's `abort()` later in the run. Bridged tools cannot
- * execute before the SDK session is up, so reading `current === undefined`
- * inside `onYield` is a no-op by design.
- */
+/** Populated after SDK session creation so tools built earlier can abort it on yield. */
 interface CopilotSessionHolder {
   current: { abort?: () => unknown } | undefined;
 }
@@ -78,48 +71,21 @@ interface CopilotToolBridgeInput {
   modelId: string;
   agentId: string;
   sessionId: string;
-  sessionKey?: string;
   agentDir?: string;
   workspaceDir?: string;
   cwd?: string;
-  /**
-   * Sandbox context resolved by the caller (typically `attempt.ts` via
-   * `resolveSandboxContext` from the plugin-sdk). When provided, wrapped
-   * tools see the same sandbox-aware behavior PI provides. `null` (or
-   * omitted) means sandbox is disabled.
-   */
+  /** Prepared by the attempt owner; null or omitted means no sandbox. */
   sandbox?: SandboxContext | null;
   /**
    * Spawn workspace prepared by the attempt from the original workspace.
    * Undefined keeps normal workspace wiring for absent or rw sandboxes.
    */
   spawnWorkspaceDir: string | undefined;
-  abortSignal?: AbortSignal;
   attemptParams: CopilotToolAttemptParams;
-  /**
-   * Mutable session holder used to wire `onYield` to the live
-   * `session.abort()` once the SDK session is established. See
-   * {@link CopilotSessionHolder}.
-   */
   sessionRef?: CopilotSessionHolder;
-  /**
-   * Invoked when a wrapped tool fires `sessions_yield`. The bridge
-   * always also calls `sessionRef.current?.abort?.()` to interrupt
-   * the in-flight SDK session; this callback lets the caller track
-   * the yield so the final attempt result can carry
-   * `yieldDetected: true` (the parent runner uses it to mark
-   * liveness as paused and stop_reason as `end_turn`).
-   */
+  /** Records yield before the bridge aborts the SDK session. */
   onYieldDetected?: (message?: string, acknowledgment?: string) => void;
   onToolCompleted?: (completion: CopilotToolCompletion) => void | Promise<void>;
-  createOpenClawCodingTools?: CreateOpenClawCodingToolsForBridge;
-  beforeExecute?: (ctx: {
-    toolName: string;
-    toolCallId: string;
-    args: unknown;
-    sourceTool: AnyAgentTool;
-    invocation: ToolInvocation;
-  }) => void | Promise<void>;
 }
 
 interface CopilotToolBridge {
@@ -130,6 +96,7 @@ interface CopilotToolBridge {
     apply: (params?: { toolsAllow?: string[]; forceToolNames?: readonly string[] }) => {
       tools: SdkTool[];
       callableToolNames: string[];
+      toolSchemaDirectoryPrompt?: string;
     };
   };
   sourceTools: AnyAgentTool[];
@@ -140,8 +107,6 @@ const EMPTY_PROMPT_TOOL_POLICY: CopilotToolBridge["promptToolPolicy"] = {
 };
 
 const SUPPORTED_TOOL_PROVIDERS: ReadonlySet<string> = new Set(["github-copilot"]);
-const BASE_COPILOT_CODING_TOOL_NAMES = new Set(["edit", "read", "write"]);
-const SHELL_COPILOT_CODING_TOOL_NAMES = new Set(["apply_patch", "exec", "process"]);
 
 export async function createCopilotToolBridge(
   input: CopilotToolBridgeInput,
@@ -165,8 +130,8 @@ export async function createCopilotToolBridge(
   }
 
   const toolSurfaceRuntime = createAgentHarnessToolSurfaceRuntime({
-    abortSignal: input.abortSignal,
-    agentId: attemptParams.sandboxAgentId ?? input.agentId,
+    abortSignal: attemptParams.abortSignal,
+    agentId: input.agentId,
     config: attemptParams.config,
     codeModeOverride: attemptParams.codeModeOverride,
     disableTools: attemptParams.disableTools,
@@ -181,11 +146,14 @@ export async function createCopilotToolBridge(
     modelId: input.modelId,
     modelProvider: input.modelProvider,
     modelToolsEnabled: true,
+    // SDK Tool.defer only defers registered declarations; omitted catalog names
+    // have no SDK handler. Use structured calls instead of promising hydration.
+    supportsDeferredToolCalls: false,
     prompt: attemptParams.prompt,
     runId: attemptParams.runId,
     runtimeToolAllowlist: toolPlan.runtimeToolAllowlist,
     sessionId: input.sessionId,
-    sessionKey: attemptParams.sandboxSessionKey ?? attemptParams.sessionKey ?? input.sessionKey,
+    sessionKey: attemptParams.sessionKey,
     scheduledToolPolicy: attemptParams.scheduledToolPolicy,
     sourceReplyDeliveryMode: attemptParams.sourceReplyDeliveryMode,
     toolsAllow: attemptParams.toolsAllow,
@@ -199,52 +167,25 @@ export async function createCopilotToolBridge(
     toolSurfaceRuntime,
   );
 
-  let sourceTools: AnyAgentTool[];
-  const boundSourceTools = new Set<AnyAgentTool>();
   const hostCapabilities = attemptParams.hostCapabilities;
   if (!hostCapabilities) {
     throw new Error("Copilot attempt tools require host-bound capabilities.");
   }
   const bindingCwd = toolOptions.cwd ?? toolOptions.workspaceDir;
   const bindingOptions = bindingCwd ? { cwd: bindingCwd } : undefined;
-  try {
-    let boundTools: AnyAgentTool[];
-    if (input.createOpenClawCodingTools) {
-      const constructedTools = await input.createOpenClawCodingTools(toolOptions);
-      if (!Array.isArray(constructedTools)) {
-        throw new Error("createOpenClawCodingTools must return an array of tools");
-      }
-      boundTools = hostCapabilities.bindToolSurface(constructedTools, bindingOptions);
-    } else {
-      const createToolSurface = hostCapabilities.createToolSurface;
-      if (!createToolSurface) {
-        throw new Error("Copilot tool construction requires a current host capability");
-      }
-      // The host supplies run-owned resources and binds its tools exactly once.
-      boundTools = createToolSurface(toolOptions, bindingOptions);
-    }
-    sourceTools = boundTools;
-    for (const tool of boundTools) {
-      boundSourceTools.add(tool);
-    }
-  } catch (error: unknown) {
-    throw createError(
-      `[copilot-tool-bridge] createOpenClawCodingTools failed: ${toCopilotToolError(error).message}`,
-      error,
-    );
+  const createToolSurfaceAsync = hostCapabilities.createToolSurfaceAsync;
+  if (!createToolSurfaceAsync) {
+    throw new Error("Copilot tool construction requires a current host capability");
   }
+  const sourceTools = await createToolSurfaceAsync(toolOptions, bindingOptions);
+  const boundSourceTools = new Set(sourceTools);
 
   const allowedSourceTools = applyEmbeddedAttemptToolsAllow(
     sourceTools,
     toolSurfaceRuntime.runtimeToolAllowlist,
-    { toolMeta: (tool) => getPluginToolMeta(tool) ?? readInlinePluginToolMeta(tool) },
+    { toolMeta: getPluginToolMeta },
   );
-  const plannedSourceTools = filterCopilotToolsForConstructionPlan(
-    allowedSourceTools,
-    toolPlan.codingToolConstructionPlan,
-    { preserveToolNames: toolSurfaceRuntime.runtimeToolAllowlist },
-  );
-  const compactedTools = toolSurfaceRuntime.compactTools(plannedSourceTools, {
+  const compactedTools = toolSurfaceRuntime.compactTools(allowedSourceTools, {
     localModelLeanApplied: true,
   });
   // The constructor output is bound before catalog compaction so hidden tools
@@ -272,13 +213,16 @@ export async function createCopilotToolBridge(
     throw new Error(`[copilot-tool-bridge] duplicate tool names: ${duplicateNames.join(", ")}`);
   }
 
+  // The pooled SDK client dispatches handlers in the context of the turn that
+  // opened it, whose async work scope is closed by a later turn.
+  const runInAttemptContext = AsyncLocalStorage.snapshot();
   let sequentialBarrier = Promise.resolve();
   const pendingCalls = new Set<Promise<void>>();
   const scheduleToolExecution: ScheduleToolExecution = (executionMode, execute) => {
     // SDK handlers arrive independently. An exclusive call waits for earlier
     // work across the attempt and blocks later calls, regardless of tool name.
     const ready = executionMode === "sequential" ? Promise.all(pendingCalls) : sequentialBarrier;
-    const run = ready.then(execute);
+    const run = ready.then(() => runInAttemptContext(execute));
     const settled = run.then(
       () => undefined,
       () => undefined,
@@ -295,10 +239,7 @@ export async function createCopilotToolBridge(
   );
   return {
     cleanup: toolSurfaceRuntime.cleanup,
-    // Harness runs resolve `tools.codeMode: "auto"` inside the tool surface
-    // bridge, so this is the only place that knows whether the turn actually
-    // got code-mode controls. Without it the run reports `codeModeEngaged`
-    // as unset and telemetry cannot tell "off" from "harness did not report".
+    // Report the resolved auto mode, which only the tool-surface owner knows.
     codeModeEngaged: toolSurfaceRuntime.codeModeControlsEnabled,
     promptToolPolicy: {
       requireExplicitMessageTarget: toolOptions.requireExplicitMessageTarget,
@@ -315,6 +256,7 @@ export async function createCopilotToolBridge(
         return {
           tools: sdkTools.filter((tool) => directToolNames.has(tool.name)),
           callableToolNames: result.callableToolNames,
+          toolSchemaDirectoryPrompt: result.toolSchemaDirectoryPrompt,
         };
       },
     },
@@ -335,11 +277,10 @@ function buildOpenClawCodingToolsOptions(
   const a = input.attemptParams;
 
   // Sandbox policy may belong to a different key than the live session.
-  const sandboxSessionKey =
-    a.sandboxSessionKey?.trim() || a.sessionKey?.trim() || input.sessionKey || input.sessionId;
+  const sandboxSessionKey = a.sandboxSessionKey?.trim() || a.sessionKey?.trim() || input.sessionId;
 
   // Keep current-session reads on the live run rather than its sandbox policy key.
-  const liveSessionKey = a.sessionKey ?? input.sessionKey;
+  const liveSessionKey = a.sessionKey;
   const runSessionKey =
     liveSessionKey && liveSessionKey !== sandboxSessionKey ? liveSessionKey : undefined;
 
@@ -393,7 +334,7 @@ function buildOpenClawCodingToolsOptions(
     spawnWorkspaceDir: input.spawnWorkspaceDir,
     config: toolSurfaceRuntime?.config ?? a.config,
     skillsSnapshot: a.skillsSnapshot,
-    abortSignal: input.abortSignal,
+    abortSignal: a.abortSignal,
     modelProvider: input.modelProvider,
     modelId: input.modelId,
     includeCoreTools: toolPlan.includeCoreTools,
@@ -428,12 +369,6 @@ function buildOpenClawCodingToolsOptions(
       } catch (error) {
         console.warn("[copilot-tool-bridge] onYieldDetected handler threw; continuing", error);
       }
-      // The SDK session does not exist at bridge-construction time, so
-      // we route yield events through a mutable holder populated by
-      // attempt.ts immediately after `createSession()` /
-      // `resumeSession()` resolves. Bridged tools cannot execute before
-      // the SDK session is up, so a missing `current` is a no-op by
-      // design (e.g. early aborts handled by the abortSignal path).
       const target = input.sessionRef?.current;
       void target?.abort?.();
     },
@@ -493,10 +428,7 @@ function convertOpenClawToolToSdkTool(
       ...(ownerMutation ? { ownerMutation } : {}),
     });
     notifyToolResult(
-      sanitizeToolResult({
-        content: [{ type: "text", text: message }],
-        details: { status: "failed", error: errorMessage },
-      }),
+      sanitizeToolResult(textResult(message, { status: "failed", error: errorMessage })),
       true,
     );
     notifyToolCompleted({
@@ -514,28 +446,9 @@ function convertOpenClawToolToSdkTool(
     invocation: ToolInvocation,
   ): Promise<ToolResultObject> => {
     const startedAt = Date.now();
-    if (input.abortSignal?.aborted) {
+    if (input.attemptParams.abortSignal?.aborted) {
       const error = new Error("[copilot-tool-bridge] aborted before execution");
       return failureResult(args, invocation, startedAt, error.message, error, false);
-    }
-
-    try {
-      await input.beforeExecute?.({
-        args,
-        invocation,
-        sourceTool,
-        toolCallId: invocation.toolCallId,
-        toolName: sourceTool.name,
-      });
-    } catch (error: unknown) {
-      return failureResult(
-        args,
-        invocation,
-        startedAt,
-        `[copilot-tool-bridge] beforeExecute failed for tool '${sourceTool.name}': ${toCopilotToolError(error).message}`,
-        error,
-        false,
-      );
     }
 
     let preparedArgs;
@@ -557,7 +470,7 @@ function convertOpenClawToolToSdkTool(
       result = await sourceTool.execute(
         invocation.toolCallId,
         preparedArgs,
-        input.abortSignal,
+        input.attemptParams.abortSignal,
         undefined,
       );
     } catch (error: unknown) {
@@ -637,7 +550,7 @@ async function executeCatalogTool(
     const result = await sourceTool.execute(
       params.toolCallId,
       preparedArgs,
-      params.signal ?? input.abortSignal,
+      params.signal ?? input.attemptParams.abortSignal,
       params.onUpdate,
     );
     const sanitizedResult = sanitizeToolResult(result);
@@ -689,10 +602,7 @@ async function executeCatalogTool(
       });
       preparedArgs = terminal?.executedArguments ?? preparedArgs;
     }
-    const failure = sanitizeToolResult({
-      content: [{ type: "text", text: message }],
-      details: { status: "failed", error: message },
-    });
+    const failure = sanitizeToolResult(textResult(message, { status: "failed", error: message }));
     input.attemptParams?.onAgentToolResult?.({
       toolName: params.toolName,
       result: failure,
@@ -712,16 +622,12 @@ async function executeCatalogTool(
 }
 
 function toToolStartArgs(args: unknown): Record<string, unknown> {
-  return args && typeof args === "object" && !Array.isArray(args)
-    ? (args as Record<string, unknown>)
-    : { value: args };
+  return asOptionalRecord(args) ?? { value: args };
 }
 
 function createFailureResult(message: string, error: unknown): ToolResultObject {
-  // ToolResultObject.error is typed as `string | undefined` in the SDK contract
-  // (see `node_modules/@github/copilot-sdk/dist/types.d.ts`). Returning an
-  // Error object would produce a non-serializable JSON-RPC payload, so we
-  // surface the message string instead.
+  // Copilot's ToolResultObject.error accepts a string (SDK dist/types.d.ts).
+  // Serialize the message explicitly; Error.message is not enumerable.
   return {
     error: toCopilotToolError(error).message,
     resultType: "failure",
@@ -729,54 +635,11 @@ function createFailureResult(message: string, error: unknown): ToolResultObject 
   };
 }
 
-function createError(message: string, cause: unknown): Error {
-  const error = new Error(message) as Error & { cause?: unknown };
-  error.cause = cause;
-  return error;
-}
-
-/**
- * Mirrors PI's `shouldForceMessageTool` semantics: a message tool is
- * forced when the caller asked for it explicitly or when the source
- * reply delivery mode is `message_tool_only`, but never when
- * `disableMessageTool` is set (the suppress flag always wins). Compare
- * `src/agents/pi-embedded-runner/run/attempt.ts:1361-1366` and the
- * codex equivalent at
- * `extensions/codex/src/app-server/run-attempt.ts:4253-4258`.
- */
 export function shouldForceCopilotMessageTool(params: CopilotToolAttemptParams): boolean {
   if (params.disableMessageTool === true) {
     return false;
   }
   return params.forceMessageTool === true || params.sourceReplyDeliveryMode === "message_tool_only";
-}
-
-function filterCopilotToolsForConstructionPlan<T extends { name: string }>(
-  tools: T[],
-  plan: ReturnType<typeof resolveEmbeddedAttemptToolConstructionPlan>["codingToolConstructionPlan"],
-  options: { preserveToolNames?: readonly string[] } = {},
-): T[] {
-  if (plan.includeBaseCodingTools && plan.includeShellTools) {
-    return tools;
-  }
-  const preserveToolNames = new Set(options.preserveToolNames);
-  return tools.filter((tool) => {
-    if (preserveToolNames.has(tool.name)) {
-      return true;
-    }
-    if (!plan.includeBaseCodingTools && BASE_COPILOT_CODING_TOOL_NAMES.has(tool.name)) {
-      return false;
-    }
-    if (!plan.includeShellTools && SHELL_COPILOT_CODING_TOOL_NAMES.has(tool.name)) {
-      return false;
-    }
-    return true;
-  });
-}
-
-function readInlinePluginToolMeta(tool: { name: string }): { pluginId: string } | undefined {
-  const pluginId = (tool as { pluginId?: unknown }).pluginId;
-  return typeof pluginId === "string" && pluginId.trim() ? { pluginId } : undefined;
 }
 
 function findDuplicateToolNames(sourceTools: AnyAgentTool[]): string[] {

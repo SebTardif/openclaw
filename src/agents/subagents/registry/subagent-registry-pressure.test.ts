@@ -43,13 +43,13 @@ describe("subagent suspended delivery pressure", () => {
       await sweeper.sweepOnce();
       await sweeper.sweepOnce();
     }
-    sweeper.reset();
+    await sweeper.reset();
     await sweeper.sweepOnce();
     await sweeper.sweepOnce();
     expect(warn.mock.calls).toEqual(
       [25, 26, 50, 49, 25, 25].map((suspendedCount) => [
-        "subagent suspended delivery backlog exceeded pressure cap",
-        { suspendedCount, softCap: 25, hardCap: 50, admissionBlocked: suspendedCount >= 50 },
+        "subagent suspended delivery backlog reached warning threshold",
+        { suspendedCount, warningThreshold: 25 },
       ]),
     );
     expect(runs.size).toBe(50);
@@ -70,7 +70,13 @@ describe("subagent suspended delivery pressure", () => {
 
     await sweeper.sweepOnce();
 
-    expect(discardTerminalDelivery).toHaveBeenCalledExactlyOnceWith(entry, Date.now(), "expired");
+    expect(discardTerminalDelivery).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ runId: entry.runId, childSessionKey: entry.childSessionKey }),
+      Date.now(),
+      "expired",
+    );
+    expect(entry.delivery?.status).toBe("suspended");
+    expect(runs.get(entry.runId)?.delivery?.status).toBe("discarded");
     expect(completeCleanupBookkeeping).toHaveBeenCalledOnce();
     expect(warn).toHaveBeenCalledExactlyOnceWith(
       "subagent suspended delivery discarded",
@@ -91,8 +97,8 @@ describe("subagent suspended delivery pressure", () => {
 
     expect(warn.mock.calls).toEqual([
       [
-        "subagent suspended delivery backlog exceeded pressure cap",
-        { suspendedCount: 25, softCap: 25, hardCap: 50, admissionBlocked: false },
+        "subagent suspended delivery backlog reached warning threshold",
+        { suspendedCount: 25, warningThreshold: 25 },
       ],
       ["subagent run sweep failed: requester wake failed"],
       ["subagent run sweep failed: requester wake failed"],

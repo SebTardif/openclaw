@@ -1,5 +1,4 @@
-import { readAcpSessionMetaForEntry } from "../acp/runtime/session-meta-readonly.js";
-import { readAcpSessionMeta } from "../acp/runtime/session-meta.js";
+import { asPositiveFiniteNumber } from "@openclaw/normalization-core/number-coercion";
 import { resolveCurrentSessionAgentRuntimeMetadata } from "../agents/agent-runtime-metadata.js";
 import { findModelCatalogEntry } from "../agents/model-catalog-lookup.js";
 import { selectModelCatalogRuntimeEntry } from "../agents/model-catalog-view.js";
@@ -10,6 +9,11 @@ import { captureRuntimeStateEnvironment } from "../config/paths.js";
 import { resolveSessionStorePathCore, type SessionEntry } from "../config/sessions.js";
 import { resolveConcreteSessionStorePath } from "../config/sessions/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { iterateProjectedAgentRunSessionKeys } from "../infra/agent-run-projection.js";
+import {
+  buildProjectedAgentRunIndex,
+  type ProjectedAgentRunIndex,
+} from "../infra/agent-run-registry.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import { readRecentSessionUsageFromTranscript as readScopedRecentSessionUsageFromTranscript } from "./session-transcript-usage.js";
 import {
@@ -17,17 +21,23 @@ import {
   type SessionActorProfileIdentity,
   type SessionListRowContext,
 } from "./session-utils-contracts.js";
-import { resolveEstimatedSessionCostUsd, resolvePositiveNumber } from "./session-utils-core.js";
+import { resolveEstimatedSessionCostUsd } from "./session-utils-core.js";
 import { resolveWorkerPlacementModelRuntime } from "./worker-environments/placement-session-runtime.js";
 
 export function buildSessionListRowMetadataContext(params: {
   now: number;
   sessionKeys?: readonly string[];
   subagentRuns?: SessionListRowContext["subagentRuns"];
+  projectedAgentRuns?: ProjectedAgentRunIndex;
+  projectedSubagentActivity?: ReadonlySet<string>;
   userProfileIdentityById?: Map<string, SessionActorProfileIdentity | undefined>;
-}): SessionListRowContext {
+}): SessionListRowContext & {
+  projectedAgentRuns: ProjectedAgentRunIndex;
+  projectedSubagentActivity: ReadonlySet<string>;
+} {
   const subagentRuns =
     params.subagentRuns ?? buildSubagentSessionListReadIndex(params.now, params.sessionKeys);
+  const projectedAgentRuns = params.projectedAgentRuns ?? buildProjectedAgentRunIndex();
   const catalogEntries = new WeakMap<
     ModelCatalogEntry[],
     Map<string, ModelCatalogEntry | undefined>
@@ -38,6 +48,10 @@ export function buildSessionListRowMetadataContext(params: {
   >();
   return {
     subagentRuns,
+    projectedAgentRuns,
+    projectedSubagentActivity:
+      params.projectedSubagentActivity ??
+      buildProjectedSubagentActivity(subagentRuns, projectedAgentRuns),
     subagentRunsByChildSessionKey: subagentRuns.runsByChildSessionKey,
     configuredDefaultModelByAgent: new Map(),
     thinkingFactsByModelRef: new Map(),
@@ -73,6 +87,27 @@ export function buildSessionListRowMetadataContext(params: {
   };
 }
 
+/** Prepare follow-up ancestor membership with the indexes, outside per-row presentation. */
+export function buildProjectedSubagentActivity(
+  subagentRuns: SessionListRowContext["subagentRuns"],
+  projectedAgentRuns: ProjectedAgentRunIndex,
+): ReadonlySet<string> {
+  const active = new Set<string>();
+  for (const key of iterateProjectedAgentRunSessionKeys(projectedAgentRuns)) {
+    const run = subagentRuns.latestRunsByChildSessionKey.get(key);
+    if (!run) {
+      continue;
+    }
+    let requester = run.requesterSessionKey;
+    while (requester && !active.has(requester)) {
+      active.add(requester);
+      requester =
+        subagentRuns.latestRunsByChildSessionKey.get(requester)?.requesterSessionKey ?? "";
+    }
+  }
+  return active;
+}
+
 export function resolveTranscriptUsageFallbacks(params: {
   cfg: OpenClawConfig;
   key: string;
@@ -81,7 +116,6 @@ export function resolveTranscriptUsageFallbacks(params: {
   freshTotalTokens?: number;
   fallbackModelRefs: readonly (string | undefined)[];
   allowPluginNormalization?: boolean;
-  maxTranscriptBytes?: number;
   rowContext?: SessionListRowContext;
   agentId: string;
   storeAgentId?: string;
@@ -129,7 +163,7 @@ export function resolveTranscriptUsageFallbacks(params: {
             sessionKey: params.key,
             storePath,
           },
-          typeof params.maxTranscriptBytes === "number" ? params.maxTranscriptBytes : 256 * 1024,
+          256 * 1024,
         );
       } catch {
         snapshot = null;
@@ -145,7 +179,7 @@ export function resolveTranscriptUsageFallbacks(params: {
         rowContext: params.rowContext,
       });
       fallbacks.set(fallbackModelRef, {
-        totalTokens: resolvePositiveNumber(snapshot.totalTokens),
+        totalTokens: asPositiveFiniteNumber(snapshot.totalTokens),
         totalTokensFresh: snapshot.totalTokensFresh === true,
         estimatedCostUsd,
       });
@@ -169,17 +203,12 @@ export function resolveGatewaySessionRuntimeProjection(params: {
   agentId: string;
   sessionKey: string;
   entry?: SessionEntry;
+  preparedAcpMeta?: SessionEntry["acp"] | null;
   rowContext?: SessionListRowContext;
-  metadataSnapshot?: PluginMetadataSnapshot;
+  metadataSnapshot?: PluginMetadataSnapshot | null;
 }) {
-  const { cfg, agentId, sessionKey, entry } = params;
-  // Keep metadata bound to the projected row; rereading its key can adopt a
-  // replacement lifecycle while projecting the original entry.
-  const acpMeta =
-    entry?.acp ??
-    (entry
-      ? readAcpSessionMetaForEntry({ cfg, sessionKey, agentId, entry })
-      : readAcpSessionMeta({ sessionKey, agentId }));
+  const { entry } = params;
+  const acpMeta = params.preparedAcpMeta ?? undefined;
   const agentRuntime = resolveCurrentSessionAgentRuntimeMetadata({
     cfg: params.cfg,
     agentScope: { kind: "prepared", agentId: params.agentId },

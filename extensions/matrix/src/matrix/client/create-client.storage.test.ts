@@ -1,19 +1,22 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync, StatementSync } from "node:sqlite";
 import {
   createPluginStateSyncKeyedStoreForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
-import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
+import {
+  closeOpenClawStateDatabaseAsync,
+  observeHostDataSql,
+} from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getMatrixRuntime } from "../../runtime.js";
 import { resolveMatrixAccountStorageRoot } from "../../storage-paths.js";
 import { installMatrixTestRuntime } from "../../test-runtime.js";
-import { MATRIX_LEGACY_CRYPTO_MIGRATION_FILENAME } from "../crypto-state-store.js";
+import { openMatrixRecoveryKeyStoreOptions } from "../crypto-state-store.js";
 import { createMatrixClient } from "./create-client.js";
 import { SqliteBackedMatrixSyncStore } from "./file-sync-store.js";
+import { julyLegacyCryptoStoreOptions } from "./legacy-crypto-state.test-support.js";
 import { openMatrixStorageMetaStoreOptions } from "./storage-metadata.js";
 
 vi.mock("./config.js", () => ({
@@ -36,33 +39,26 @@ describe("Matrix client factory storage", () => {
   };
   beforeEach(() => resetPluginStateStoreForTests());
 
-  function setupStateDir() {
-    const stateDir = tempDirs.make("openclaw-matrix-factory-");
-    installMatrixTestRuntime({
-      stateDir,
-      logging: { getChildLogger: () => ({ info: () => {}, warn: () => {}, error: () => {} }) },
-    });
-    return stateDir;
-  }
-  function seedStorageMeta(rootDir: string, value: Record<string, unknown>) {
-    createPluginStateSyncKeyedStoreForTests(
-      "matrix",
-      openMatrixStorageMetaStoreOptions(rootDir),
-    ).register("current", value);
-  }
   function writeJson(rootDir: string, filename: string, value: Record<string, unknown>) {
     fs.writeFileSync(path.join(rootDir, filename), JSON.stringify(value));
   }
-  it.each(["fresh", "canonical", "rotated", "legacy-import"])(
+  it.each(["fresh", "rotated", "sqlite-crypto"])(
     "restores the %s token root through the client factory without host SQLite",
     async (rootKind) => {
-      const stateDir = setupStateDir();
+      const stateDir = tempDirs.make("openclaw-matrix-factory-");
+      installMatrixTestRuntime({
+        stateDir,
+        logging: { getChildLogger: () => ({ info: () => {}, warn: () => {}, error: () => {} }) },
+      });
       const seeded = resolveMatrixAccountStorageRoot({
         ...defaultStorageAuth,
         stateDir,
       });
       if (rootKind !== "fresh") {
-        seedStorageMeta(seeded.rootDir, {
+        createPluginStateSyncKeyedStoreForTests(
+          "matrix",
+          openMatrixStorageMetaStoreOptions(seeded.rootDir),
+        ).register("current", {
           ...defaultStorageAuth,
           accountId: "default",
           accessTokenHash: seeded.tokenHash,
@@ -78,13 +74,19 @@ describe("Matrix client factory storage", () => {
         syncStore.markCleanShutdown();
         await syncStore.flush();
       }
-      if (rootKind === "legacy-import") {
-        writeJson(seeded.rootDir, "recovery-key.json", {
+      if (rootKind === "sqlite-crypto") {
+        createPluginStateSyncKeyedStoreForTests(
+          "matrix",
+          openMatrixRecoveryKeyStoreOptions(seeded.rootDir),
+        ).register("current", {
           version: 1,
           createdAt: "2026-09-01T00:00:00.000Z",
           privateKeyBase64: Buffer.alloc(32, 7).toString("base64"),
         });
-        writeJson(seeded.rootDir, MATRIX_LEGACY_CRYPTO_MIGRATION_FILENAME, {
+        createPluginStateSyncKeyedStoreForTests(
+          "matrix",
+          julyLegacyCryptoStoreOptions(seeded.rootDir),
+        ).register("current", {
           version: 1,
           accountId: "default",
           roomKeyCounts: null,
@@ -92,13 +94,7 @@ describe("Matrix client factory storage", () => {
         });
       }
       await closeOpenClawStateDatabaseAsync();
-      const sql = [
-        vi.spyOn(DatabaseSync.prototype, "prepare"),
-        vi.spyOn(DatabaseSync.prototype, "exec"),
-        ...(["get", "all", "run", "iterate"] as const).map((method) =>
-          vi.spyOn(StatementSync.prototype, method),
-        ),
-      ];
+      const observation = observeHostDataSql();
       try {
         const client = await createMatrixClient({
           ...defaultStorageAuth,
@@ -116,25 +112,43 @@ describe("Matrix client factory storage", () => {
           accessTokenHash: seeded.tokenHash,
           deviceId: "DEVICE123",
         });
-        if (rootKind === "legacy-import") {
-          for (const filename of ["recovery-key.json", MATRIX_LEGACY_CRYPTO_MIGRATION_FILENAME]) {
-            expect(fs.existsSync(path.join(seeded.rootDir, filename))).toBe(false);
-            expect(fs.existsSync(path.join(seeded.rootDir, `${filename}.migrated`))).toBe(true);
-          }
+        if (rootKind === "sqlite-crypto") {
+          await expect(
+            getMatrixRuntime()
+              .state.openKeyedStore(openMatrixRecoveryKeyStoreOptions(seeded.rootDir))
+              .lookup("current"),
+          ).resolves.toMatchObject({ privateKeyBase64: Buffer.alloc(32, 7).toString("base64") });
+          await expect(
+            getMatrixRuntime()
+              .state.openKeyedStore(julyLegacyCryptoStoreOptions(seeded.rootDir))
+              .lookup("current"),
+          ).resolves.toMatchObject({ restoreStatus: "pending" });
         }
         await client.stopWithoutPersist();
         await closeOpenClawStateDatabaseAsync();
-        console.log(
-          "matrix-storage-factory host SQL",
-          rootKind,
-          sql.map((method) => method.mock.calls.length),
-        );
-        for (const method of sql) {
+        for (const method of observation.calls) {
           expect(method).not.toHaveBeenCalled();
         }
       } finally {
-        sql.forEach((method) => method.mockRestore());
+        observation.restore();
       }
+    },
+  );
+  it.each(["recovery-key.json", "storage-meta.json"])(
+    "refuses retired %s before creating a client or changing state",
+    async (filename) => {
+      const stateDir = tempDirs.make("openclaw-matrix-retired-factory-");
+      installMatrixTestRuntime({ stateDir });
+      const storage = resolveMatrixAccountStorageRoot({ ...defaultStorageAuth, stateDir });
+      fs.mkdirSync(storage.rootDir, { recursive: true });
+      const sourcePath = path.join(storage.rootDir, filename);
+      writeJson(storage.rootDir, filename, { retained: true });
+      const source = fs.readFileSync(sourcePath);
+      await expect(
+        createMatrixClient({ ...defaultStorageAuth, deviceId: "DEVICE123" }),
+      ).rejects.toThrow("Install OpenClaw 2026.9.5");
+      expect(fs.readFileSync(sourcePath)).toEqual(source);
+      expect(fs.existsSync(path.join(storage.rootDir, "state"))).toBe(false);
     },
   );
 });

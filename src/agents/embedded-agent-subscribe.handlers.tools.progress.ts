@@ -4,7 +4,6 @@ import {
 } from "@openclaw/normalization-core/record-coerce";
 import { readStringValue } from "@openclaw/normalization-core/string-coerce";
 import {
-  emitAgentActivityEvent,
   type AgentCommandOutputEventData,
   projectAgentToolActivity,
 } from "../infra/agent-activity-events.js";
@@ -16,6 +15,7 @@ import {
   buildCommandItemTitle,
   buildToolStartKey,
   emitAgentEventCallbackBestEffort,
+  emitToolActivityEvent,
   emitTrackedItemEvent,
   isExecToolName,
   toolStartData,
@@ -32,23 +32,16 @@ import {
 import type { AgentEvent } from "./runtime/index.js";
 import { normalizeToolPolicyName } from "./tool-policy.js";
 
-type ChannelToolProgress = {
-  text: string;
-};
-
 const LIVE_EXEC_UPDATE_MIN_INTERVAL_MS = 250;
 
-function readChannelToolProgress(result: unknown): ChannelToolProgress | undefined {
+function readChannelToolProgress(result: unknown): string | undefined {
   const progress = readRecordField(asOptionalObjectRecord(result)?.progress);
   // Only typed progress crosses into UI; tool output/details may contain private data.
   if (progress?.visibility !== "channel" || progress.privacy !== "public") {
     return undefined;
   }
   const text = readStringValue(progress.text)?.trim();
-  if (!text) {
-    return undefined;
-  }
-  return { text: truncateLiveExecOutput(text) };
+  return text ? truncateLiveExecOutput(text) : undefined;
 }
 
 function prepareLiveExecUpdate(
@@ -122,7 +115,7 @@ export function handleToolExecutionUpdate(
       hideFromChannelProgress: explicitHideFromChannelProgress,
     }),
     commandBearing: toolMeta?.commandBearing,
-    ...(toolProgress ? { progressText: toolProgress.text, meta: undefined } : {}),
+    ...(toolProgress ? { progressText: toolProgress, meta: undefined } : {}),
   };
   const hideFromChannelProgress = explicitHideFromChannelProgress;
   // Typed progress already has a sanitized path; suppress duplicate raw previews.
@@ -166,13 +159,7 @@ export function handleToolExecutionUpdate(
         output,
         status: "running",
       };
-      emitAgentActivityEvent({
-        runId: ctx.params.runId,
-        ...(ctx.params.sessionKey ? { sessionKey: ctx.params.sessionKey } : {}),
-        stream: "command_output",
-        data: outputData,
-      });
-      emitAgentEventCallbackBestEffort(ctx, {
+      emitToolActivityEvent(ctx, {
         stream: "command_output",
         data: outputData,
       });

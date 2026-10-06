@@ -9,10 +9,13 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { formatAgentRuntimeLabel } from "../shared/agent-runtime-display.js";
 import { formatGoalSummary } from "../shared/session-goal-display.js";
 import { isSessionRunActive } from "../shared/session-run-state.js";
-import { sessionDeliveryChannel, sessionDeliveryOrigin } from "../utils/delivery-context.shared.js";
-import { resolveAssistantIdentity } from "./assistant-identity.js";
+import { normalizeSessionSearchText } from "../shared/session-search-text.js";
+import { sessionDeliveryChannel, sessionDeliveryOrigin } from "../utils/delivery-context.read.js";
 import { readPreparedGatewayModelCatalogMetadata } from "./server-model-catalog-view.js";
-import type { SessionListTargetLookup } from "./session-list-target.js";
+import type {
+  SessionListModelFactsLookup,
+  SessionListTargetLookup,
+} from "./session-list-target.js";
 import type {
   SessionListActiveRunProjector,
   SessionListRowContext,
@@ -68,39 +71,59 @@ function matchesSessionListSearch(fields: Array<string | undefined>, search: str
   );
 }
 
-function shouldResolveDerivedSessionModelSearchFields(search: string): boolean {
-  // Preserve key-query semantics: derived model aliases are not agent-key matches.
-  return !search.startsWith("agent:");
-}
+// Selection facts are replaced with the resident entry; weak keys release retired revisions.
+const staticSearchFields = new WeakMap<
+  NonNullable<ReturnType<SessionListTargetLookup>>["selection"],
+  { literal: string[]; titles: string[] }
+>();
 
 export function createSessionListSearchMatcher(params: {
   cfg: OpenClawConfig;
   search: string;
+  identityNames?: ReadonlyMap<string, string>;
   getTarget: SessionListTargetLookup;
+  getModelFacts?: SessionListModelFactsLookup;
   modelCatalog?: SessionListModelCatalog;
   now: number;
   getRowContext: SessionListRowContextProvider;
   projectActiveRun?: SessionListActiveRunProjector;
 }) {
   const { cfg, search, now } = params;
-  const identityNames = new Map<string, string>();
+  const titleSearch = normalizeSessionSearchText(search);
   let rowContext: SessionListRowContext | undefined;
   const context = () => (rowContext ??= params.getRowContext());
   return (key: string, entry: SessionEntry): boolean => {
     const target = expectDefined(params.getTarget(key), "search row owner");
     const storeKey = target.storeKey ?? key;
-    const fields = [
-      storeKey,
-      entry.label,
-      entry.subject,
-      entry.sessionId,
-      entry.category,
-      resolveSessionListSearchDisplayName(storeKey, entry),
-      resolveGatewaySessionDisplayName(storeKey, entry),
-      resolveGatewaySessionKind(storeKey, entry),
-    ];
-    addSessionListSearchModelFields(fields, { provider: entry.modelProvider, model: entry.model });
-    if (matchesSessionListSearch(fields, search)) {
+    let fields = staticSearchFields.get(target.selection);
+    if (!fields) {
+      const titles = [
+        entry.label,
+        entry.subject,
+        entry.category,
+        resolveSessionListSearchDisplayName(storeKey, entry),
+        resolveGatewaySessionDisplayName(storeKey, entry),
+      ];
+      const rawFields = [
+        storeKey,
+        entry.sessionId,
+        ...titles,
+        resolveGatewaySessionKind(storeKey, entry),
+      ];
+      addSessionListSearchModelFields(rawFields, {
+        provider: entry.modelProvider,
+        model: entry.model,
+      });
+      fields = {
+        literal: rawFields.map(normalizeLowercaseStringOrEmpty),
+        titles: titles.map(normalizeSessionSearchText),
+      };
+      staticSearchFields.set(target.selection, fields);
+    }
+    if (
+      fields.literal.some((field) => field.includes(search)) ||
+      (titleSearch && fields.titles.some((field) => field.includes(titleSearch)))
+    ) {
       return true;
     }
     const agentId = target.agentId;
@@ -134,17 +157,12 @@ export function createSessionListSearchMatcher(params: {
     ) {
       return true;
     }
-    if (!identityNames.has(agentId)) {
-      identityNames.set(agentId, resolveAssistantIdentity({ cfg, agentId }).name);
-    }
-    if (matchesSessionListSearch([identityNames.get(agentId)], search)) {
+    if (matchesSessionListSearch([params.identityNames?.get(agentId)], search)) {
       return true;
     }
-    const source = expectDefined(
-      target.materialized?.source ?? target.getModelFacts?.(),
-      "prepared search row model facts",
-    );
-    if (shouldResolveDerivedSessionModelSearchFields(search)) {
+    const source = expectDefined(params.getModelFacts, "prepared search row model facts")(key);
+    // Derived model aliases are not agent-key matches.
+    if (!search.startsWith("agent:")) {
       const subagentRun = context().subagentRuns.getDisplaySubagentRun(storeKey);
       const resolvedModel = resolveSessionModelIdentityRef(
         cfg,
@@ -154,6 +172,7 @@ export function createSessionListSearchMatcher(params: {
         {
           allowPluginNormalization: false,
           manifestPlugins: metadataSnapshot,
+          configuredDefaultModelByAgent: context().configuredDefaultModelByAgent,
         },
       );
       const models: Array<string | undefined> = [];

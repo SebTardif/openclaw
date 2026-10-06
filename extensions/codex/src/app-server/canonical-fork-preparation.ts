@@ -194,7 +194,7 @@ export async function prepareCanonicalCodexFork(params: {
   const nativeSkillIsolation = await resolveCodexNativeSkillIsolation({
     client: context.client,
     cwd,
-    codexHome: appServer.start.env?.CODEX_HOME,
+    codexHome: appServer.start.codexHome ?? appServer.start.env?.CODEX_HOME,
     home: appServer.start.env?.HOME,
     userProfile: appServer.start.env?.USERPROFILE,
   });
@@ -240,7 +240,10 @@ export async function prepareCanonicalCodexFork(params: {
     modelId: params.model,
   };
   const developerInstructions = [
-    buildDeveloperInstructions(promptContext, { dynamicTools }),
+    buildDeveloperInstructions(promptContext, {
+      dynamicTools,
+      nativeCodeModeOnlyEnabled: appServer.codeModeOnly,
+    }),
     workspaceInstructions,
   ]
     .filter(Boolean)

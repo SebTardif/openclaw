@@ -1,18 +1,19 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import type { OpenKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
+import type { OpenAsyncKeyedStoreOptions } from "openclaw/plugin-sdk/plugin-state-runtime";
 import {
   createPluginStateKeyedStoreForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
+import { createTestPluginServiceScheduler } from "openclaw/plugin-sdk/plugin-test-api";
 import type {
   RealtimeVoiceBridge,
   RealtimeVoiceBridgeCreateRequest,
   RealtimeVoiceProviderPlugin,
 } from "openclaw/plugin-sdk/realtime-voice";
 import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
+import { WebSocket } from "openclaw/plugin-sdk/websocket-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WebSocket } from "ws";
 import type { VoiceCallStateRuntime } from "./runtime-state.js";
 import { createVoiceCallRuntime, type VoiceCallRuntime } from "./runtime.js";
 import { createVoiceCallBaseConfig } from "./test-fixtures.js";
@@ -33,7 +34,7 @@ vi.mock("./realtime-voice.runtime.js", async (importOriginal) => {
 function createStateRuntime(): VoiceCallStateRuntime["state"] {
   return {
     resolveStateDir: () => "",
-    openKeyedStore: <T>(options: OpenKeyedStoreOptions) =>
+    openKeyedStore: <T>(options: OpenAsyncKeyedStoreOptions) =>
       createPluginStateKeyedStoreForTests<T>("voice-call", options),
     openChannelIngressQueue: (() => {
       throw new Error("openChannelIngressQueue is not used by realtime routing tests");
@@ -151,11 +152,12 @@ describe("voice-call realtime route ownership", () => {
       };
       const fullConfig = {
         agents: {
-          list: [{ id: "main", default: true }, { id: "sales" }, { id: "support" }],
+          entries: { main: {}, sales: {}, support: {} },
         },
       } as OpenClawConfig;
 
       runtime = await createVoiceCallRuntime({
+        scheduler: createTestPluginServiceScheduler(),
         config,
         coreConfig: fullConfig,
         fullConfig,
