@@ -428,8 +428,6 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
       if (deps.isDeliveryRetired?.()) {
         throw new Error("signal delivery retired before send");
       }
-      entry.turnAdoptionLifecycle?.abortSignal.throwIfAborted();
-      deps.abortSignal?.throwIfAborted();
       supplied?.();
     };
     const delivery: ChannelInboundTurnPlan["delivery"] = {
@@ -462,7 +460,9 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
           replyToMode,
         });
         const send: typeof sendMessageSignal = async (to, text, options) => {
-          const handoff = () => authorizeDelivery(options.assertDirectAdapterHandoff);
+          entry.turnAdoptionLifecycle?.abortSignal.throwIfAborted();
+          deps.abortSignal?.throwIfAborted();
+          const handoff = () => authorizeDelivery(options?.assertDirectAdapterHandoff);
           handoff();
           const result = await sendMessageSignal(to, text, {
             ...options,
