@@ -138,6 +138,7 @@ export type SignalEventHandlerDeps = {
     textLimit: number;
     replyContext?: SignalNativeReplyContext;
     chatType?: "direct" | "group";
+    assertDirectAdapterHandoff?: () => void;
   }) => Promise<void>;
   resolveSignalReactionTargets: (reaction: SignalReactionMessage) => SignalReactionTarget[];
   isSignalReactionMessage: (

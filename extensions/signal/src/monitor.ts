@@ -275,6 +275,7 @@ export async function deliverReplies(params: {
   chunkMode: "length" | "newline";
   replyContext?: SignalNativeReplyContext;
   chatType?: "direct" | "group";
+  assertDirectAdapterHandoff?: () => void;
 }) {
   const {
     replies,
@@ -324,6 +325,7 @@ export async function deliverReplies(params: {
         account,
         maxBytes,
         accountId,
+        assertDirectAdapterHandoff: params.assertDirectAdapterHandoff,
         ...(mediaUrl ? { mediaUrl } : {}),
         ...(replyToId
           ? {
