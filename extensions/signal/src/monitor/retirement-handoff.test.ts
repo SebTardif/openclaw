@@ -111,7 +111,7 @@ describe("signal retirement handoff", () => {
         "base64",
       ),
     );
-    let retired = false;
+    let mediaRetired = false;
     await expect(
       sendMessageSignal("+15551234567", "chart", {
         cfg,
@@ -121,11 +121,11 @@ describe("signal retirement handoff", () => {
         mediaLocalRoots: [dir],
         mediaReadFile: async (filePath) => {
           const bytes = await fs.readFile(filePath);
-          retired = true;
+          mediaRetired = true;
           return bytes;
         },
         assertDirectAdapterHandoff: () => {
-          if (retired) {
+          if (mediaRetired) {
             throw new Error("signal delivery retired before send");
           }
         },
