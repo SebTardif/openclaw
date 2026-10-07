@@ -4847,7 +4847,7 @@ class NodeRuntime internal constructor(
     }
     page =
       GatewayControlPage(
-        baseUrl = gatewayControlPageBaseUrl(endpoint),
+        baseUrl = gatewayControlPageBaseUrl(endpoint, connectionManager.resolveTlsParams(endpoint)),
         tlsFingerprintSha256 = gatewayControlPageTlsFingerprint(prefs, endpoint),
         connectAuth = { nonce, signedAt ->
           withCurrentCredential { credential ->
@@ -6199,7 +6199,11 @@ class NodeRuntime internal constructor(
         _gatewayAccentArgb.value = resolveGatewayAccentArgb(config)
         _gatewaySourcePreviewConfig.value =
           connectedEndpoint?.let { endpoint ->
-            resolveGatewaySourcePreviewConfig(config, gatewayControlPageBaseUrl(endpoint), gatewayScope.generation)
+            resolveGatewaySourcePreviewConfig(
+              config,
+              gatewayControlPageBaseUrl(endpoint, connectionManager.resolveTlsParams(endpoint)),
+              gatewayScope.generation,
+            )
           }
       }
       val profileRead = fetchProfileAppearancePreferences(gatewayScope, lease)
@@ -9001,9 +9005,27 @@ internal fun gatewayRegistryEntry(
   )
 }
 
-/** HTTP(S) base URL serving the connected gateway's Control UI pages. */
-internal fun gatewayControlPageBaseUrl(endpoint: GatewayEndpoint): String {
-  val scheme = if (endpoint.tlsEnabled) "https" else "http"
+/**
+ * Control UI origin for an endpoint with no stored certificate pin.
+ * Callers that already resolved the socket must pass that decision.
+ */
+internal fun gatewayControlPageBaseUrl(endpoint: GatewayEndpoint): String =
+  gatewayControlPageBaseUrl(
+    endpoint,
+    tls =
+      ConnectionManager.resolveTlsParamsForEndpoint(
+        endpoint,
+        storedFingerprint = null,
+        manualTlsEnabled = endpoint.tlsEnabled,
+      ),
+  )
+
+/** Control UI origin. A null TLS decision is cleartext; any socket TLS decision is HTTPS. */
+internal fun gatewayControlPageBaseUrl(
+  endpoint: GatewayEndpoint,
+  tls: GatewayTlsParams?,
+): String {
+  val scheme = if (tls != null) "https" else "http"
   return "$scheme://${formatGatewayAuthority(endpoint.host, endpoint.port)}${endpoint.contextPath}"
 }
 
