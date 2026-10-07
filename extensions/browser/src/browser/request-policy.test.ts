@@ -88,4 +88,14 @@ describe("browser url pattern matching", () => {
     expect(matchBrowserUrlPattern("", "https://example.com")).toBe(false);
     expect(matchBrowserUrlPattern("   ", "https://example.com")).toBe(false);
   });
+
+  it("rejects a nested star pattern without scanning the whole event loop", () => {
+    const pattern = "*a".repeat(14);
+    const url = `${"a".repeat(29)}x`;
+    const started = Date.now();
+    expect(matchBrowserUrlPattern(pattern, url)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(250);
+    expect(matchBrowserUrlPattern("*a".repeat(3), "xa ya za")).toBe(true);
+    expect(matchBrowserUrlPattern("*".repeat(513), "a")).toBe(false);
+  });
 });
