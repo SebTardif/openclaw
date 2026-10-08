@@ -18,7 +18,6 @@ import {
   type PinnedDispatcherPolicy,
 } from "openclaw/plugin-sdk/ssrf-dispatcher";
 import { MatrixMediaSizeLimitError } from "../media-errors.js";
-import { getMatrixMonitorTaskSignal } from "../monitor/task-runner.js";
 
 // The SDK retries every fetch error except AbortError, including stale host authority.
 class MatrixSdkAuthorityError extends Error {
@@ -344,14 +343,9 @@ export function createMatrixGuardedFetch(params: {
     assertCurrent?.();
     const url = withoutMatrixStateAfterSyncParam(toFetchUrl(resource));
     const { signal, ...requestInit } = init ?? {};
-    // A retired monitor can still hold this client while a sibling keeps it running.
-    // Reject that task's request before dispatch without aborting the sibling.
-    const signals = [
-      params.signal,
-      signal,
-      params.captureRequestSignal?.(),
-      getMatrixMonitorTaskSignal(),
-    ].filter((candidate): candidate is AbortSignal => candidate != null);
+    const signals = [params.signal, signal, params.captureRequestSignal?.()].filter(
+      (candidate): candidate is AbortSignal => candidate != null,
+    );
     const requestSignal = signals.length > 0 ? AbortSignal.any(signals) : undefined;
     const beforeRequest = params.beforeRequest;
     const { response, release } = await fetchWithMatrixGuardedRedirects({
