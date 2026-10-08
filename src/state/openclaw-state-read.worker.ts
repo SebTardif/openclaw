@@ -1,5 +1,8 @@
 import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
-import { readAcpSessionCommand } from "../acp/runtime/session-meta-read.worker.js";
+import {
+  prepareAcpSessionMetadataRead,
+  readAcpSessionCommand,
+} from "../acp/runtime/session-meta-read.worker.js";
 import {
   loadSubagentRunsForChildSessionFromSqlite,
   loadSubagentSessionListRunsFromSqlite,
@@ -33,6 +36,7 @@ import {
   readKnownRepositoryGitHubPublicationPullRequestUrlsInDatabase,
   readRepositoryGitHubPublicationInDatabase,
 } from "../gateway/github-repository-publication-store.js";
+import { readPlacementGrantRows } from "../gateway/operator-approval-placement-grants.read.js";
 import {
   listCronStandingGrantsInDatabase,
   lookupCronStandingGrantInDatabase,
@@ -108,6 +112,7 @@ import {
 import { readMcpOAuthStateCommand } from "./openclaw-state-read-mcp-oauth.js";
 import { stateReadRegistry } from "./openclaw-state-read-operation-registry.js";
 import { readStateRegistryCommand } from "./openclaw-state-read-registry.js";
+import { readSessionRowsSharedFacts } from "./openclaw-state-read-session-rows.worker.js";
 import type {
   OpenClawStateReadReply,
   OpenClawStateReadResult,
@@ -120,11 +125,12 @@ import {
   resolveUserChannelIdentityInDatabase,
 } from "./user-channel-identities.js";
 import { readUserChannelIdentityResult } from "./user-channel-identities.worker.js";
-import { listUserProfileAuthLinksInDatabase } from "./user-model-accounts.js";
+import { readUserModelAccountCommand } from "./user-model-accounts.read.worker.js";
 import { selectUserPreferenceValues } from "./user-preferences.store.js";
 import { readUserProfileGitHubCommand } from "./user-profile-github-identity.js";
 import {
-  readUserProfileAuthorityInDatabase,
+  readUserProfileAuthorityCommand,
+  readCurrentUserProfileAliasesInDatabase,
   readUserProfileSnapshotCommand,
   readUserProfileIdForEmail,
 } from "./user-profile-identity.read.js";
@@ -226,6 +232,10 @@ serveOwnedWorkerTasks(
                 },
               };
         }
+        const metadataRead =
+          command.type === "acpSessions.metadata"
+            ? prepareAcpSessionMetadataRead(command)
+            : undefined;
         const result = withOpenClawStateReadOnlyLocation(
           ({ db }): OpenClawStateReadResult => {
             sourceAdmitted = true;
@@ -272,7 +282,7 @@ serveOwnedWorkerTasks(
               command.type === "acpSessions.list" ||
               command.type === "acpSessions.metadata"
             ) {
-              return readAcpSessionCommand(db, command);
+              return metadataRead ? metadataRead.read(db) : readAcpSessionCommand(db, command);
             }
             if (isChannelIngressReadCommand(command)) {
               return readChannelIngressInDatabase(db, command);
@@ -428,6 +438,9 @@ serveOwnedWorkerTasks(
                   : undefined,
               };
             }
+            if (command.type === "operatorApprovals.placementGrant") {
+              return { type: command.type, rows: readPlacementGrantRows(db, command.input) };
+            }
             if (command.type === "operatorApprovals.history") {
               return {
                 type: command.type,
@@ -508,9 +521,12 @@ serveOwnedWorkerTasks(
               };
             }
             if (command.type === "userProfiles.authority.resolve") {
+              return readUserProfileAuthorityCommand(db, command);
+            }
+            if (command.type === "userProfiles.aliases.resolve") {
               return {
                 type: command.type,
-                profile: readUserProfileAuthorityInDatabase(db, command.profileId),
+                ...readCurrentUserProfileAliasesInDatabase(db, command.profileId),
               };
             }
             if (
@@ -551,13 +567,12 @@ serveOwnedWorkerTasks(
                 values: selectUserPreferenceValues(db, command.profileIds, command.key),
               };
             }
-            if (command.type === "userModelAccounts.links") {
-              return {
-                type: command.type,
-                links: runSqliteDeferredTransactionSync(db, () =>
-                  listUserProfileAuthLinksInDatabase(db, command.profileId),
-                ),
-              };
+            if (
+              command.type === "userModelAccounts.links" ||
+              command.type === "userModelAccounts.summary" ||
+              command.type === "userModelAccounts.catalog"
+            ) {
+              return readUserModelAccountCommand(db, command);
             }
             if (command.type === "userProfiles.email.resolve") {
               return {
@@ -577,6 +592,9 @@ serveOwnedWorkerTasks(
                   }),
                 ),
               };
+            }
+            if (command.type === "sessionRows.sharedFacts") {
+              return readSessionRowsSharedFacts(db, command);
             }
             if (command.type === "workerPlacements.changeSnapshot") {
               return {
@@ -626,6 +644,7 @@ serveOwnedWorkerTasks(
               : readStateRegistryCommand(db, command);
           },
           ...locationArgs,
+          metadataRead?.readContentVersionRow,
         );
         return { ok: true, sourceAdmitted: true, ...result };
       };

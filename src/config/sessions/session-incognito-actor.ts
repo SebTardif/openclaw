@@ -8,6 +8,7 @@ import {
 import type { RetainedWorkerTransactionAdmission } from "../../infra/sqlite-worker-operation-settlement.js";
 import { SqliteWorkerError } from "../../infra/sqlite-worker-store.js";
 import type { AgentDatabaseIncognitoIdentity } from "../../state/openclaw-agent-execution-contract.js";
+import type { TrajectoryRuntimeRetentionLease } from "../../trajectory/runtime-retention.contract.js";
 import {
   authorizeSessionFacts,
   incognitoEntryPublication,
@@ -18,8 +19,9 @@ import {
 } from "./session-incognito-admission.js";
 import {
   bindIncognitoSessionStoreReads,
+  bindIncognitoSessionHistory,
   createIncognitoSessionClaims,
-  createIncognitoSessionCreationGrants,
+  createIncognitoSessionGrants,
   retainIncognitoSessionAuthority,
   type IncognitoSessionClaim,
 } from "./session-incognito-authority.js";
@@ -39,7 +41,6 @@ import type { IncognitoEntryPatchResult } from "./session-incognito-entry-patch-
 import {
   incognitoHistoryKeys,
   isIncognitoHistoryCommand,
-  type IncognitoHistoryOperations,
 } from "./session-incognito-history-contract.js";
 import {
   captureIncognitoLifecycleSettlement,
@@ -97,11 +98,15 @@ export function createIncognitoSessionFacts(
   const entries = new Map<string, IncognitoSessionFacts>();
   const pending = new Set<string>();
   const unavailable = new Set<string>();
-  const creationGrants = createIncognitoSessionCreationGrants(withGrant);
+  const grants = createIncognitoSessionGrants(withGrant);
   let topologyRevision = 0;
   let snapshotRevision = 0;
   const current = (sessionKey: string) => {
     assertActorCurrent();
+    const admitted = grants.readPreimage(sessionKey);
+    if (admitted) {
+      return admitted;
+    }
     if (pending.has(sessionKey) || unavailable.has(sessionKey)) {
       throw new Error("Incognito session facts are pending or unavailable");
     }
@@ -178,6 +183,7 @@ export function createIncognitoSessionFacts(
         restrict?: (request: SqliteWorkerAdmissionRequest) => SqliteWorkerAdmissionRequest,
         onCommitted?: (value: IncognitoSessionOperations[Key]["output"]) => void,
         onCommittedWithoutReply?: (facts: readonly IncognitoSessionFacts[]) => void,
+        attachment?: TrajectoryRuntimeRetentionLease,
       ) => {
         const authority = cleanup
           ? requestAuthority
@@ -192,9 +198,7 @@ export function createIncognitoSessionFacts(
             }
           | undefined;
         let postimage: IncognitoSessionFacts[] | undefined;
-        let creationPreimage: ReturnType<typeof creationGrants.capture>;
-        const withCommandGrant = <T>(operation: () => T): T =>
-          creationGrants.run(creationPreimage, operation);
+        const commandGrant = grants.command(captured.type, authority.entryCreation);
         let commitGranted = false;
         function unknownOutcome(message: string): never {
           for (const key of targets) {
@@ -304,8 +308,11 @@ export function createIncognitoSessionFacts(
           (retained) => {
             let phase: "prepare" | "transaction" | "commit" = "prepare";
             let entryGuarded: unknown;
-            const admission = createSqliteWorkerOperationAdmission((requested, grant) =>
-              withCommandGrant(() => {
+            const authorize: Parameters<typeof createSqliteWorkerOperationAdmission>[0] = (
+              requested,
+              grant,
+            ) =>
+              commandGrant.run(() => {
                 const request = restrict ? restrict(requested) : requested;
                 authority.assertCurrent();
                 assertActorCurrent();
@@ -367,13 +374,7 @@ export function createIncognitoSessionFacts(
                   ) {
                     throw new Error("Incognito session grant changed its target set");
                   }
-                  creationPreimage =
-                    creationGrants.capture(
-                      captured.type,
-                      request.stage,
-                      facts,
-                      authority.entryCreation,
-                    ) ?? creationPreimage;
+                  commandGrant.capture(request.stage, facts);
                   for (const entry of facts) {
                     targets.add(entry.sessionKey);
                     if (changing) {
@@ -409,8 +410,8 @@ export function createIncognitoSessionFacts(
                   throw new Error("Incognito session authority expired");
                 }
                 commitGranted ||= request.stage === "commit";
-              }),
-            );
+              });
+            const admission = createSqliteWorkerOperationAdmission(authorize, attachment);
             native = { retained, admission };
             return { nativeLocations: [], admission };
           },
@@ -418,6 +419,26 @@ export function createIncognitoSessionFacts(
         );
       };
       return {
+        ...bindIncognitoSessionHistory({
+          assertOutsideGrant,
+          assertBorrowed,
+          assertActorCurrent,
+          retain,
+          current: (key) => grants.readSource(key) ?? current(key),
+          execute: (authority, command, signal, cleanup, onRead) =>
+            perform(
+              authority,
+              command,
+              false,
+              (result) => {
+                onRead?.(result.value);
+                return result.value;
+              },
+              signal,
+              undefined,
+              cleanup,
+            ),
+        }),
         entry: <Key extends keyof IncognitoEntryOperations>(
           authority: IncognitoSessionAuthority,
           command: { type: Key; input: IncognitoEntryOperations[Key]["input"] },
@@ -546,20 +567,10 @@ export function createIncognitoSessionFacts(
             authority,
             { type: "session.row.read", input: { sessionKey } },
             false,
-            (result) => {
-              const observed = snapshotRevision;
-              return {
-                value: result.value,
-                snapshot: {
-                  assertCurrent(this: void) {
-                    assertBorrowed();
-                    if (snapshotRevision !== observed || pending.size || unavailable.size) {
-                      throw new Error("Incognito session snapshot changed; prepare it again");
-                    }
-                  },
-                },
-              };
-            },
+            (result) => ({
+              value: result.value,
+              snapshot: captureStoreSnapshot(assertBorrowed, authority),
+            }),
           );
         },
         acpSource(authority: IncognitoSessionAuthority, sessionKey: string) {
@@ -579,6 +590,7 @@ export function createIncognitoSessionFacts(
           signal?: AbortSignal,
           publish?: (value: IncognitoSideDataOperations[Key]["output"]) => void,
           invalidate?: (facts: readonly IncognitoSessionFacts[]) => void,
+          attachment?: TrajectoryRuntimeRetentionLease,
         ): Promise<IncognitoSideDataOperations[Key]["output"]> =>
           perform(
             authority,
@@ -592,23 +604,7 @@ export function createIncognitoSessionFacts(
             undefined,
             publish ? (result) => publish(result.value) : undefined,
             invalidate,
-          ),
-        history: <Key extends keyof IncognitoHistoryOperations>(
-          authority: IncognitoSessionAuthority,
-          command: { type: Key; input: IncognitoHistoryOperations[Key]["input"] },
-          signal?: AbortSignal,
-          onRead?: (value: IncognitoHistoryOperations[Key]["output"]) => void,
-        ): Promise<IncognitoHistoryOperations[Key]["output"]> =>
-          perform(
-            authority,
-            command,
-            false,
-            (result) => {
-              // Synchronous publication remains inside the read's original FIFO turn.
-              onRead?.(result.value);
-              return result.value;
-            },
-            signal,
+            attachment,
           ),
         readPendingInput(authority: IncognitoSessionAuthority, input: PendingInputRead) {
           return perform(
@@ -705,7 +701,7 @@ export function createIncognitoSessionFacts(
           operation: NonNullable<IncognitoSessionAuthority["entryCreation"]>,
         ) {
           assertBorrowed();
-          return creationGrants.read(sessionKey, operation);
+          return grants.readCreation(sessionKey, operation);
         },
         deadlines: () => deadlines(assertBorrowed, assertAdmittedCurrent),
       };

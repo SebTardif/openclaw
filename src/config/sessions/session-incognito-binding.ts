@@ -7,6 +7,7 @@ import { isIncognitoSessionKey } from "../../shared/incognito-session-key.js";
 import { IncognitoSessionSyncAccessError } from "../../state/incognito-session-error.js";
 import {
   isIncognitoOpenClawAgentSqlitePath,
+  resolveExplicitIncognitoAgentSqliteTarget,
   resolveOpenClawAgentSqlitePath,
 } from "../../state/openclaw-agent-db.paths.js";
 import type { AgentDatabaseIncognitoAuthority } from "../../state/openclaw-agent-execution-contract.js";
@@ -47,11 +48,16 @@ export function captureIncognitoSessionBinding(
   const exactPath = Boolean(
     binding && target?.storePath && path.resolve(target.storePath) === binding.actor.path,
   );
+  const explicitTarget =
+    binding && target?.storePath
+      ? resolveExplicitIncognitoAgentSqliteTarget(target.storePath, target)
+      : undefined;
   if (
     !binding ||
     (target &&
       !isIncognitoSessionKey(target.sessionKey) &&
       !exactPath &&
+      !explicitTarget &&
       !(
         target.storePath &&
         isIncognitoOpenClawAgentSqlitePath(target.storePath, {
@@ -114,7 +120,12 @@ export function captureIncognitoSessionHistoryBinding(scope: {
     scope.sessionKey ??
     actor.sessions.deadlines().find((entry) => entry.sessionId === sessionId)?.sessionKey;
   const entry = sessionKey ? actor.sessions.readSharing(sessionKey)?.entry : undefined;
-  if (!sessionKey || !entry || (sessionId !== undefined && entry.sessionId !== sessionId)) {
+  const targetSessionId = entry?.sessionId ?? sessionId;
+  if (
+    !sessionKey ||
+    !targetSessionId ||
+    (entry && sessionId !== undefined && entry.sessionId !== sessionId)
+  ) {
     throw new Error("Incognito history requires its current captured session");
   }
   const claim = actor.sessions.captureCurrent(sessionKey);
@@ -129,7 +140,12 @@ export function captureIncognitoSessionHistoryBinding(scope: {
   return {
     actor,
     authority,
-    target: { sessionKey, sessionId: entry.sessionId, lifecycleRevision: entry.lifecycleRevision },
+    target: {
+      sessionKey,
+      sessionId: targetSessionId,
+      lifecycleRevision: entry?.lifecycleRevision,
+      ...(!entry && { allowMissing: true as const }),
+    },
   };
 }
 
@@ -396,6 +412,7 @@ export function withIncognitoSessionEntrySummaries<T>(
 export async function withIncognitoSessionStoreEntries<T>(
   consume: (
     stores: readonly { agentId: string; storePath: string; entries: SessionEntrySummary[] }[],
+    assertCurrent: () => void,
   ) => Promise<T>,
   projection: "full" | "list" = "list",
 ): Promise<T> {
@@ -418,7 +435,7 @@ export async function withIncognitoSessionStoreEntries<T>(
     assertCurrent();
     const target = topology.entries[index];
     if (!target) {
-      const result = await consume(stores);
+      const result = await consume(stores, assertCurrent);
       assertCurrent();
       return result;
     }
