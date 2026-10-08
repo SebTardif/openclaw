@@ -126,6 +126,14 @@ function parseCmdWorkingDirectory(directoryArg: string): string {
   if (!trimmed.startsWith('"')) {
     return decodeCmdScriptLiterals(trimmed);
   }
+  // quoteCmdScriptArg doubles trailing backslashes so the closer stays a closer.
+  // An even run before that closer keeps half of those slashes.
+  const doubledTail = trimmed.match(/^"(.*?)(\\*)"$/u);
+  const doubledBody = doubledTail?.[1];
+  const doubledSlashes = doubledTail?.[2];
+  if (doubledBody !== undefined && doubledSlashes && doubledSlashes.length % 2 === 0) {
+    return decodeCmdScriptLiterals(`${doubledBody}${"\\".repeat(doubledSlashes.length / 2)}`);
+  }
   const recovered = parseCmdScriptCommandLine(trimmed)[0] ?? "";
   // Older quoteCmdScriptArg wrapped trailing-backslash dirs as `..."\`.
   // cmd.exe still treats that closer as a closer; CRT does not.
