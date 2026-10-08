@@ -30,6 +30,7 @@ vi.mock("../agents/agent-bundle-mcp-manager-api.js", () => ({
 vi.mock("../agents/agent-bundle-mcp-manager-cleanup.js", () => ({
   releaseSessionMcpRuntime: mocks.release,
 }));
+// mock-isolation: The catalog builder returns one App tool without loading a bundle.
 vi.mock("../agents/agent-bundle-mcp-materialize.js", () => ({
   buildBundleMcpToolsFromCatalog: mocks.bundle,
 }));
@@ -48,6 +49,7 @@ vi.mock("../agents/sandbox/runtime-status.js", () => ({
 vi.mock("../agents/harness/session-preparation.js", () => ({
   prepareAgentHarnessSessionRuntime: mocks.prepare,
 }));
+// mock-isolation: Approval is flipped after preparation, so the real Codex policy does not run.
 vi.mock("../agents/mcp-codex-tool-approval.js", () => ({
   requiresMcpCodexToolApproval: mocks.requiresApproval,
   resolveProjectedMcpCodexToolApprovalMode: () => undefined,
@@ -59,8 +61,10 @@ vi.mock("../agents/mcp-tool-filter.js", () => ({
 vi.mock("../plugins/current-plugin-metadata-state.js", () => ({
   getGatewayPluginMetadataSnapshot: () => undefined,
 }));
+// mock-isolation: Tool metadata is injected so the App view resolves one named tool.
 vi.mock("../plugins/tool-metadata.js", () => ({ getPluginToolMeta: mocks.toolMeta }));
 vi.mock("./mcp-app-host-files.js", () => ({ resolveMcpAppRequesterId: () => "alice" }));
+// mock-isolation: The approval prompt is observed and is not sent to a gateway client.
 vi.mock("./mcp-app-tool-approval.js", () => ({
   requestMcpAppToolApproval: mocks.requestApproval,
 }));
