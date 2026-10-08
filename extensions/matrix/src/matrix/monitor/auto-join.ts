@@ -3,6 +3,7 @@ import { normalizeStringifiedEntries } from "openclaw/plugin-sdk/string-coerce-r
 import { getMatrixRuntime } from "../../runtime.js";
 import type { MatrixConfig } from "../../types.js";
 import type { MatrixClient } from "../sdk.js";
+import { withMatrixSendCurrentness } from "../sdk/send-currentness.js";
 import { isMatrixInviteAutoJoinTarget } from "../target-ids.js";
 import { getMatrixMonitorTaskSignal } from "./task-runner.js";
 
@@ -99,9 +100,18 @@ export function registerMatrixAutoJoin(params: {
       }
 
       try {
-        await client.joinRoom(roomId);
+        await withMatrixSendCurrentness(
+          client,
+          () => {
+            monitorSignal?.throwIfAborted();
+          },
+          () => client.joinRoom(roomId),
+        );
         logVerbose(`matrix: joined room ${roomId}`);
       } catch (err) {
+        if (monitorSignal?.aborted) {
+          return;
+        }
         runtime.error?.(`matrix: failed to join room ${roomId}: ${String(err)}`);
       }
     });
