@@ -82,18 +82,26 @@ function literalCursorRanges(
   return mergeCursorRanges(next);
 }
 
-// `*` stays inside one path segment. One input range stays one output range
-// per segment, instead of a cursor set that rescans each suffix.
+// `*` stays inside one path segment. The first cursor in a segment already
+// reaches that segment's end, so later cursors in the same segment are not
+// scanned again.
 function starCursorRanges(url: string, ranges: readonly UrlCursorRange[]): UrlCursorRange[] {
   const next: UrlCursorRange[] = [];
-  for (const range of ranges) {
+  let coveredThrough = -1;
+  for (const range of mergeCursorRanges(
+    ranges.map((item) => ({ start: item.start, end: item.end })),
+  )) {
     let cursor = range.start;
+    if (cursor <= coveredThrough) {
+      cursor = coveredThrough + 1;
+    }
     while (cursor <= range.end) {
       let far = cursor;
       while (far < url.length && url[far] !== "/") {
         far += 1;
       }
       next.push({ start: cursor, end: far });
+      coveredThrough = far;
       if (far >= range.end) {
         break;
       }

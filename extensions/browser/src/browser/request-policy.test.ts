@@ -115,5 +115,17 @@ describe("browser url pattern matching", () => {
     expect(matchBrowserUrlPattern("https://example.com/*a*", "https://example.com/bbb")).toBe(
       false,
     );
+    const separated = "ab".repeat(10_000);
+    const separatedStarted = Date.now();
+    expect(
+      matchBrowserUrlPattern("https://example.com/*a*", `https://example.com/${separated}`),
+    ).toBe(true);
+    expect(Date.now() - separatedStarted).toBeLessThan(250);
+    expect(
+      matchBrowserUrlPattern(
+        "https://example.com/*a*",
+        `https://example.com/${"b".repeat(10_000)}`,
+      ),
+    ).toBe(false);
   });
 });
