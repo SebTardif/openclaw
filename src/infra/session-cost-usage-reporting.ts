@@ -130,8 +130,8 @@ export async function loadSessionCostSummary(params: {
     while (Date.now() - refreshWaitStartedAt < USAGE_COST_DIRECT_REFRESH_MAX_WAIT_MS) {
       if (
         await isSessionCostUsageRefreshRunning(
-          scoped.agentId,
-          prepared.location.databasePath,
+          scoped.incognito?.actor.agentId ?? scoped.agentId,
+          scoped.incognito?.actor.path ?? prepared.location.databasePath,
           scoped.incognito,
         )
       ) {
