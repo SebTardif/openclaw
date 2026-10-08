@@ -54,7 +54,9 @@ export async function withResolvedMatrixSendClient<T>(
         client,
         () => {
           opts.assertDirectAdapterHandoff?.();
-          getMatrixMonitorTaskSignal()?.throwIfAborted();
+          // The SDK scheduler can drain this send in another monitor's context.
+          // Keep the signal captured at entry so retirement follows this send.
+          monitorSignal?.throwIfAborted();
           opts.signal?.throwIfAborted();
           abortSignal?.throwIfAborted();
         },
