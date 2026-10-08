@@ -79,6 +79,17 @@ async function rejectSavedDownloadOverBudget(
   throw browserDownloadTooLargeError(maxBytes);
 }
 
+async function writeEntireChunk(handle: fs.FileHandle, bytes: Buffer): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, null);
+    if (bytesWritten <= 0) {
+      throw new Error("Browser download write made no progress");
+    }
+    offset += bytesWritten;
+  }
+}
+
 async function writeDownloadStreamWithinBudget(
   stream: Readable,
   tempPath: string,
@@ -101,7 +112,7 @@ async function writeDownloadStreamWithinBudget(
         await cancelOverBudgetDownload(download);
         throw browserDownloadTooLargeError(maxBytes);
       }
-      await handle.write(bytes);
+      await writeEntireChunk(handle, bytes);
       written += bytes.length;
     }
     signal?.throwIfAborted();
