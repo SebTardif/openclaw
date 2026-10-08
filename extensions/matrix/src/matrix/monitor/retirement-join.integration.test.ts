@@ -1,6 +1,7 @@
 import http from "node:http";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RuntimeEnv } from "../../../runtime-api.js";
 import { setMatrixRuntime } from "../../runtime.js";
 import { MatrixClient } from "../sdk.js";
 import { registerMatrixAutoJoin } from "./auto-join.js";
@@ -80,7 +81,7 @@ describe("Matrix auto-join retirement", () => {
     registerMatrixAutoJoin({
       client: matrixClient,
       accountConfig: { autoJoin: "always" },
-      runtime: { log: () => {}, error: () => {} },
+      runtime: { log: () => {}, error: () => {} } as RuntimeEnv,
       runDetachedTask: owner.runDetachedTask,
     });
     (
@@ -98,9 +99,9 @@ describe("Matrix auto-join retirement", () => {
     await new Promise((resolve) => {
       setImmediate(resolve);
     });
-    await sibling.runDetachedTask("profile", () =>
-      matrixClient.getUserProfile("@active:example.org"),
-    );
+    await sibling.runDetachedTask("profile", async () => {
+      await matrixClient.getUserProfile("@active:example.org");
+    });
     expect(seen.some((line) => line.includes("/profile/"))).toBe(true);
     expect(seen.some((line) => line.includes("/join/"))).toBe(false);
     owner.close();
