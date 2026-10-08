@@ -328,6 +328,36 @@ describe("readScheduledTaskCommand", () => {
     );
   });
 
+  it("keeps the next argument outside a doubled trailing-backslash quote", async () => {
+    await withScheduledTaskScript(
+      {
+        scriptLines: ["@echo off", 'node "C:\\Program Files\\OpenClaw\\\\" SENTINEL-NEXT'],
+      },
+      async (env) => {
+        expect((await readScheduledTaskCommand(env))?.programArguments).toEqual([
+          "node",
+          "C:\\Program Files\\OpenClaw\\",
+          "SENTINEL-NEXT",
+        ]);
+      },
+    );
+  });
+
+  it("keeps a quoted flag value that contains a space", async () => {
+    await withScheduledTaskScript(
+      {
+        scriptLines: ["@echo off", 'node gateway.js --label="with space"'],
+      },
+      async (env) => {
+        expect((await readScheduledTaskCommand(env))?.programArguments).toEqual([
+          "node",
+          "gateway.js",
+          "--label=with space",
+        ]);
+      },
+    );
+  });
+
   it("reads a quoted working directory that ends with a backslash", async () => {
     await withScheduledTaskScript(
       {

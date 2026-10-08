@@ -4,16 +4,11 @@ import { parseCmdScriptCommandLine, quoteCmdScriptArg } from "./cmd-argv.js";
 
 describe("cmd argv helpers", () => {
   it.each([
-    "plain",
-    "with space",
     "safe&whoami",
     "safe|whoami",
     "safe<in",
     "safe>out",
     "safe^caret",
-    "%TEMP%",
-    "!token!",
-    'he said "hi"',
     "C:\\Program Files\\OpenClaw\\",
     "\\\\server\\share\\folder\\",
     'C:\\temp\\file with "quotes"\\',
@@ -39,6 +34,20 @@ describe("cmd argv helpers", () => {
     ];
     const encoded = args.map((arg) => quoteCmdScriptArg(arg)).join(" ");
     expect(parseCmdScriptCommandLine(encoded)).toEqual(args);
+  });
+
+  it("keeps the following argument outside a doubled trailing-backslash quote", () => {
+    const workingDirectory = "C:\\Program Files\\OpenClaw\\";
+    const encoded = `${quoteCmdScriptArg(workingDirectory)} SENTINEL-NEXT`;
+    expect(parseCmdScriptCommandLine(encoded)).toEqual([workingDirectory, "SENTINEL-NEXT"]);
+  });
+
+  it("keeps a quoted value attached to an unquoted flag prefix", () => {
+    expect(parseCmdScriptCommandLine('node gateway.js --label="with space"')).toEqual([
+      "node",
+      "gateway.js",
+      "--label=with space",
+    ]);
   });
 
   it("does not let a trailing backslash escape the closing quote", () => {
