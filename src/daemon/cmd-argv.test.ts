@@ -1,6 +1,10 @@
 // Daemon command argv tests cover command argument construction.
 import { describe, expect, it } from "vitest";
-import { parseCmdScriptCommandLine, quoteCmdScriptArg } from "./cmd-argv.js";
+import {
+  parseCmdScriptCommandLine,
+  quoteCmdScriptArg,
+  stripTrailingCmdRedirections,
+} from "./cmd-argv.js";
 
 describe("cmd argv helpers", () => {
   it.each([
@@ -59,6 +63,15 @@ describe("cmd argv helpers", () => {
     expect(encoded.endsWith('\\\\"')).toBe(true);
     expect(encoded).toBe('"C:\\Program Files\\OpenClaw\\\\"');
     expect(parseCmdScriptCommandLine(encoded)).toEqual([workingDirectory]);
+  });
+
+  it("lets strict readback keep an even trailing-backslash quote", () => {
+    const directory = 'cd /d "C:\\Program Files\\OpenClaw\\\\"';
+    expect(stripTrailingCmdRedirections(directory)).toBe(directory);
+    expect(
+      stripTrailingCmdRedirections('node "C:\\Program Files\\OpenClaw\\\\" SENTINEL-NEXT < NUL'),
+    ).toBe('node "C:\\Program Files\\OpenClaw\\\\" SENTINEL-NEXT ');
+    expect(stripTrailingCmdRedirections('--msg "a\\" >b" >out')).toBeNull();
   });
 
   it("rejects CR/LF in command arguments", () => {

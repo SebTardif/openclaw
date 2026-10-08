@@ -134,10 +134,28 @@ export function stripTrailingCmdRedirections(commandLine: string): string | null
       if (
         char === "\r" ||
         char === "\n" ||
-        (char === "\\" && commandLine[index + 1] === '"') ||
         (char === "^" && (!quoted || commandLine[index + 1] === '"'))
       ) {
         return null;
+      }
+      if (char === "\\") {
+        let slashCount = 0;
+        let cursor = index;
+        while (commandLine[cursor] === "\\") {
+          slashCount += 1;
+          cursor += 1;
+        }
+        if (commandLine[cursor] !== '"') {
+          index += 1;
+          continue;
+        }
+        // An odd run is still an escaped quote whose boundary is not exact.
+        if (slashCount % 2 === 1) {
+          return null;
+        }
+        index = cursor + 1;
+        quoted = !quoted;
+        continue;
       }
       if (char === '"') {
         quoted = !quoted;
