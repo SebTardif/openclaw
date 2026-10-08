@@ -17,6 +17,8 @@ describe("cmd argv helpers", () => {
     "C:\\Program Files\\OpenClaw\\",
     "\\\\server\\share\\folder\\",
     'C:\\temp\\file with "quotes"\\',
+    'a\\"',
+    "a\\\\",
   ])("round-trips single arg: %p", (arg) => {
     const encoded = quoteCmdScriptArg(arg);
     expect(parseCmdScriptCommandLine(encoded)).toEqual([arg]);

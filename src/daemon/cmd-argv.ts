@@ -14,15 +14,85 @@ export function quoteCmdScriptArg(
   if (!/[ \t"&|<>^()%!]/g.test(value)) {
     return escaped;
   }
-  return `"${escaped}"`;
+  // A trailing backslash would otherwise escape the wrapper quote (`\"`).
+  return `"${escaped.replace(/(\\+)$/, (slashes) => slashes + slashes)}"`;
+}
+
+function decodeCmdScriptLiterals(value: string): string {
+  return value.replace(/\^!/g, "!").replace(/%%/g, "%");
+}
+
+function unescapeInsertedCmdQuotes(value: string): string {
+  let decoded = "";
+  for (let index = 0; index < value.length; index += 1) {
+    if (value[index] === "\\" && value[index + 1] === '"') {
+      decoded += '"';
+      index += 1;
+      continue;
+    }
+    decoded += value[index] ?? "";
+  }
+  return decoded;
 }
 
 export function parseCmdScriptCommandLine(value: string): string[] {
   // Script renderer escapes quotes (`\"`) and cmd expansions (`%%`, `^!`).
   // Keep all other backslashes literal so Windows drive/UNC paths survive.
-  return splitArgsPreservingQuotes(value, { escapeMode: "backslash-quote-only" }).map((argument) =>
-    argument.replace(/\^!/g, "!").replace(/%%/g, "%"),
-  );
+  // A doubled trailing-backslash run escapes the closer; halve that run.
+  // A quote that still has its own closer is content, not that run.
+  const args: string[] = [];
+  let index = 0;
+  while (index < value.length) {
+    while (index < value.length && /\s/.test(value[index] ?? "")) {
+      index += 1;
+    }
+    if (index >= value.length) {
+      break;
+    }
+    if (value[index] !== '"') {
+      const start = index;
+      while (index < value.length && !/\s/.test(value[index] ?? "")) {
+        index += 1;
+      }
+      args.push(decodeCmdScriptLiterals(value.slice(start, index)));
+      continue;
+    }
+    const start = index;
+    let cursor = index + 1;
+    let closed = false;
+    while (cursor < value.length) {
+      if (value[cursor] === "\\" && value[cursor + 1] === '"') {
+        cursor += 2;
+        continue;
+      }
+      if (value[cursor] === '"') {
+        cursor += 1;
+        closed = true;
+        break;
+      }
+      cursor += 1;
+    }
+    const token = value.slice(start, cursor);
+    index = cursor;
+    if (closed) {
+      args.push(
+        ...splitArgsPreservingQuotes(token, { escapeMode: "backslash-quote-only" }).map(
+          decodeCmdScriptLiterals,
+        ),
+      );
+      continue;
+    }
+    const inner = token.endsWith('"') ? token.slice(1, -1) : token.slice(1);
+    const tail = /^(.*?)(\\*)$/u.exec(inner);
+    const body = tail?.[1] ?? "";
+    const slashes = tail?.[2] ?? "";
+    const kept =
+      slashes.length > 0 && slashes.length % 2 === 0
+        ? `${body}${"\\".repeat(slashes.length / 2)}`
+        : inner;
+    args.push(decodeCmdScriptLiterals(unescapeInsertedCmdQuotes(kept)));
+  }
+  return args;
 }
 
 export function stripTrailingCmdRedirections(commandLine: string): string | null {
