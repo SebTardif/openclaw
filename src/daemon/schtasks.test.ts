@@ -344,6 +344,30 @@ describe("readScheduledTaskCommand", () => {
     );
   });
 
+  it("decodes CMD literals in an unquoted working directory", async () => {
+    await withScheduledTaskScript(
+      {
+        scriptLines: ["@echo off", "cd /d C:\\literal%%root%%\\caret^!dir", "node gateway.js"],
+      },
+      async (env) => {
+        const result = await readScheduledTaskCommand(env);
+        expect(result?.workingDirectory).toBe("C:\\literal%root%\\caret!dir");
+      },
+    );
+  });
+
+  it("decodes CMD literals in a legacy trailing-backslash working directory", async () => {
+    await withScheduledTaskScript(
+      {
+        scriptLines: ["@echo off", 'cd /d "C:\\literal%%root%%\\caret^!dir\\"', "node gateway.js"],
+      },
+      async (env) => {
+        const result = await readScheduledTaskCommand(env);
+        expect(result?.workingDirectory).toBe("C:\\literal%root%\\caret!dir\\");
+      },
+    );
+  });
+
   it("reads an unquoted working directory that contains spaces", async () => {
     await withScheduledTaskScript(
       {

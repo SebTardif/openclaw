@@ -112,20 +112,25 @@ export function resolveTaskLauncherScriptPath(env: GatewayServiceEnv, scriptPath
   return path.join(parsed.dir, `${parsed.name}.vbs`);
 }
 
+function decodeCmdScriptLiterals(value: string): string {
+  return value.replace(/\^!/g, "!").replace(/%%/g, "%");
+}
+
 function parseCmdWorkingDirectory(directoryArg: string): string {
   const trimmed = directoryArg.trim();
   if (!trimmed) {
     return "";
   }
   // cmd.exe `cd` with extensions accepts unquoted spaces. Do not argv-split.
+  // Paired percents and ^! still decode, the same way quoted argv does.
   if (!trimmed.startsWith('"')) {
-    return trimmed;
+    return decodeCmdScriptLiterals(trimmed);
   }
   const recovered = parseCmdScriptCommandLine(trimmed)[0] ?? "";
   // Older quoteCmdScriptArg wrapped trailing-backslash dirs as `..."\`.
   // cmd.exe still treats that closer as a closer; CRT does not.
   if (recovered.endsWith('"') && /[^\\]\\"$/.test(trimmed)) {
-    return trimmed.slice(1, -1);
+    return decodeCmdScriptLiterals(trimmed.slice(1, -1));
   }
   return recovered;
 }
