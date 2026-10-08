@@ -3,6 +3,7 @@ import { normalizeStringifiedEntries } from "openclaw/plugin-sdk/string-coerce-r
 import { getMatrixRuntime } from "../../runtime.js";
 import type { MatrixConfig } from "../../types.js";
 import type { MatrixClient } from "../sdk.js";
+import { getMatrixMonitorTaskSignal } from "./task-runner.js";
 
 export function registerMatrixAutoJoin(params: {
   client: MatrixClient;
@@ -62,8 +63,12 @@ export function registerMatrixAutoJoin(params: {
   // Handle invites directly so both "always" and "allowlist" modes share the same path.
   const onInvite = (roomId: string, _inviteEvent: unknown) => {
     void params.runDetachedTask(`auto-join invite handler room=${roomId}`, async () => {
+      const monitorSignal = getMatrixMonitorTaskSignal();
       if (autoJoin === "allowlist") {
         const allowedAliasRoomIds = await resolveAllowedAliasRoomIds();
+        if (monitorSignal?.aborted) {
+          return;
+        }
         const allowed =
           autoJoinAllowlist.has("*") ||
           allowedRoomIds.has(roomId) ||
@@ -73,6 +78,10 @@ export function registerMatrixAutoJoin(params: {
           logVerbose(`matrix: invite ignored (not in allowlist) room=${roomId}`);
           return;
         }
+      }
+
+      if (monitorSignal?.aborted) {
+        return;
       }
 
       try {
