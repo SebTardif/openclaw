@@ -1,6 +1,5 @@
-const MAX_BROWSER_URL_PATTERN_LENGTH = 512;
-
 type UrlPatternToken = { kind: "lit"; text: string } | { kind: "star" } | { kind: "glob" };
+type UrlCursorRange = { start: number; end: number };
 
 function tokenizeBrowserUrlPattern(pattern: string): UrlPatternToken[] {
   const tokens: UrlPatternToken[] = [];
@@ -30,43 +29,115 @@ function tokenizeBrowserUrlPattern(pattern: string): UrlPatternToken[] {
   return tokens;
 }
 
-// `*` is one path segment. `**` may cross slashes. Matching is a linear scan
-// so a tool pattern cannot stall the Node event loop.
+function mergeCursorRanges(ranges: UrlCursorRange[]): UrlCursorRange[] {
+  if (ranges.length === 0) {
+    return [];
+  }
+  const sorted = ranges.toSorted((left, right) => left.start - right.start || left.end - right.end);
+  const merged: UrlCursorRange[] = [];
+  for (const range of sorted) {
+    const last = merged.at(-1);
+    if (last !== undefined && range.start <= last.end + 1) {
+      if (range.end > last.end) {
+        last.end = range.end;
+      }
+      continue;
+    }
+    merged.push({ start: range.start, end: range.end });
+  }
+  return merged;
+}
+
+function literalCursorRanges(
+  url: string,
+  literal: string,
+  ranges: readonly UrlCursorRange[],
+): UrlCursorRange[] {
+  const next: UrlCursorRange[] = [];
+  const width = literal.length;
+  for (const range of ranges) {
+    let runStart = -1;
+    let runEnd = -1;
+    const last = Math.min(range.end, url.length - width);
+    for (let pos = range.start; pos <= last; pos += 1) {
+      if (!url.startsWith(literal, pos)) {
+        continue;
+      }
+      const at = pos + width;
+      if (runStart < 0) {
+        runStart = at;
+        runEnd = at;
+      } else if (at <= runEnd + 1) {
+        runEnd = at;
+      } else {
+        next.push({ start: runStart, end: runEnd });
+        runStart = at;
+        runEnd = at;
+      }
+    }
+    if (runStart >= 0) {
+      next.push({ start: runStart, end: runEnd });
+    }
+  }
+  return mergeCursorRanges(next);
+}
+
+// `*` stays inside one path segment. One input range stays one output range
+// per segment, instead of a cursor set that rescans each suffix.
+function starCursorRanges(url: string, ranges: readonly UrlCursorRange[]): UrlCursorRange[] {
+  const next: UrlCursorRange[] = [];
+  for (const range of ranges) {
+    let cursor = range.start;
+    while (cursor <= range.end) {
+      let far = cursor;
+      while (far < url.length && url[far] !== "/") {
+        far += 1;
+      }
+      next.push({ start: cursor, end: far });
+      if (far >= range.end) {
+        break;
+      }
+      cursor = far + 1;
+    }
+  }
+  return mergeCursorRanges(next);
+}
+
+// `**` may cross slashes. Every cursor at or after the earliest reachable
+// position is reachable, so the result is one range.
+function globCursorRanges(url: string, ranges: readonly UrlCursorRange[]): UrlCursorRange[] {
+  let start = url.length + 1;
+  for (const range of ranges) {
+    if (range.start < start) {
+      start = range.start;
+    }
+  }
+  if (start > url.length) {
+    return [];
+  }
+  return [{ start, end: url.length }];
+}
+
+function rangeContains(ranges: readonly UrlCursorRange[], cursor: number): boolean {
+  return ranges.some((range) => range.start <= cursor && cursor <= range.end);
+}
+
 function matchBrowserUrlWildcard(pattern: string, url: string): boolean {
   const tokens = tokenizeBrowserUrlPattern(pattern);
-  let positions = new Set<number>([0]);
+  let ranges: UrlCursorRange[] = [{ start: 0, end: 0 }];
   for (const token of tokens) {
-    const next = new Set<number>();
     if (token.kind === "lit") {
-      for (const pos of positions) {
-        if (url.startsWith(token.text, pos)) {
-          next.add(pos + token.text.length);
-        }
-      }
+      ranges = literalCursorRanges(url, token.text, ranges);
     } else if (token.kind === "star") {
-      for (const pos of positions) {
-        next.add(pos);
-        for (let index = pos; index < url.length && url[index] !== "/"; index += 1) {
-          next.add(index + 1);
-        }
-      }
+      ranges = starCursorRanges(url, ranges);
     } else {
-      let start = url.length + 1;
-      for (const pos of positions) {
-        if (pos < start) {
-          start = pos;
-        }
-      }
-      for (let index = start; index <= url.length; index += 1) {
-        next.add(index);
-      }
+      ranges = globCursorRanges(url, ranges);
     }
-    if (next.size === 0) {
+    if (ranges.length === 0) {
       return false;
     }
-    positions = next;
   }
-  return positions.has(url.length);
+  return rangeContains(ranges, url.length);
 }
 
 export function matchBrowserUrlPattern(pattern: string, url: string): boolean {
@@ -78,9 +149,6 @@ export function matchBrowserUrlPattern(pattern: string, url: string): boolean {
     return true;
   }
   if (trimmedPattern.includes("*")) {
-    if (trimmedPattern.length > MAX_BROWSER_URL_PATTERN_LENGTH) {
-      return false;
-    }
     return matchBrowserUrlWildcard(trimmedPattern, url);
   }
   return url.includes(trimmedPattern);
