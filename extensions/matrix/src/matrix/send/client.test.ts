@@ -188,7 +188,7 @@ describe("matrix send client helpers", () => {
           await queuedB.promise;
           await releaseProcessor.promise;
         }
-        guards.captureCurrentness(sendUrl(txnId), { method: "PUT" })?.();
+        guards.captureCurrentness(sendUrl(txnId), { method: "PUT" }, undefined)?.();
         return { event_id: `$${txnId}` };
       });
 
