@@ -67,7 +67,13 @@ function databaseOptions(): OpenClawStateDatabaseOptions {
   return { env: { ...process.env, OPENCLAW_STATE_DIR: stateDir } };
 }
 
-function approval(id: string, createdAtMs = NOW_MS, expiresAtMs = NOW_MS + 60_000) {
+type NewOperatorApproval = Parameters<typeof insertOperatorApproval>[0]["approval"];
+
+function approval(
+  id: string,
+  createdAtMs = NOW_MS,
+  expiresAtMs = NOW_MS + 60_000,
+): NewOperatorApproval {
   return {
     id,
     kind: "exec" as const,
