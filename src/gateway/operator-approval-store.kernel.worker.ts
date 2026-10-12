@@ -14,7 +14,7 @@ import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import { runOpenClawStateWriteTransaction } from "../state/openclaw-state-db.js";
 import { matchesOperatorApprovalReviewerBinding } from "./operator-approval-reviewer-binding.js";
 import { operatorApprovalPublication } from "./operator-approval-store.publication.js";
-import { deleteTerminalOperatorApprovalsPastRetention } from "./operator-approval-store.retention.js";
+import { deleteTerminalOperatorApprovalsPastRetention } from "./operator-approval-store.retention.worker.js";
 import {
   OPERATOR_APPROVAL_TERMINAL_RETENTION_MS,
   OPERATOR_APPROVAL_MAX_AUDIENCE_SESSION_KEYS,

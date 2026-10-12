@@ -79,7 +79,7 @@ function approval(id: string, createdAtMs = NOW_MS, expiresAtMs = NOW_MS + 60_00
       host: "gateway" as const,
       nodeId: null,
       agentId: "main",
-      allowedDecisions: ["allow-once", "allow-always", "deny"] as const,
+      allowedDecisions: ["allow-once", "allow-always", "deny"],
     },
     requester: { deviceId: "device-1", clientId: "client-1", deviceTokenAuth: true },
     reviewerDeviceIds: [],

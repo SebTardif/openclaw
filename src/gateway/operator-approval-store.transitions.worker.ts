@@ -11,7 +11,7 @@ import type { CronStandingGrantMintSpec } from "./operator-approval-standing-gra
 import { mintCronStandingGrantLocked } from "./operator-approval-standing-grants.worker.js";
 import { operatorApprovalTerminalFields } from "./operator-approval-store.fields.js";
 import { operatorApprovalPublication } from "./operator-approval-store.publication.js";
-import { deleteTerminalOperatorApprovalsPastRetention } from "./operator-approval-store.retention.js";
+import { deleteTerminalOperatorApprovalsPastRetention } from "./operator-approval-store.retention.worker.js";
 import {
   OPERATOR_APPROVAL_TERMINAL_RETENTION_MS,
   requireApprovalId,
