@@ -25,6 +25,14 @@ class FileFetchTooLargeError extends Error {
   readonly code = "FILE_TOO_LARGE";
 }
 
+class DirectoryListingTooLargeError extends Error {
+  readonly code = "DIRECTORY_LISTING_TOO_LARGE";
+
+  constructor(pages: number) {
+    super(`Directory listing exceeded ${pages} pages`);
+  }
+}
+
 function relativeWithin(root: string, target: string, paths = path): string {
   const relative = paths.relative(root, target);
   if (relative === ".." || relative.startsWith(`..${paths.sep}`) || paths.isAbsolute(relative)) {
@@ -326,7 +334,7 @@ export function createNodeWorkspaceBridge(options: {
         }
         offset = nextOffset;
       }
-      throw new Error(`Directory listing exceeded ${MAX_DIRECTORY_PAGES} pages`);
+      throw new DirectoryListingTooLargeError(MAX_DIRECTORY_PAGES);
     },
   };
 }
