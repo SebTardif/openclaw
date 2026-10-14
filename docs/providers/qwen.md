@@ -252,23 +252,24 @@ appear without a plugin update. For locally hosted models, use the
 ### Token Plan catalog
 
 Token Plan uses a separate exact-string allowlist. The built-in catalog shows
-Alibaba's currently recommended plan models and keeps the newer Qwen3-Coder
-compatibility tier selectable but hidden. Other allowlisted model IDs remain
+Alibaba's currently recommended plan models. Other allowlisted model IDs remain
 available as custom model refs. Image-generation-only plan models are not
 included here because they use different APIs.
 
-| Model ref                          | Input       | Context   | Picker status |
-| ---------------------------------- | ----------- | --------- | ------------- |
-| `qwen-token-plan/qwen3.7-plus`     | text, image | 1,000,000 | visible       |
-| `qwen-token-plan/qwen3.8-max`      | text, image | 1,000,000 | visible       |
-| `qwen-token-plan/qwen3.8-flash`    | text, image | 1,000,000 | visible       |
-| `qwen-token-plan/qwen3.6-plus`     | text, image | 1,000,000 | visible       |
-| `qwen-token-plan/qwen3-coder-next` | text        | 262,144   | hidden        |
-| `qwen-token-plan/kimi-k2.5`        | text, image | 262,144   | visible       |
-| `qwen-token-plan/glm-5`            | text        | 202,752   | visible       |
-| `qwen-token-plan/MiniMax-M2.5`     | text        | 196,608   | visible       |
+| Model ref                       | Input       | Context   | Picker status |
+| ------------------------------- | ----------- | --------- | ------------- |
+| `qwen-token-plan/qwen3.7-plus`  | text, image | 1,000,000 | visible       |
+| `qwen-token-plan/qwen3.8-max`   | text, image | 1,000,000 | visible       |
+| `qwen-token-plan/qwen3.8-flash` | text, image | 1,000,000 | visible       |
+| `qwen-token-plan/qwen3.6-plus`  | text, image | 1,000,000 | visible       |
+| `qwen-token-plan/kimi-k2.5`     | text, image | 262,144   | visible       |
+| `qwen-token-plan/glm-5`         | text        | 202,752   | visible       |
+| `qwen-token-plan/MiniMax-M2.5`  | text        | 196,608   | visible       |
 
 ## Thinking controls
+
+Agent runs and standalone completions use the same model-specific thinking
+controls, including Token Plan tool-choice and reasoning-replay requirements.
 
 `qwen3.8-max` and `qwen3.8-flash` support `off`, `low`, `medium`, and `xhigh`
 thinking, with `xhigh` as the default. `minimal` maps to `low`; `high` and `max`
@@ -287,7 +288,12 @@ family, the provider maps OpenClaw thinking levels to DashScope's top-level
 `enable_thinking` request flag: disabled thinking sends `enable_thinking: false`,
 any other level sends `enable_thinking: true`. Custom models can opt into an
 alternate chat-template thinking payload by setting
-`compat.thinkingFormat: "qwen-chat-template"` on the model entry.
+`compat.thinkingFormat: "qwen-chat-template"` on the model entry. Declaring
+`compat.supportedReasoningEfforts: ["low", "medium", "xhigh"]` with
+`compat.reasoningEffortMap: { "high": "xhigh" }` also sends
+`chat_template_kwargs.reasoning_effort` with the Qwen 3.8 tier mapping above
+when a turn, session, or configuration selects a thinking level. With no selection,
+OpenClaw omits the nested effort and preserves the server template default.
 
 Token Plan models are also marked reasoning-capable. `kimi-k2.7-code` and
 `MiniMax-M2.5` are thinking-only, so OpenClaw keeps thinking enabled even when
@@ -309,7 +315,10 @@ Media understanding is auto-resolved from the configured Qwen auth; no extra
 config is needed. Make sure you are on a Standard (pay-as-you-go) endpoint for
 media understanding to work.
 
-To make Qwen the default video provider:
+### Video generation
+
+Use `QWEN_API_KEY` from a Standard endpoint. To make Qwen the default video
+provider:
 
 ```json5
 {
@@ -321,7 +330,10 @@ To make Qwen the default video provider:
 }
 ```
 
-Each Wan model advertises only its matching runtime mode:
+With exactly one reference image and no video, `wan2.6-t2v` automatically
+uses `wan2.6-i2v`; the result reports the resolved model. This routing applies
+only when a same-generation image-to-video sibling exists in the known model
+catalog. Other requests use the selected model's mode:
 
 | Mode                         | Models                           | Reference limits                      | Max duration | Supported controls                                                   |
 | ---------------------------- | -------------------------------- | ------------------------------------- | ------------ | -------------------------------------------------------------------- |
@@ -335,9 +347,12 @@ documented exact `size`. Wan 2.6 image-to-video sends the `resolution` tier and
 uses the input image's aspect ratio. Wan 2.7 reference-to-video sends
 `media`, `resolution`, and `ratio` and always generates audio.
 
-Reference image/video inputs require remote http(s) URLs; local file paths are
-rejected up front because the DashScope video endpoint does not accept uploaded
-local buffers for those references.
+Image-to-video and Wan 2.7 reference images accept local files or remote
+`http(s)` URLs. Local images are sent as base64 data URIs with a maximum of
+20 MB per image before encoding, matching the [Wan image input
+limit](https://www.alibabacloud.com/help/en/model-studio/image-to-video-api-reference).
+Reference videos and Wan 2.6 reference-to-video images still require remote
+`http(s)` URLs.
 
 <Note>
 See [Video generation](/tools/video-generation) for shared tool parameters, provider selection, and failover behavior.

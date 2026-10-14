@@ -5,12 +5,11 @@ import type { OpenClawConfig } from "../config/config.js";
 import { runSecurityHealth } from "../flows/doctor-health-contribution-runners.gateway.js";
 import type { DoctorHealthFlowContext } from "../flows/doctor-health-contribution-types.js";
 import type { ExecApprovalsFile } from "../infra/exec-approvals-core.js";
+import { loadExecApprovals, readExecApprovalsSnapshot } from "../infra/exec-approvals-store.js";
 import {
-  loadExecApprovals,
-  readExecApprovalsSnapshot,
   saveExecApprovals,
-} from "../infra/exec-approvals-store.js";
-import { testing as execApprovalsStoreTesting } from "../infra/exec-approvals-store.test-support.js";
+  testing as execApprovalsStoreTesting,
+} from "../infra/exec-approvals-store.test-support.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { withTestDir } from "../test-helpers/temp-dir.js";

@@ -57,8 +57,7 @@ across many turns:
 - A maintenance task: inspect current state, make bounded changes, run the
   right checks, and report what changed.
 
-A goal is not a task queue. Use [Task Flow](/automation/taskflow),
-[tasks](/automation/tasks), [cron jobs](/automation/cron-jobs), or
+A goal is not a task queue. Use [subagents](/tools/subagents), [cron jobs](/automation/cron-jobs), or
 [standing orders](/automation/standing-orders) when work should run detached,
 repeat on a schedule, fan out into managed sub-work, or persist as a policy.
 
@@ -84,7 +83,7 @@ Commands: /goal edit <objective>, /goal pause, /goal complete, /goal clear
 | `/goal <objective>`                                 | Also creates a new goal (any text that is not a recognized action word). |
 | `/goal edit <objective>`                            | Reword the current objective; status and token accounting stay put.      |
 | `/goal pause [note]`                                | Pause an active goal.                                                    |
-| `/goal resume [note]`                               | Resume a paused, blocked, usage-limited, or budget-limited goal.         |
+| `/goal resume [note]`                               | Resume a paused, blocked, limited, or completed goal.                    |
 | `/goal complete [note]`                             | Mark the goal achieved.                                                  |
 | `/goal done [note]`                                 | Alias for `complete`.                                                    |
 | `/goal block [note]`                                | Mark the goal blocked.                                                   |
@@ -99,17 +98,24 @@ with `Goal error: goal already exists` until the current one is cleared.
 ## Statuses
 
 - `active`: the session is pursuing the goal.
-- `paused`: the operator paused the goal. `/goal resume` makes it active
-  again.
+- `paused`: the operator paused the goal, or its run ended with an error or
+  timeout. `/goal resume` makes it active again. A failed run preserves the
+  objective and records the error as a status note; sending an ordinary message
+  does not automatically resume the goal. Errors that recover through a retry
+  do not pause it.
 - `blocked`: the agent or operator reported a real blocker. `/goal resume`
   makes it active again when new information or state is available.
 - `budget_limited`: the configured token budget was reached. `/goal resume`
   restarts pursuit from the same objective with a fresh budget window.
 - `usage_limited`: reserved for a future usage-limit stop state. `/goal
 resume` restarts pursuit the same way.
-- `complete`: the goal was achieved. Complete goals are terminal. Use `/goal
-clear` before starting another goal. Repeating completion preserves the original
-  completion time, including when you add a status note.
+- `complete`: the goal was achieved. It stays complete until you explicitly use
+  `/goal resume` or **Resume** in the Control UI to pursue the same objective again.
+  Resuming preserves its identity, creation time, and conversation history. Token
+  accounting continues unless the budget was reached, in which case resume starts
+  a fresh budget window. A later completion records a new completion time; repeating
+  completion without resuming preserves the original time, including when you add
+  a status note. Use `/goal clear` before starting a different goal.
 
 `/new` and `/reset` clear the current session goal, since they intentionally
 start fresh session context.
@@ -175,39 +181,81 @@ so an operator stop remains in effect until the goal is resumed.
 
 ## Control UI
 
-Select **Goal** from the command picker, type the objective, and send. The
-composer shows a Goal label so you can see what Send will do. The objective is
-literal text: words such as `clear` and text such as `/stop` do not become
-commands in Goal mode. Cancel leaves the objective as a normal chat draft.
+Select **Goal** from the command picker with Enter, Tab, or a click, then type
+the objective and choose **Start goal**. Typing `/goal start` followed by a
+space, or submitting `/goal start` without an objective, also opens Goal mode.
+Sending bare `/goal`, even after dismissing
+the picker, opens the composer instead of adding a command to the conversation.
+An empty objective cannot be submitted.
+
+The composer shows a Goal label and an objective prompt so you can see what
+Send will do. The objective is literal text: words such as `clear` and text
+such as `/stop` do not become commands in Goal mode. Escape or Cancel leaves
+the objective as a normal chat draft. Complete pasted commands such as
+`/goal start Fix the tests` and explicit management commands such as
+`/goal status` retain their text-command behavior.
 
 Starting a Goal saves the Goal, its user turn, and the run admission together
 before acknowledging Send. A failed admission leaves the draft intact and
-does not create a Goal. Start and Resume require an idle local session with
-recoverable history. They are not queued or steered into another run. The UI
-reports unsupported or busy sessions rather than creating an inactive Goal.
+does not create a Goal. A failed older chat send stays separate from a newly opened
+Goal draft instead of filling its empty objective. Start and Resume require the built-in OpenClaw runtime
+and an idle local session with recoverable history. They are unavailable for
+native Codex and other external runtimes, and are not queued or steered into
+another run. The UI reports unsupported or busy sessions rather than creating
+an inactive Goal.
 
 The web Control UI shows the goal as a compact pill above the chat composer:
 a status icon, the status label (for example `Pursuing goal`), the truncated
 objective, and a live elapsed timer.
 
+Active goals use a green target icon. Paused goals use a neutral pause icon,
+the normal card surface, and a frozen elapsed timer. Blocked or limited goals
+use an amber warning icon and tinted card;
+completed goals use a green check. Status labels identify each state without
+relying on color. Hover or focus a paused or blocked goal's status label to read
+its status note, including the reason for an error pause. The expanded details
+also show the full note.
+
 The pill carries inline controls:
 
 - **Pencil** opens an Edit Goal composer with the current objective. Saving
   changes only the objective. Cancelling restores the previous chat draft.
-- **Pause / resume** updates the current Goal. Resume also starts a continuation
+- **Pause / resume** updates the current Goal, including resuming an achieved
+  Goal when more work is warranted. Resume also starts a continuation
   through normal chat admission. Its internal input stays in model history
   without appearing as a human chat message. The assistant reply remains visible.
 - **Trash** clears the current Goal.
 - **Chevron** expands the pill to show the full objective, the latest status
   note, token usage, and elapsed time.
 
+Resume stays visible in the collapsed pill, including on narrow mobile screens.
+Expand the pill to reveal the other compact labeled controls above the full
+objective. Token usage and elapsed time remain below the objective and status note.
+
 Edit, Pause, and Clear do not send slash commands or add chat turns. Controls
 target the displayed Goal ID, so a stale button cannot change a replacement
-Goal. If a request is interrupted, retry it unchanged. A successful replay
-refreshes the current state instead of restoring an old Goal snapshot.
+Goal. If a request is interrupted or its acknowledgment does not arrive within
+30 seconds, the UI reports an unconfirmed outcome. Resume keeps **Resuming goal…**
+in the pill while waiting and retries once after a timeout or unavailable response,
+using the same saved request. If it remains unconfirmed, use **Retry resume** in
+the pill. Other actions, or requests whose goal changed or was cleared, use
+**Check outcome** in the recovery notice. These controls retry the saved action
+unchanged to reconcile it with the Gateway receipt. The original request stays
+in this browser tab across reconnects and reloads; restoring it never sends it
+automatically. The UI does not send goal controls if the connection has no
+account-scoped recovery identity or the recovery request cannot be saved; it
+immediately shows an error explaining why the action was not sent.
+Incognito requests stay in memory only. A successful replay
+refreshes the current state instead of restoring an old Goal snapshot or
+starting another continuation. Dismissing an error or cancelling an editor
+does not cancel a mutation already sent to the Gateway. After 24 hours, the saved
+request expires and its literal payload is removed; **Review current goal** refreshes
+state before another decision. Forgetting this browser or switching authenticated
+accounts removes that Gateway's previous account recovery payloads.
 
-The action buttons are unavailable without a connection. The expand chevron
-keeps working. Concurrent Goal actions are rejected while an operation is
+The action buttons are unavailable without a connection or while the initial
+chat history loads and confirms the session identity. The expand chevron keeps
+working. Concurrent Goal actions are rejected while an operation is
 pending. These controls require
 a Gateway advertising the structured Goal capability. Text `/goal` commands
 remain available for CLI and other command-capable surfaces.
@@ -274,7 +322,7 @@ channel, change queue behavior, approve tools, or schedule work.
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Goal error: goal already exists`      | The session already has a goal. Use `/goal` to inspect it, `/goal complete` if done, or `/goal clear` before starting a different objective. |
 | `Goal error: goal not found`           | The session has no goal yet. Start one with `/goal start <objective>`.                                                                       |
-| `Goal error: goal is already complete` | The goal is terminal. Clear it before starting or resuming another objective.                                                                |
+| `Goal error: goal is already complete` | The goal must be explicitly resumed before editing, pausing, or blocking it. Clear it to start a different objective.                        |
 
 If token usage shows `0` or looks stale, the active session may not have a
 fresh token snapshot yet. Usage refreshes as OpenClaw records session usage
@@ -286,5 +334,4 @@ and transcript-derived totals.
 - [TUI](/web/tui)
 - [Session tool](/concepts/session-tool)
 - [Compaction](/concepts/compaction)
-- [Task Flow](/automation/taskflow)
 - [Standing orders](/automation/standing-orders)

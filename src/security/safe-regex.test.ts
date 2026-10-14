@@ -1,6 +1,6 @@
 // Covers safe-regex checks for risky user-supplied patterns.
 import { describe, expect, it } from "vitest";
-import { DEFAULT_REDACT_STRING_PATTERNS } from "../logging/redact-patterns.js";
+import { DEFAULT_REDACT_PATTERNS } from "../logging/redact-patterns.js";
 import { tokenizePattern } from "./safe-regex-tokens.js";
 import {
   compileSafeRegex,
@@ -583,7 +583,10 @@ describe("safe regex", () => {
   });
 
   it("still compiles every default redact pattern after zero-minimum carry", () => {
-    const rejected = DEFAULT_REDACT_STRING_PATTERNS.flatMap((pattern) => {
+    const rejected = DEFAULT_REDACT_PATTERNS.flatMap((pattern) => {
+      if (typeof pattern !== "string") {
+        return [];
+      }
       const result = compileSafeRegexDetailed(pattern, "gi");
       return result.reason === null ? [] : [`${result.reason}: ${pattern}`];
     });

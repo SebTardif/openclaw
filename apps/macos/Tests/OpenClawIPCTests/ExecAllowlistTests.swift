@@ -1129,7 +1129,7 @@ struct ExecAllowlistTests {
             agentId: nil)
 
         #expect(evaluation.boundCommand == nil)
-        #expect(!evaluation.allowlistSatisfied)
+        #expect(!evaluation.allowlistAuthorizationSatisfied)
         #expect(!evaluation.canPersistAllowAlways)
     }
 
