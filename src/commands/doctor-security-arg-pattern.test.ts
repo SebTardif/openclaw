@@ -370,7 +370,7 @@ describe("doctor security exec argPattern repair", () => {
         cfg: {} as OpenClawConfig,
       };
       const findings = await check!.detect(context);
-      expect(findings).toHaveLength(7);
+      expect(findings).toHaveLength(8);
       expect(findings.some((finding) => finding.message.includes("/bin/unsafe"))).toBe(true);
       expect(findings.some((finding) => finding.message.includes("/bin/property-identity"))).toBe(
         true,
@@ -394,17 +394,23 @@ describe("doctor security exec argPattern repair", () => {
       expect(findings.some((finding) => finding.message.includes("/bin/seventeen-way"))).toBe(
         false,
       );
-      expect(findings.some((finding) => finding.message.includes("/bin/truncated-disjoint"))).toBe(
-        false,
-      );
+      // Quoted so this does not also match /bin/truncated-disjoint-32.
       expect(
-        findings.some((finding) => finding.message.includes("/bin/truncated-disjoint-32")),
+        findings.some((finding) => finding.message.includes('"/bin/truncated-disjoint"')),
       ).toBe(false);
+      expect(
+        findings.some(
+          (finding) =>
+            finding.message.includes("/bin/truncated-disjoint-32") &&
+            finding.message.includes("conservatively refused"),
+        ),
+      ).toBe(true);
 
       const repaired = await check!.repair?.(context, findings);
       expect(repaired?.changes).toEqual([
         expect.stringContaining("Removed 7 rejected exec approval entries"),
       ]);
+      expect(repaired?.changes?.[0]).toContain("Kept 1 conservatively refused rule");
 
       const remaining = loadExecApprovals().agents?.main?.allowlist ?? [];
       expect(remaining.map(({ pattern, argPattern }) => ({ pattern, argPattern }))).toEqual([

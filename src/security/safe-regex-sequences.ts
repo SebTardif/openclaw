@@ -67,6 +67,29 @@ function cloneAtomSequence(seq: AtomSequence): AtomSequence {
   );
 }
 
+/** `[a]` and `a` are one character. A range, dot, or class is not. */
+function singleCharLanguage(atom: string): string | null {
+  if (atom.length === 1) {
+    return atom === "." || atom === "^" || atom === "$" ? null : atom;
+  }
+  if (!atom.startsWith("[") || !atom.endsWith("]") || atom.startsWith("[^") || atom.includes("-")) {
+    return null;
+  }
+  const inner = atom.slice(1, -1);
+  if (inner.length === 1) {
+    return inner === "^" || inner === "-" ? null : inner;
+  }
+  if (inner.length === 2 && inner.startsWith("\\") && !/[0-9A-Za-z]/.test(inner[1] ?? "")) {
+    return inner[1] ?? null;
+  }
+  return null;
+}
+
+function sameSingleCharAtom(left: string, right: string): boolean {
+  const language = singleCharLanguage(left);
+  return language !== null && language === singleCharLanguage(right);
+}
+
 function omittedTailIsHomogeneous(suffix: AtomSequence, room: number): boolean {
   const next = suffix.atoms[room];
   if (next === undefined) {
@@ -75,10 +98,10 @@ function omittedTailIsHomogeneous(suffix: AtomSequence, room: number): boolean {
   if (suffix.unknownTail === true) {
     return false;
   }
-  if (suffix.nextAtom !== undefined && suffix.nextAtom !== next) {
+  if (suffix.nextAtom !== undefined && !sameSingleCharAtom(suffix.nextAtom, next)) {
     return false;
   }
-  return suffix.atoms.slice(room + 1).every((atom) => atom === next);
+  return suffix.atoms.slice(room + 1).every((atom) => sameSingleCharAtom(atom, next));
 }
 
 /** Collapse ax|bx|…|qx into one (?:a|b|…|q)x sequence when tails match. */
@@ -148,8 +171,11 @@ function concatAtomSequence(prefix: AtomSequence, suffix: AtomSequence): AtomSeq
   const kept = room > 0 ? [...prefix.atoms, ...suffix.atoms.slice(0, room)] : [...prefix.atoms];
   if (!prefix.complete) {
     const suffixAtom = suffix.atoms.length === 1 ? suffix.atoms[0] : undefined;
+    // Keep homogeneity when the next copy is spelled `[a]` instead of `a`.
     const sameAsNext =
-      prefix.nextAtom !== undefined && suffixAtom !== undefined && suffixAtom === prefix.nextAtom;
+      prefix.nextAtom !== undefined &&
+      suffixAtom !== undefined &&
+      sameSingleCharAtom(suffixAtom, prefix.nextAtom);
     const homogeneous =
       sameAsNext && (prefix.unknownTailHomogeneous === true || prefix.unknownTail !== true);
     return withNextAtom(kept, false, prefix.nextAtom, true, homogeneous);
@@ -165,6 +191,194 @@ function concatAtomSequence(prefix: AtomSequence, suffix: AtomSequence): AtomSeq
     unknownTail,
     unknownTail && fromSuffix && omittedTailIsHomogeneous(suffix, room),
   );
+}
+
+const PLAIN_LITERAL_META = new Set([
+  ".",
+  "*",
+  "+",
+  "?",
+  "{",
+  "}",
+  "[",
+  "]",
+  "(",
+  ")",
+  "|",
+  "^",
+  "$",
+  "\\",
+]);
+
+function splitTopLevelPlain(source: string): string[] | null {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index];
+    if (ch === "\\") {
+      index += 1;
+      if (index >= source.length) {
+        return null;
+      }
+      continue;
+    }
+    if (ch === "(") {
+      depth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      depth -= 1;
+      if (depth < 0) {
+        return null;
+      }
+      continue;
+    }
+    if (ch === "|" && depth === 0) {
+      parts.push(source.slice(start, index));
+      start = index + 1;
+    }
+  }
+  if (depth !== 0) {
+    return null;
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+function unwrapOneGroup(source: string): string | null {
+  if (!source.startsWith("(") || !source.endsWith(")")) {
+    return null;
+  }
+  let depth = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index];
+    if (ch === "\\") {
+      index += 1;
+      continue;
+    }
+    if (ch === "(") {
+      depth += 1;
+      continue;
+    }
+    if (ch === ")") {
+      depth -= 1;
+      if (depth === 0 && index !== source.length - 1) {
+        return null;
+      }
+    }
+  }
+  if (depth !== 0) {
+    return null;
+  }
+  let inner = source.slice(1, -1);
+  if (inner.startsWith("?:")) {
+    inner = inner.slice(2);
+  } else if (inner.startsWith("?")) {
+    return null;
+  }
+  return inner;
+}
+
+function readPlainLiteral(source: string): string | null {
+  let literal = "";
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index];
+    if (ch === undefined) {
+      return null;
+    }
+    if (ch === "\\") {
+      const escaped = source[index + 1];
+      if (escaped === undefined || /[0-9A-Za-z]/.test(escaped)) {
+        return null;
+      }
+      literal += escaped;
+      index += 1;
+      continue;
+    }
+    if (PLAIN_LITERAL_META.has(ch)) {
+      return null;
+    }
+    literal += ch;
+  }
+  return literal.length > 0 ? literal : null;
+}
+
+function collectPlainLiterals(source: string, depth: number): string[] | null {
+  if (depth > 3) {
+    return null;
+  }
+  const parts = splitTopLevelPlain(source);
+  if (!parts || parts.length === 0 || parts.some((part) => part.length === 0)) {
+    return null;
+  }
+  if (parts.length === 1) {
+    const only = parts[0];
+    if (only === undefined) {
+      return null;
+    }
+    const unwrapped = unwrapOneGroup(only);
+    if (unwrapped !== null) {
+      return collectPlainLiterals(unwrapped, depth + 1);
+    }
+    const literal = readPlainLiteral(only);
+    return literal === null ? null : [literal];
+  }
+  const literals: string[] = [];
+  for (const part of parts) {
+    const nested = collectPlainLiterals(part, depth + 1);
+    if (!nested) {
+      return null;
+    }
+    literals.push(...nested);
+  }
+  return literals;
+}
+
+function foldPlainLiteral(literal: string, ignoreCase: boolean): string | null {
+  if (!ignoreCase) {
+    return literal;
+  }
+  for (let index = 0; index < literal.length; index += 1) {
+    if (literal.charCodeAt(index) > 0x7f) {
+      return null;
+    }
+  }
+  return literal.toLowerCase();
+}
+
+/**
+ * True only when both sides enumerate to the same width of plain literals
+ * and none of those strings repeat. With ignoreCase, ASCII letters fold
+ * before that check. A non-ASCII literal stays unproven. Expansion overflow
+ * is not overlap for that code. Anything else stays unproven.
+ */
+export function fixedWidthLiteralAlternativesAreDisjoint(
+  left: string,
+  right: string,
+  ignoreCase = false,
+): boolean {
+  const leftLiterals = collectPlainLiterals(left, 0);
+  const rightLiterals = collectPlainLiterals(right, 0);
+  if (!leftLiterals || !rightLiterals) {
+    return false;
+  }
+  const folded: string[] = [];
+  for (const literal of [...leftLiterals, ...rightLiterals]) {
+    const next = foldPlainLiteral(literal, ignoreCase);
+    if (next === null) {
+      return false;
+    }
+    folded.push(next);
+  }
+  if (folded.length === 0 || folded.length > 64) {
+    return false;
+  }
+  const width = folded[0]?.length ?? 0;
+  if (width === 0 || folded.some((literal) => literal.length !== width)) {
+    return false;
+  }
+  return new Set(folded).size === folded.length;
 }
 
 export function cartesianConcatSequences(

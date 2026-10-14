@@ -9,6 +9,7 @@ import {
   shouldRejectAdjacentOverlap,
   singleTokenAlternativesMayOverlap,
 } from "./safe-regex-adjacent.js";
+import { fixedWidthLiteralAlternativesAreDisjoint } from "./safe-regex-sequences.js";
 import {
   ATOM_SEQUENCE_OVERFLOW,
   countCapturingGroups,
@@ -261,9 +262,14 @@ function alternativesMayOverlap(
   }
   const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
   const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
-  // Overflow cannot prove safety. Refuse on shared and exec so overlapping
-  // unions cannot compile just because expansion ran out.
+  // Budget exhaustion is not proven overlap. A same-width literal code such
+  // as (aa|bb|...|qq)|zz stays accepted, including under i when ASCII
+  // case-folding still leaves every literal unique. A fold collision or a
+  // non-ASCII literal stays refused. Unproven overflow still refuses.
   if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
+    if (fixedWidthLiteralAlternativesAreDisjoint(left, right, ignoreCase)) {
+      return false;
+    }
     return true;
   }
   if (leftSequences && rightSequences) {
@@ -295,6 +301,12 @@ function alternativesMayOverlap(
           return true;
         }
         if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {
+          // Both omitted tails are more copies of the atom already compared.
+          // 34 versus 68 of the same atom overlaps. A later distinct suffix
+          // is not homogeneous and stays unproven on the shared compiler.
+          if (leftSeq.unknownTailHomogeneous === true && rightSeq.unknownTailHomogeneous === true) {
+            return true;
+          }
           unproven = true;
           continue;
         }

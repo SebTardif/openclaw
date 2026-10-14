@@ -377,6 +377,8 @@ describe("safe regex", () => {
     expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
     const longerUnit = `[a]${"a".repeat(33)}`;
     const longerOverlapping = `^(${longerUnit}|${longerUnit}${longerUnit})+$`;
+    expect(compileSafeRegexDetailed(longerOverlapping).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(longerOverlapping)).toBeNull();
     expect(compileSafeRegexForExec(longerOverlapping).regex).toBeNull();
     expect(compileSafeRegexDetailed("(a+)+$").reason).toBe("unsafe-nested-repetition");
   });
@@ -411,9 +413,22 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(seventeenWay).reason).toBeNull();
     expect(compileSafeRegexForExec(seventeenWay).regex).toBeInstanceOf(RegExp);
     const overflowingDisjoint = "^((aa|bb|cc|dd|ee|ff|gg|hh|ii|jj|kk|ll|mm|nn|oo|pp|qq)|zz)+$";
-    expect(compileSafeRegexDetailed(overflowingDisjoint).reason).toBe("unsafe-nested-repetition");
-    expect(compileSafeRegex(overflowingDisjoint)).toBeNull();
-    expect(compileSafeRegexForExec(overflowingDisjoint).regex).toBeNull();
+    expect(compileSafeRegexDetailed(overflowingDisjoint).reason).toBeNull();
+    expect(compileSafeRegex(overflowingDisjoint)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(overflowingDisjoint).regex).toBeInstanceOf(RegExp);
+    // Custom redaction compiles the same source with i. ASCII case-folding
+    // still leaves these literals unique, so the mask must keep the pattern.
+    expect(compileSafeRegexDetailed(overflowingDisjoint, "i").reason).toBeNull();
+    expect(compileSafeRegex(overflowingDisjoint, "i")).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(overflowingDisjoint, "i").regex).toBeInstanceOf(RegExp);
+    const caseCollision = "^((aa|AA|cc|dd|ee|ff|gg|hh|ii|jj|kk|ll|mm|nn|oo|pp|qq)|zz)+$";
+    expect(compileSafeRegexDetailed(caseCollision).reason).toBeNull();
+    expect(compileSafeRegexDetailed(caseCollision, "i").reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(caseCollision, "i")).toBeNull();
+    const overflowingCompiled = expectCompiledRegex(overflowingDisjoint);
+    expect(overflowingCompiled.test("aazz")).toBe(true);
+    expect(overflowingCompiled.test("qqzz")).toBe(true);
+    expect(overflowingCompiled.test("az")).toBe(false);
   });
 
   it("accepts truncated equal prefixes whose missing suffixes are disjoint", () => {
