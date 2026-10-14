@@ -74,7 +74,12 @@ run_update() {
   local started=$SECONDS
   local output="$ARTIFACT_DIR/$1" target="$2" update_status=0
   local channel_args=()
-  mapfile -t channel_args < <(update_channel_args)
+  local channel_arg
+  # macOS system Bash is 3.2, and this helper is in the sourced-library scan.
+  # mapfile is Bash 4, so read the optional channel argument one line at a time.
+  while IFS= read -r channel_arg; do
+    channel_args+=("$channel_arg")
+  done < <(update_channel_args)
   cp "$(package_root)/package.json" "$output-source-package.json"
   printf '%q ' env "PATH=$PATH" "npm_config_prefix=$npm_config_prefix" openclaw \
     update --yes "${channel_args[@]}" "--tag=$target" --json >"$output-command.txt"
