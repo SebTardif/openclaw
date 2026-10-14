@@ -29,6 +29,80 @@ var OpenClawExecArgPattern = (() => {
     isConservativeExecArgPatternRefusal: () => isConservativeExecArgPatternRefusal
   });
 
+  // packages/normalization-core/src/cjk-chars.ts
+  var WEIGHTED_CJK_RANGES = [
+    [
+      [183, 183],
+      [12288, 12703],
+      [19968, 40869],
+      [44032, 55215],
+      [65281, 65376]
+    ],
+    [
+      [4352, 4607],
+      [11904, 12287],
+      [12704, 19967],
+      [40870, 40959],
+      [40960, 42239],
+      [42752, 42759],
+      [43360, 43391],
+      [55216, 55295],
+      [63744, 64255]
+    ],
+    [
+      [711, 711],
+      [713, 715],
+      [729, 729],
+      [746, 747],
+      [773, 773],
+      [803, 803],
+      [65040, 65103],
+      [65377, 65500],
+      [65504, 65510]
+    ],
+    [[119648, 119665]],
+    [
+      [94176, 94207],
+      [110576, 110591],
+      [110592, 110959],
+      [127488, 127743],
+      [131072, 195103],
+      [196608, 210047]
+    ]
+  ];
+  var WEIGHTED_CJK_RE = new RegExp(
+    `[${WEIGHTED_CJK_RANGES.flatMap(
+      (ranges) => ranges.map(([start, end]) => `\\u{${start.toString(16)}}-\\u{${end.toString(16)}}`)
+    ).join("")}]`,
+    "u"
+  );
+  var CJK_CATEGORY = (() => {
+    const maxCodePoint = Math.max(
+      ...WEIGHTED_CJK_RANGES.flatMap((ranges) => ranges.map(([, end]) => end))
+    );
+    const categories = new Uint8Array(maxCodePoint + 1);
+    for (const [bucket, ranges] of WEIGHTED_CJK_RANGES.entries()) {
+      for (const [start, end] of ranges) {
+        categories.fill(bucket + 1, start, end + 1);
+      }
+    }
+    return categories;
+  })();
+
+  // packages/normalization-core/src/error-coercion.ts
+  var PROVIDER_AUTH_PERSISTENCE_ERROR_BRAND = /* @__PURE__ */ Symbol.for(
+    "openclaw.provider-auth-persistence-error"
+  );
+  var _a, _b;
+  var ProviderAuthPersistenceError = class extends (_b = AggregateError, _a = PROVIDER_AUTH_PERSISTENCE_ERROR_BRAND, _b) {
+    constructor(message, persistenceError, { cause }) {
+      super([persistenceError, cause], message, { cause });
+      this[_a] = true;
+      this.persistenceError = persistenceError;
+      this.cleanupError = cause;
+    }
+  };
+
   // packages/normalization-core/src/expect.ts
   function expectDefined(value, context) {
     if (value === null || value === void 0) {
@@ -51,16 +125,11 @@ var OpenClawExecArgPattern = (() => {
       map.clear();
       return;
     }
-    if (map.size <= limit) {
-      return;
-    }
-    const keys = map.keys();
-    while (map.size > limit) {
-      const oldest = keys.next();
-      if (oldest.done) {
+    for (const key of map.keys()) {
+      if (map.size <= limit) {
         break;
       }
-      map.delete(oldest.value);
+      map.delete(key);
     }
   }
 
@@ -108,6 +177,26 @@ var OpenClawExecArgPattern = (() => {
       seq.unknownTailHomogeneous === true
     );
   }
+  function singleCharLanguage(atom) {
+    if (atom.length === 1) {
+      return atom === "." || atom === "^" || atom === "$" ? null : atom;
+    }
+    if (!atom.startsWith("[") || !atom.endsWith("]") || atom.startsWith("[^") || atom.includes("-")) {
+      return null;
+    }
+    const inner = atom.slice(1, -1);
+    if (inner.length === 1) {
+      return inner === "^" || inner === "-" ? null : inner;
+    }
+    if (inner.length === 2 && inner.startsWith("\\") && !/[0-9A-Za-z]/.test(inner[1] ?? "")) {
+      return inner[1] ?? null;
+    }
+    return null;
+  }
+  function sameSingleCharAtom(left, right) {
+    const language = singleCharLanguage(left);
+    return language !== null && language === singleCharLanguage(right);
+  }
   function omittedTailIsHomogeneous(suffix, room) {
     const next = suffix.atoms[room];
     if (next === void 0) {
@@ -116,10 +205,10 @@ var OpenClawExecArgPattern = (() => {
     if (suffix.unknownTail === true) {
       return false;
     }
-    if (suffix.nextAtom !== void 0 && suffix.nextAtom !== next) {
+    if (suffix.nextAtom !== void 0 && !sameSingleCharAtom(suffix.nextAtom, next)) {
       return false;
     }
-    return suffix.atoms.slice(room + 1).every((atom) => atom === next);
+    return suffix.atoms.slice(room + 1).every((atom) => sameSingleCharAtom(atom, next));
   }
   function collapseEqualTailSequences(sequences) {
     if (sequences.length < 2) {
@@ -175,7 +264,7 @@ var OpenClawExecArgPattern = (() => {
     const kept = room > 0 ? [...prefix.atoms, ...suffix.atoms.slice(0, room)] : [...prefix.atoms];
     if (!prefix.complete) {
       const suffixAtom = suffix.atoms.length === 1 ? suffix.atoms[0] : void 0;
-      const sameAsNext = prefix.nextAtom !== void 0 && suffixAtom !== void 0 && suffixAtom === prefix.nextAtom;
+      const sameAsNext = prefix.nextAtom !== void 0 && suffixAtom !== void 0 && sameSingleCharAtom(suffixAtom, prefix.nextAtom);
       const homogeneous = sameAsNext && (prefix.unknownTailHomogeneous === true || prefix.unknownTail !== true);
       return withNextAtom(kept, false, prefix.nextAtom, true, homogeneous);
     }
@@ -188,6 +277,177 @@ var OpenClawExecArgPattern = (() => {
       unknownTail,
       unknownTail && fromSuffix && omittedTailIsHomogeneous(suffix, room)
     );
+  }
+  var PLAIN_LITERAL_META = /* @__PURE__ */ new Set([
+    ".",
+    "*",
+    "+",
+    "?",
+    "{",
+    "}",
+    "[",
+    "]",
+    "(",
+    ")",
+    "|",
+    "^",
+    "$",
+    "\\"
+  ]);
+  function splitTopLevelPlain(source) {
+    const parts = [];
+    let depth = 0;
+    let start = 0;
+    for (let index = 0; index < source.length; index += 1) {
+      const ch = source[index];
+      if (ch === "\\") {
+        index += 1;
+        if (index >= source.length) {
+          return null;
+        }
+        continue;
+      }
+      if (ch === "(") {
+        depth += 1;
+        continue;
+      }
+      if (ch === ")") {
+        depth -= 1;
+        if (depth < 0) {
+          return null;
+        }
+        continue;
+      }
+      if (ch === "|" && depth === 0) {
+        parts.push(source.slice(start, index));
+        start = index + 1;
+      }
+    }
+    if (depth !== 0) {
+      return null;
+    }
+    parts.push(source.slice(start));
+    return parts;
+  }
+  function unwrapOneGroup(source) {
+    if (!source.startsWith("(") || !source.endsWith(")")) {
+      return null;
+    }
+    let depth = 0;
+    for (let index = 0; index < source.length; index += 1) {
+      const ch = source[index];
+      if (ch === "\\") {
+        index += 1;
+        continue;
+      }
+      if (ch === "(") {
+        depth += 1;
+        continue;
+      }
+      if (ch === ")") {
+        depth -= 1;
+        if (depth === 0 && index !== source.length - 1) {
+          return null;
+        }
+      }
+    }
+    if (depth !== 0) {
+      return null;
+    }
+    let inner = source.slice(1, -1);
+    if (inner.startsWith("?:")) {
+      inner = inner.slice(2);
+    } else if (inner.startsWith("?")) {
+      return null;
+    }
+    return inner;
+  }
+  function readPlainLiteral(source) {
+    let literal = "";
+    for (let index = 0; index < source.length; index += 1) {
+      const ch = source[index];
+      if (ch === void 0) {
+        return null;
+      }
+      if (ch === "\\") {
+        const escaped = source[index + 1];
+        if (escaped === void 0 || /[0-9A-Za-z]/.test(escaped)) {
+          return null;
+        }
+        literal += escaped;
+        index += 1;
+        continue;
+      }
+      if (PLAIN_LITERAL_META.has(ch)) {
+        return null;
+      }
+      literal += ch;
+    }
+    return literal.length > 0 ? literal : null;
+  }
+  function collectPlainLiterals(source, depth) {
+    if (depth > 3) {
+      return null;
+    }
+    const parts = splitTopLevelPlain(source);
+    if (!parts || parts.length === 0 || parts.some((part) => part.length === 0)) {
+      return null;
+    }
+    if (parts.length === 1) {
+      const only = parts[0];
+      if (only === void 0) {
+        return null;
+      }
+      const unwrapped = unwrapOneGroup(only);
+      if (unwrapped !== null) {
+        return collectPlainLiterals(unwrapped, depth + 1);
+      }
+      const literal = readPlainLiteral(only);
+      return literal === null ? null : [literal];
+    }
+    const literals = [];
+    for (const part of parts) {
+      const nested = collectPlainLiterals(part, depth + 1);
+      if (!nested) {
+        return null;
+      }
+      literals.push(...nested);
+    }
+    return literals;
+  }
+  function foldPlainLiteral(literal, ignoreCase) {
+    if (!ignoreCase) {
+      return literal;
+    }
+    for (let index = 0; index < literal.length; index += 1) {
+      if (literal.charCodeAt(index) > 127) {
+        return null;
+      }
+    }
+    return literal.toLowerCase();
+  }
+  function fixedWidthLiteralAlternativesAreDisjoint(left, right, ignoreCase = false) {
+    const leftLiterals = collectPlainLiterals(left, 0);
+    const rightLiterals = collectPlainLiterals(right, 0);
+    if (!leftLiterals || !rightLiterals) {
+      return false;
+    }
+    const folded = [];
+    for (const literal of [...leftLiterals, ...rightLiterals]) {
+      const next = foldPlainLiteral(literal, ignoreCase);
+      if (next === null) {
+        return false;
+      }
+      folded.push(next);
+    }
+    if (folded.length === 0 || folded.length > 64) {
+      return false;
+    }
+    const width = folded[0]?.length ?? 0;
+    if (width === 0 || folded.some((literal) => literal.length !== width)) {
+      return false;
+    }
+    return new Set(folded).size === folded.length;
   }
   function cartesianConcatSequences(left, right) {
     if (left.length === 0) {
@@ -1254,6 +1514,9 @@ var OpenClawExecArgPattern = (() => {
     const leftSequences = readAlternativeAtomSequences(left, unicodeMode, captureCount);
     const rightSequences = readAlternativeAtomSequences(right, unicodeMode, captureCount);
     if (leftSequences === ATOM_SEQUENCE_OVERFLOW || rightSequences === ATOM_SEQUENCE_OVERFLOW) {
+      if (fixedWidthLiteralAlternativesAreDisjoint(left, right, ignoreCase)) {
+        return false;
+      }
       return true;
     }
     if (leftSequences && rightSequences) {
@@ -1280,6 +1543,9 @@ var OpenClawExecArgPattern = (() => {
             return true;
           }
           if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {
+            if (leftSeq.unknownTailHomogeneous === true && rightSeq.unknownTailHomogeneous === true) {
+              return true;
+            }
             unproven = true;
             continue;
           }

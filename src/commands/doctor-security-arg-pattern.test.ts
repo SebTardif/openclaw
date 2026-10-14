@@ -16,6 +16,7 @@ import { withTestDir } from "../test-helpers/temp-dir.js";
 
 const note = vi.hoisted(() => vi.fn());
 
+// mock-isolation: Doctor argPattern repair asserts persisted approvals, not the terminal note renderer.
 vi.mock("../../packages/terminal-core/src/note.js", () => ({
   note,
 }));

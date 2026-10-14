@@ -537,9 +537,11 @@ describe("safe regex", () => {
     expect(compileSafeRegexDetailed(overlapping).reason).toBe("unsafe-nested-repetition");
     expect(compileSafeRegex(overlapping)).toBeNull();
     expect(compileSafeRegexForExec(overlapping).regex).toBeNull();
-    expect(tokenizePattern(String.raw`\141`).map((token) => token.source)).toEqual([
-      String.raw`\141`,
-    ]);
+    expect(
+      tokenizePattern(String.raw`\141`)
+        .filter((token) => token.kind === "simple-token")
+        .map((token) => token.source),
+    ).toEqual([String.raw`\141`]);
   });
 
   it("rejects numeric backrefs that the two-digit octal rule would decode as space", () => {
