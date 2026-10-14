@@ -362,6 +362,27 @@ var OpenClawExecArgPattern = (() => {
     }
     return inner;
   }
+  function readSingleCharClass(source, start) {
+    if (source[start] !== "[") {
+      return null;
+    }
+    let end = -1;
+    for (let cursor = start + 1; cursor < source.length; cursor += 1) {
+      if (source[cursor] === "\\") {
+        cursor += 1;
+        continue;
+      }
+      if (source[cursor] === "]") {
+        end = cursor;
+        break;
+      }
+    }
+    if (end < 0) {
+      return null;
+    }
+    const char = singleCharLanguage(source.slice(start, end + 1));
+    return char === null ? null : { char, end: end + 1 };
+  }
   function readPlainLiteral(source) {
     let literal = "";
     for (let index = 0; index < source.length; index += 1) {
@@ -378,12 +399,24 @@ var OpenClawExecArgPattern = (() => {
         index += 1;
         continue;
       }
+      if (ch === "[") {
+        const single = readSingleCharClass(source, index);
+        if (single === null) {
+          return null;
+        }
+        literal += single.char;
+        index = single.end - 1;
+        continue;
+      }
       if (PLAIN_LITERAL_META.has(ch)) {
         return null;
       }
       literal += ch;
     }
     return literal.length > 0 ? literal : null;
+  }
+  function alternativeSourcesHavePrefixOverlap(left, right) {
+    return left.length > 0 && right.length > left.length && right.startsWith(left) || right.length > 0 && left.length > right.length && left.startsWith(right);
   }
   function collectPlainLiterals(source, depth) {
     if (depth > 3) {
@@ -1540,6 +1573,9 @@ var OpenClawExecArgPattern = (() => {
             continue;
           }
           if (sequenceOverlapIsProven(leftSeq, rightSeq)) {
+            return true;
+          }
+          if (alternativeSourcesHavePrefixOverlap(left, right)) {
             return true;
           }
           if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {

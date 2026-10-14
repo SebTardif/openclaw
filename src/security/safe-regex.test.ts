@@ -429,6 +429,21 @@ describe("safe regex", () => {
     expect(overflowingCompiled.test("aazz")).toBe(true);
     expect(overflowingCompiled.test("qqzz")).toBe(true);
     expect(overflowingCompiled.test("az")).toBe(false);
+    const classOverflow =
+      "^(([a]a|[b]b|[c]c|[d]d|[e]e|[f]f|[g]g|[h]h|[i]i|[j]j|[k]k|[l]l|[m]m|[n]n|[o]o|[p]p|[q]q)|[z]z)+$";
+    expect(compileSafeRegexDetailed(classOverflow).reason).toBeNull();
+    expect(compileSafeRegex(classOverflow)).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexForExec(classOverflow).regex).toBeInstanceOf(RegExp);
+    expect(compileSafeRegexDetailed(classOverflow, "i").reason).toBeNull();
+    expect(compileSafeRegex(classOverflow, "i")).toBeInstanceOf(RegExp);
+    const classCompiled = expectCompiledRegex(classOverflow);
+    expect(classCompiled.test("aazz")).toBe(true);
+    expect(classCompiled.test("az")).toBe(false);
+    const classCollision =
+      "^(([a]a|[A]A|[c]c|[d]d|[e]e|[f]f|[g]g|[h]h|[i]i|[j]j|[k]k|[l]l|[m]m|[n]n|[o]o|[p]p|[q]q)|[z]z)+$";
+    expect(compileSafeRegexDetailed(classCollision).reason).toBeNull();
+    expect(compileSafeRegexDetailed(classCollision, "i").reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(classCollision, "i")).toBeNull();
   });
 
   it("accepts truncated equal prefixes whose missing suffixes are disjoint", () => {
@@ -452,6 +467,8 @@ describe("safe regex", () => {
     );
     const mixedTailUnit = `[a]${"ba".repeat(17)}`;
     const mixedTailOverlapping = `^(${mixedTailUnit}|${mixedTailUnit}${mixedTailUnit})+$`;
+    expect(compileSafeRegexDetailed(mixedTailOverlapping).reason).toBe("unsafe-nested-repetition");
+    expect(compileSafeRegex(mixedTailOverlapping)).toBeNull();
     expect(compileSafeRegexForExec(mixedTailOverlapping).regex).toBeNull();
   });
 

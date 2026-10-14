@@ -67,7 +67,7 @@ function cloneAtomSequence(seq: AtomSequence): AtomSequence {
   );
 }
 
-/** `[a]` and `a` are one character. A range, dot, or class is not. */
+/** `[a]` and `a` are one character. A range, negated class, or multi-character class is not. */
 function singleCharLanguage(atom: string): string | null {
   if (atom.length === 1) {
     return atom === "." || atom === "^" || atom === "$" ? null : atom;
@@ -280,6 +280,28 @@ function unwrapOneGroup(source: string): string | null {
   return inner;
 }
 
+function readSingleCharClass(source: string, start: number): { char: string; end: number } | null {
+  if (source[start] !== "[") {
+    return null;
+  }
+  let end = -1;
+  for (let cursor = start + 1; cursor < source.length; cursor += 1) {
+    if (source[cursor] === "\\") {
+      cursor += 1;
+      continue;
+    }
+    if (source[cursor] === "]") {
+      end = cursor;
+      break;
+    }
+  }
+  if (end < 0) {
+    return null;
+  }
+  const char = singleCharLanguage(source.slice(start, end + 1));
+  return char === null ? null : { char, end: end + 1 };
+}
+
 function readPlainLiteral(source: string): string | null {
   let literal = "";
   for (let index = 0; index < source.length; index += 1) {
@@ -296,12 +318,33 @@ function readPlainLiteral(source: string): string | null {
       index += 1;
       continue;
     }
+    if (ch === "[") {
+      const single = readSingleCharClass(source, index);
+      if (single === null) {
+        return null;
+      }
+      literal += single.char;
+      index = single.end - 1;
+      continue;
+    }
     if (PLAIN_LITERAL_META.has(ch)) {
       return null;
     }
     literal += ch;
   }
   return literal.length > 0 ? literal : null;
+}
+
+/**
+ * True when one alternative is the other plus a non-empty continuation.
+ * Atom truncation hides the second copy of `[a]ba...|[a]ba...[a]ba...`, but the
+ * source text still shows that one language is a prefix of the other.
+ */
+export function alternativeSourcesHavePrefixOverlap(left: string, right: string): boolean {
+  return (
+    (left.length > 0 && right.length > left.length && right.startsWith(left)) ||
+    (right.length > 0 && left.length > right.length && left.startsWith(right))
+  );
 }
 
 function collectPlainLiterals(source: string, depth: number): string[] | null {

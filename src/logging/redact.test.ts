@@ -145,6 +145,25 @@ describe("custom adjacent-class redaction", () => {
     expect(output).not.toContain(value);
   });
 
+  it("still masks disjoint single-character classes after expansion limit", () => {
+    const output = redactSensitiveText("id=corp-aazz", {
+      patterns: [
+        "corp-(([a]a|[b]b|[c]c|[d]d|[e]e|[f]f|[g]g|[h]h|[i]i|[j]j|[k]k|[l]l|[m]m|[n]n|[o]o|[p]p|[q]q)|[z]z)+",
+      ],
+    });
+    expect(output).not.toContain("corp-aazz");
+    expect(output).not.toContain("aazz");
+  });
+
+  it("drops overlapping truncated tails instead of matching them", () => {
+    const unit = `[a]${"ba".repeat(17)}`;
+    const value = `corp-${("a" + "ba".repeat(17)).repeat(2)}`;
+    const output = redactSensitiveText(`id=${value}`, {
+      patterns: [`corp-(${unit}|${unit}${unit})+`],
+    });
+    expect(output).toContain(value);
+  });
+
   it("still masks 17-way disjoint alternatives after expansion limit", () => {
     const output = redactSensitiveText("id=corp-axzx", {
       patterns: ["corp-((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+"],

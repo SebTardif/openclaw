@@ -314,6 +314,16 @@ describe("doctor security exec argPattern repair", () => {
       pattern: "/bin/seventeen-way",
       argPattern: "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|zx)+$",
     };
+    const classOverflow = {
+      pattern: "/bin/class-overflow",
+      argPattern:
+        "^(([a]a|[b]b|[c]c|[d]d|[e]e|[f]f|[g]g|[h]h|[i]i|[j]j|[k]k|[l]l|[m]m|[n]n|[o]o|[p]p|[q]q)|[z]z)+$",
+    };
+    const mixedTailUnit = `[a]${"ba".repeat(17)}`;
+    const mixedTail = {
+      pattern: "/bin/mixed-tail",
+      argPattern: `^(${mixedTailUnit}|${mixedTailUnit}${mixedTailUnit})+$`,
+    };
     const overflowPrefix = {
       pattern: "/bin/overflow-prefix",
       argPattern: "^((a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q)x|axax)+$",
@@ -347,6 +357,8 @@ describe("doctor security exec argPattern repair", () => {
             eAcuteOverlap,
             truncatedOverlap,
             seventeenWay,
+            classOverflow,
+            mixedTail,
             overflowPrefix,
             twoCharOverflowPrefix,
             truncatedDisjoint,
@@ -370,7 +382,7 @@ describe("doctor security exec argPattern repair", () => {
         cfg: {} as OpenClawConfig,
       };
       const findings = await check!.detect(context);
-      expect(findings).toHaveLength(8);
+      expect(findings).toHaveLength(9);
       expect(findings.some((finding) => finding.message.includes("/bin/unsafe"))).toBe(true);
       expect(findings.some((finding) => finding.message.includes("/bin/property-identity"))).toBe(
         true,
@@ -394,6 +406,10 @@ describe("doctor security exec argPattern repair", () => {
       expect(findings.some((finding) => finding.message.includes("/bin/seventeen-way"))).toBe(
         false,
       );
+      expect(findings.some((finding) => finding.message.includes("/bin/class-overflow"))).toBe(
+        false,
+      );
+      expect(findings.some((finding) => finding.message.includes("/bin/mixed-tail"))).toBe(true);
       // Quoted so this does not also match /bin/truncated-disjoint-32.
       expect(
         findings.some((finding) => finding.message.includes('"/bin/truncated-disjoint"')),
@@ -408,7 +424,7 @@ describe("doctor security exec argPattern repair", () => {
 
       const repaired = await check!.repair?.(context, findings);
       expect(repaired?.changes).toEqual([
-        expect.stringContaining("Removed 7 rejected exec approval entries"),
+        expect.stringContaining("Removed 8 rejected exec approval entries"),
       ]);
       expect(repaired?.changes?.[0]).toContain("Kept 1 conservatively refused rule");
 
@@ -416,6 +432,7 @@ describe("doctor security exec argPattern repair", () => {
       expect(remaining.map(({ pattern, argPattern }) => ({ pattern, argPattern }))).toEqual([
         longDisjoint,
         seventeenWay,
+        classOverflow,
         truncatedDisjoint,
         longerTruncatedDisjoint,
         { pattern: "/bin/safe", argPattern: "^safe$" },

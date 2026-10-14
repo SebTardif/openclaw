@@ -9,7 +9,10 @@ import {
   shouldRejectAdjacentOverlap,
   singleTokenAlternativesMayOverlap,
 } from "./safe-regex-adjacent.js";
-import { fixedWidthLiteralAlternativesAreDisjoint } from "./safe-regex-sequences.js";
+import {
+  alternativeSourcesHavePrefixOverlap,
+  fixedWidthLiteralAlternativesAreDisjoint,
+} from "./safe-regex-sequences.js";
 import {
   ATOM_SEQUENCE_OVERFLOW,
   countCapturingGroups,
@@ -298,6 +301,9 @@ function alternativesMayOverlap(
           continue;
         }
         if (sequenceOverlapIsProven(leftSeq, rightSeq)) {
+          return true;
+        }
+        if (alternativeSourcesHavePrefixOverlap(left, right)) {
           return true;
         }
         if (leftSeq.unknownTail === true && rightSeq.unknownTail === true) {
