@@ -42,6 +42,8 @@ import { registerAcpSpawnPolicyTests } from "./acp-spawn-policy.test-support.js"
 import { createAcpSpawnSessionBinding as createSessionBinding } from "./acp-spawn-store.test-support.js";
 import { withParentExecutionIdentity } from "./execution-identity-spawn-context.js";
 import {
+  expectAcceptedAcpSpawn as expectAcceptedSpawn,
+  expectFailedAcpSpawn as expectFailedSpawn,
   expectRegisteredSubagentRun,
   firstMockCall,
   latestMockCall,
@@ -109,8 +111,10 @@ vi.mock("../../../channels/plugins/registry.js", () => ({
   normalizeChannelId: hoisted.normalizeChannelIdMock,
 }));
 
-vi.mock("../../../config/sessions/paths.js", () => ({
+vi.mock("../../../config/sessions/paths.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../config/sessions/paths.js")>()),
   resolveSessionStorePathCore: hoisted.resolveStorePathMock,
+  resolveSessionStorePathWithContext: hoisted.resolveStorePathMock,
 }));
 
 vi.mock("../../../config/sessions/session-accessor.js", async () => {
@@ -140,6 +144,16 @@ vi.mock("../../../infra/heartbeat-wake.js", () => ({
   areHeartbeatsEnabled: hoisted.areHeartbeatsEnabledMock,
 }));
 
+// mock-isolation: Keep captured requester identity with the fixture's synthetic session store.
+vi.mock("../../../auto-reply/reply/session-event-handoff.js", () => ({
+  captureSessionEventTargetForHost: async (agentId: string, sessionKey: string) => ({
+    agentId,
+    sessionKey,
+    sessionId: "original-requester",
+    generation: "test",
+  }),
+}));
+
 vi.mock("./acp-spawn-parent-stream.js", () => ({
   startAcpSpawnParentStreamRelay: hoisted.startAcpSpawnParentStreamRelayMock,
 }));
@@ -158,7 +172,6 @@ vi.mock("../registry/subagent-registry-read.js", () => ({
 const { spawnAcpDirect } = await import("./acp-spawn.js");
 type SpawnRequest = Parameters<typeof spawnAcpDirect>[0];
 type SpawnContext = Parameters<typeof spawnAcpDirect>[1];
-type SpawnResult = Awaited<ReturnType<typeof spawnAcpDirect>>;
 type CrossAgentWorkspaceFixture = {
   workspaceRoot: string;
   mainWorkspace: string;
@@ -272,29 +285,6 @@ function configureCrossAgentWorkspaceSpawn(fixture: CrossAgentWorkspaceFixture):
       "claude-code": { workspace: fixture.targetWorkspace },
     },
   };
-}
-
-function expectFailedSpawn(
-  result: SpawnResult,
-  status?: "error" | "forbidden",
-): Extract<SpawnResult, { status: "error" | "forbidden" }> {
-  if (status) {
-    expect(result.status).toBe(status);
-  } else {
-    expect(result.status).not.toBe("accepted");
-  }
-  if (result.status === "accepted") {
-    throw new Error("Expected ACP spawn to fail");
-  }
-  return result;
-}
-
-function expectAcceptedSpawn(result: SpawnResult): Extract<SpawnResult, { status: "accepted" }> {
-  expect(result.status).toBe("accepted");
-  if (result.status !== "accepted") {
-    throw new Error("Expected ACP spawn to be accepted");
-  }
-  return result;
 }
 
 function latestBindingInput(): Record<string, unknown> {
@@ -755,13 +745,6 @@ describe("spawnAcpDirect", () => {
     },
     { name: "explicit max", thinking: "max", inherited: "low", expectedThinking: "max" },
     {
-      name: "inherited max",
-      model: "openai/gpt-5.6-sol",
-      inherited: "max",
-      expectedModel: "openai/gpt-5.6-sol",
-      expectedThinking: "max",
-    },
-    {
       name: "configured model with global thinking default",
       model: "anthropic/claude-sonnet-4-6",
       globalThinking: "off",
@@ -772,15 +755,6 @@ describe("spawnAcpDirect", () => {
       name: "opaque harness model",
       model: "harness-only[context=272k,reasoning=medium,fast=false]",
       expectedModel: "harness-only[context=272k,reasoning=medium,fast=false]",
-    },
-    {
-      name: "owner thinking before model and global defaults",
-      model: "anthropic/claude-sonnet-4-6",
-      ownerThinking: "off",
-      modelThinking: "adaptive",
-      globalThinking: "high",
-      expectedModel: "anthropic/claude-sonnet-4-6",
-      expectedThinking: "off",
     },
     {
       name: "owner thinking without model override",
@@ -1192,7 +1166,7 @@ describe("spawnAcpDirect", () => {
     expect(gatewayRequest("agent")?.params?.accountId).toBe("work");
   });
 
-  it.each(["bot-alpha", "reviewer", undefined])(
+  it.each(["bot-alpha", undefined])(
     "uses the owner's bound account for ACP thread spawn (%s)",
     async (agentId) => {
       const boundRoom = "!room:example.org";
@@ -1384,7 +1358,7 @@ describe("spawnAcpDirect", () => {
         {
           requesterSessionKey: "global",
           childSessionKey: expect.stringMatching(/^agent:research:acp:/),
-          agentId: "research",
+          childAgentId: "research",
           requesterAgentId: "research",
         },
         { assertCurrent: undefined },

@@ -6,6 +6,7 @@ import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-i
 import { pruneMapToMaxSize } from "openclaw/plugin-sdk/collection-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { captureEffectAuthority } from "openclaw/plugin-sdk/fetch-runtime";
+import { redactToolPayloadText } from "openclaw/plugin-sdk/logging-core";
 import { requireRuntimeConfig } from "openclaw/plugin-sdk/plugin-config-runtime";
 import {
   readProviderJsonResponse,
@@ -55,19 +56,10 @@ const LINE_LOCATION_LABEL_LIMIT = 100;
 // delivery, while rejected responses keep their status with prefix-only diagnostics.
 const LINE_PROVIDER_RESPONSE_MAX_BYTES = 16 * 1024;
 
-// Refresh insertion order so overflow evicts expired entries first, then the oldest live fetch.
+// Completion order also orders expiry; evict the oldest fetch on overflow.
 function rememberLineIdentity<T>(cache: LineIdentityCache<T>, key: string, value: T): void {
-  const entry = { value, fetchedAt: Date.now() };
   cache.values.delete(key);
-  cache.values.set(key, entry);
-  if (cache.values.size <= PROFILE_CACHE_MAX_ENTRIES) {
-    return;
-  }
-  for (const [cachedKey, cached] of cache.values) {
-    if (entry.fetchedAt - cached.fetchedAt >= PROFILE_CACHE_TTL_MS) {
-      cache.values.delete(cachedKey);
-    }
-  }
+  cache.values.set(key, { value, fetchedAt: Date.now() });
   pruneMapToMaxSize(cache.values, PROFILE_CACHE_MAX_ENTRIES);
 }
 
@@ -280,11 +272,14 @@ async function postLineProviderMessages(
     const body = await readResponseTextLimited(response, LINE_PROVIDER_RESPONSE_MAX_BYTES).catch(
       () => "",
     );
+    // A proxy or LINE-compatible endpoint can reflect the request's Authorization
+    // token in the error body; mask it before the error reaches logs or diagnostics.
+    const redactedBody = redactToolPayloadText(body);
     throw new HTTPFetchError(`${response.status} - ${response.statusText}`, {
       status: response.status,
       statusText: response.statusText,
       headers: response.headers,
-      body,
+      body: redactedBody,
     });
   }
 

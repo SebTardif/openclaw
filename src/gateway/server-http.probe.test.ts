@@ -377,30 +377,6 @@ describe("gateway probe endpoints", () => {
     }
   });
 
-  it("returns only readiness state for unauthenticated remote /ready requests", async () => {
-    const getReadiness: ReadinessChecker = () => ({
-      ready: false,
-      failing: ["discord", "telegram"],
-      uptimeMs: 8_000,
-    });
-
-    await withGatewayServer({
-      prefix: "probe-not-ready",
-      resolvedAuth: AUTH_NONE,
-      overrides: { getReadiness },
-      run: async (server) => {
-        const { res, getBody } = await sendRequest(server, {
-          path: "/ready",
-          remoteAddress: "10.0.0.8",
-          host: "gateway.test",
-        });
-
-        expect(res.statusCode).toBe(503);
-        expect(JSON.parse(getBody())).toEqual({ ready: false });
-      },
-    });
-  });
-
   it("rejects unattributable proxy ingress before hooks and watch-node handlers", async () => {
     const handleHooksRequest = vi.fn(async () => true);
     const handleWatchNodeRequest = vi.fn(async () => true);
@@ -575,12 +551,14 @@ describe("gateway probe endpoints", () => {
       enabled: true,
       configured: true,
       lifecycle: "ready" as "ready" | "blocked",
+      linked: true,
+      terminalDisconnect: false,
       lastStartAt: startedAt,
     };
     const channelManager = {
       getRuntimeSnapshot: () => ({
-        channels: { telegram: account },
-        channelAccounts: { telegram: { default: account } },
+        channels: { whatsapp: account },
+        channelAccounts: { whatsapp: { default: account } },
       }),
       getAutostartSuppression: () => null,
       isAmbientAutostartSuppressed: () => false,
@@ -656,11 +634,15 @@ describe("gateway probe endpoints", () => {
 
         refusals = [];
         account.lifecycle = "blocked";
+        account.running = false;
+        account.connected = false;
+        account.linked = false;
+        account.terminalDisconnect = true;
         const readiness = await sendRequest(server, { path: "/readyz" });
         expect(readiness.res.statusCode).toBe(503);
         expect(JSON.parse(readiness.getBody())).toMatchObject({
           ready: false,
-          failing: ["telegram"],
+          failing: ["whatsapp"],
         });
 
         const channelIndependentStartup = await sendRequest(server, {

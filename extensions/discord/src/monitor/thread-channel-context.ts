@@ -8,7 +8,7 @@ import {
 } from "./channel-access.js";
 import { buildDiscordChannelInfo, resolveDiscordChannelInfo } from "./message-channel-info.js";
 import type { DiscordChannelInfo, DiscordChannelInfoClient } from "./message-channel-info.js";
-import { resolveDiscordThreadParentInfo } from "./threading.js";
+import { resolveDiscordThreadParentInfo } from "./threading.starter.js";
 
 export async function resolveDiscordThreadLikeChannelContext(params: {
   client: DiscordChannelInfoClient;
@@ -40,7 +40,6 @@ export async function resolveDiscordThreadLikeChannelContext(params: {
         id: channelId,
         name: channelName,
         parentId,
-        parent: undefined,
       },
       channelInfo,
     });

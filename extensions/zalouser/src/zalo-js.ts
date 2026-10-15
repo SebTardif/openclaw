@@ -5,10 +5,8 @@ import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
 import {
   asDateTimestampMs,
   asFiniteNumberInRange,
-  isFutureDateTimestampMs,
   parseStrictFiniteNumber,
   parseStrictNonNegativeInteger,
-  resolveExpiresAtMsFromDurationMs,
   resolveTimerTimeoutMs,
 } from "openclaw/plugin-sdk/number-runtime";
 import { withTimeout } from "openclaw/plugin-sdk/security-runtime";
@@ -509,7 +507,7 @@ function readCachedGroupContext(profile: string, groupId: string): ZaloGroupCont
   if (!cached) {
     return null;
   }
-  if (!isFutureDateTimestampMs(cached.expiresAt)) {
+  if (cached.expiresAt <= Date.now()) {
     groupContextCache.delete(key);
     return null;
   }
@@ -521,7 +519,7 @@ function readCachedGroupContext(profile: string, groupId: string): ZaloGroupCont
 
 function trimGroupContextCache(now: number): void {
   for (const [key, value] of groupContextCache) {
-    if (isFutureDateTimestampMs(value.expiresAt, { nowMs: now })) {
+    if (value.expiresAt > now) {
       continue;
     }
     groupContextCache.delete(key);
@@ -535,13 +533,9 @@ function writeCachedGroupContext(profile: string, context: ZaloGroupContext): vo
   if (groupContextCache.has(key)) {
     groupContextCache.delete(key);
   }
-  const expiresAt = resolveExpiresAtMsFromDurationMs(GROUP_CONTEXT_CACHE_TTL_MS, { nowMs: now });
-  if (expiresAt === undefined) {
-    return;
-  }
   groupContextCache.set(key, {
     value: context,
-    expiresAt,
+    expiresAt: now + GROUP_CONTEXT_CACHE_TTL_MS,
   });
   trimGroupContextCache(now);
 }
@@ -1388,6 +1382,27 @@ export async function startZaloListener(params: {
   return { stop: cleanup };
 }
 
+function resolveZaloEntries<T>(
+  entries: string[],
+  byName: Map<string, T[]>,
+  resolveMatch: (match: T, matches: T[]) => { id: string; note?: string },
+) {
+  return entries.map((input) => {
+    const trimmed = input.trim();
+    if (!trimmed) {
+      return { input, resolved: false };
+    }
+    if (/^\d+$/.test(trimmed)) {
+      return { input, resolved: true, id: trimmed };
+    }
+    const matches = byName.get(normalizeLowercaseStringOrEmpty(trimmed)) ?? [];
+    const match = matches[0];
+    return match
+      ? { input, resolved: true, ...resolveMatch(match, matches) }
+      : { input, resolved: false };
+  });
+}
+
 export async function resolveZaloGroupsByEntries(params: {
   profile?: string | null;
   entries: string[];
@@ -1398,18 +1413,7 @@ export async function resolveZaloGroupsByEntries(params: {
   });
   const byName = buildZaloNameIndex(groups, (group) => group.name);
 
-  return params.entries.map((input) => {
-    const trimmed = input.trim();
-    if (!trimmed) {
-      return { input, resolved: false };
-    }
-    if (/^\d+$/.test(trimmed)) {
-      return { input, resolved: true, id: trimmed };
-    }
-    const candidates = byName.get(normalizeLowercaseStringOrEmpty(trimmed)) ?? [];
-    const match = candidates[0];
-    return match ? { input, resolved: true, id: match.groupId } : { input, resolved: false };
-  });
+  return resolveZaloEntries(params.entries, byName, (match) => ({ id: match.groupId }));
 }
 
 export async function resolveZaloAllowFromEntries(params: {
@@ -1422,25 +1426,9 @@ export async function resolveZaloAllowFromEntries(params: {
   });
   const byName = buildZaloNameIndex(friends, (friend) => friend.displayName);
 
-  return params.entries.map((input) => {
-    const trimmed = input.trim();
-    if (!trimmed) {
-      return { input, resolved: false };
-    }
-    if (/^\d+$/.test(trimmed)) {
-      return { input, resolved: true, id: trimmed };
-    }
-    const matches = byName.get(normalizeLowercaseStringOrEmpty(trimmed)) ?? [];
-    const match = matches[0];
-    if (!match) {
-      return { input, resolved: false };
-    }
-    return {
-      input,
-      resolved: true,
-      id: match.userId,
-      note: matches.length > 1 ? "multiple matches; chose first" : undefined,
-    };
-  });
+  return resolveZaloEntries(params.entries, byName, (match, matches) => ({
+    id: match.userId,
+    note: matches.length > 1 ? "multiple matches; chose first" : undefined,
+  }));
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

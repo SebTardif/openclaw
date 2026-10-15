@@ -378,7 +378,6 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private intentionallyClosed = false;
   // Native reconnect keeps the already accepted FIFO prefix stable.
   private readonly pendingAudio = createRealtimeVoiceAudioQueue("reject-newest");
-  private sessionReadyFired = false;
   private consecutiveSilenceMs = 0;
   private audioStreamEnded = false;
   private responseInterrupted = false;
@@ -443,7 +442,6 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.closeNotified = false;
     this.setupCompleteReceived = false;
     this.sessionConfigured = false;
-    this.sessionReadyFired = false;
     this.consecutiveSilenceMs = 0;
     this.audioStreamEnded = false;
     const resumesExistingSession =
@@ -727,6 +725,14 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
     const hadConnection = Boolean(
       this.connectionOwner || this.connectAttempt || this.session || this.reconnectTimer,
     );
+    const session = this.detachSession({ clearInputAudio: true });
+    session?.close();
+    if (hadConnection) {
+      this.notifyClose("completed");
+    }
+  }
+
+  private detachSession({ clearInputAudio }: { clearInputAudio: boolean }): Session | null {
     this.intentionallyClosed = true;
     this.connected = false;
     this.setupCompleteReceived = false;
@@ -735,9 +741,11 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
-    this.pendingAudio.clear();
-    this.consecutiveSilenceMs = 0;
-    this.audioStreamEnded = false;
+    if (clearInputAudio) {
+      this.pendingAudio.clear();
+      this.consecutiveSilenceMs = 0;
+      this.audioStreamEnded = false;
+    }
     this.resetToolCallOwnership();
     this.flushPendingTranscripts();
     const owner = this.connectionOwner;
@@ -745,10 +753,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.cancelConnectAttempt(owner);
     const session = this.session;
     this.session = null;
-    session?.close();
-    if (hadConnection) {
-      this.notifyClose("completed");
-    }
+    return session;
   }
 
   isConnected(): boolean {
@@ -840,10 +845,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
     for (const chunk of this.pendingAudio.drain()) {
       this.sendAudio(chunk);
     }
-    if (!this.sessionReadyFired) {
-      this.sessionReadyFired = true;
-      this.config.onReady?.();
-    }
+    this.config.onReady?.();
   }
 
   private handleServerContent(content: LiveServerContent): void {
@@ -967,21 +969,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
       return;
     }
     this.terminalError = error;
-    this.intentionallyClosed = true;
-    this.connected = false;
-    this.setupCompleteReceived = false;
-    this.sessionConfigured = false;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = undefined;
-    }
-    this.resetToolCallOwnership();
-    this.flushPendingTranscripts();
-    const owner = this.connectionOwner;
-    this.connectionOwner = undefined;
-    this.cancelConnectAttempt(owner);
-    const session = this.session;
-    this.session = null;
+    const session = this.detachSession({ clearInputAudio: false });
     try {
       this.config.onError?.(error);
     } finally {
@@ -1274,6 +1262,12 @@ async function createGoogleRealtimeBrowserSession(
 }
 
 export function buildGoogleRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin {
+  const resolveConfig: NonNullable<RealtimeVoiceProviderPlugin["resolveConfig"]> = ({
+    cfg,
+    rawConfig,
+  }) => normalizeProviderConfig(rawConfig, cfg);
+  const isConfigured: RealtimeVoiceProviderPlugin["isConfigured"] = ({ providerConfig }) =>
+    Boolean(normalizeProviderConfig(providerConfig).apiKey || resolveGoogleEnvApiKey());
   return {
     ...GOOGLE_REALTIME_VOICE_METADATA,
     capabilities: {
@@ -1293,9 +1287,11 @@ export function buildGoogleRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin 
       supportsVideoFrames: true,
       supportsSessionResumption: true,
     },
-    resolveConfig: ({ cfg, rawConfig }) => normalizeProviderConfig(rawConfig, cfg),
-    isConfigured: ({ providerConfig }) =>
-      Boolean(normalizeProviderConfig(providerConfig).apiKey || resolveGoogleEnvApiKey()),
+    // Retained for public synchronous SDK calls through 2026-12-31.
+    resolveConfig,
+    isConfigured,
+    resolveConfigAsync: async (context) => resolveConfig(context),
+    isConfiguredAsync: async (context) => isConfigured(context),
     createBridge: (req) => {
       const config = normalizeProviderConfig(req.providerConfig);
       const apiKey = config.apiKey || resolveGoogleEnvApiKey();

@@ -352,6 +352,29 @@ describe("command queue", () => {
     ).toBe(false);
   });
 
+  it.each([0, 3])("counts matching targets with lane concurrency %s", async (concurrency) => {
+    const lane = CommandLane.CronNested;
+    const finish = createDeferred();
+    setCommandLaneConcurrency(lane, concurrency);
+    const tasks = ["alpha", "beta", undefined].map((agentId) =>
+      enqueueCommandInLane(lane, () => finish.promise, {
+        sessionTarget: agentId ? { agentId, sessionId: agentId } : undefined,
+      }),
+    );
+    try {
+      expect(getQueueSize(lane)).toBe(3);
+      expect(getQueueSize(lane, (target) => target?.agentId === "alpha")).toBe(1);
+      expect(getQueueSize(lane, (target) => target?.agentId === "beta")).toBe(1);
+      expect(getQueueSize(lane, (target) => target?.agentId === "other")).toBe(0);
+      expect(getQueueSize(lane, (target) => target === undefined)).toBe(1);
+    } finally {
+      finish.resolve();
+      setCommandLaneConcurrency(lane, 3);
+      await Promise.all(tasks);
+    }
+    expect(getQueueSize(lane, (target) => target?.agentId === "alpha")).toBe(0);
+  });
+
   it("resetAllLanes drains queued work immediately after reset", async () => {
     const lane = `reset-test-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setCommandLaneConcurrency(lane, 1);
@@ -520,6 +543,57 @@ describe("command queue", () => {
     await expect(second).resolves.toBe("second");
   });
 
+  it.each(["admission", "completion", "error"] as const)(
+    "settles callers and drains the session lane when %s diagnostics throw",
+    async (phase) => {
+      vi.useFakeTimers();
+      const lane = "session:agent:test:diagnostic-failure";
+      const diagnosticError = new Error("diagnostic sink failed");
+      const taskError = new Error("Session transcript keyed user is outside the current turn");
+      const gate = createDeferred<string>();
+      const firstTask = vi.fn(() => gate.promise);
+      const successor = vi.fn(async () => "successor");
+      const taskIdentity = { taskKind: "turn", runId: "diagnostic-failure-run" };
+
+      if (phase === "admission") {
+        diagnosticMocks.logLaneDequeue.mockImplementationOnce(() => {
+          throw diagnosticError;
+        });
+      }
+      const outcomes = Promise.allSettled([
+        enqueueCommandInLane(lane, firstTask, { taskIdentity }),
+        enqueueCommandInLane(lane, successor),
+      ]);
+      if (phase !== "admission") {
+        diagnosticMocks.diag[phase === "error" ? "error" : "debug"].mockImplementationOnce(() => {
+          throw diagnosticError;
+        });
+      }
+      if (phase === "error") {
+        gate.reject(taskError);
+      } else {
+        gate.resolve("first");
+      }
+      await vi.runAllTimersAsync();
+
+      expect(successor).toHaveBeenCalledOnce();
+      expect(firstTask).toHaveBeenCalledTimes(phase === "admission" ? 0 : 1);
+      expect(await outcomes).toEqual([
+        phase === "completion"
+          ? { status: "fulfilled", value: "first" }
+          : { status: "rejected", reason: phase === "admission" ? diagnosticError : taskError },
+        { status: "fulfilled", value: "successor" },
+      ]);
+      expect(getCommandLaneSnapshot(lane)).toMatchObject({ activeCount: 0, queuedCount: 0 });
+      if (phase !== "admission") {
+        expect(diagnosticMocks.diag.warn).toHaveBeenCalledWith(
+          expect.stringContaining("lane task diagnostics failed after settlement:"),
+          taskIdentity,
+        );
+      }
+    },
+  );
+
   it.each([
     { reason: "restart", message: "Gateway is restarting. Please try again shortly." },
     {
@@ -686,7 +760,7 @@ describe("command queue", () => {
       return lanes as Map<string, unknown>;
     }
 
-    it("retires ten independently completed session lanes from the shared registry", async () => {
+    it.each(["session", "cli"])("retires parallel %s lanes after completion", async (prefix) => {
       const lanes = getCommandLaneRegistryForTest();
       const baselineSize = lanes.size;
       const allRunsStarted = createDeferred();
@@ -694,7 +768,7 @@ describe("command queue", () => {
       let peakActiveRuns = 0;
       const laneNames = Array.from(
         { length: 10 },
-        (_, index) => `session:agent:main:autoqa-${index}`,
+        (_, index) => `${prefix}:agent:main:autoqa-${index}`,
       );
 
       const results = await Promise.all(
@@ -842,22 +916,32 @@ describe("command queue", () => {
       const lane = "session:agent:main:autoqa-replacement";
       const staleGate = createDeferred();
       const replacementGate = createDeferred();
-      const staleRun = enqueueCommandInLane(lane, async () => {
-        await staleGate.promise;
-        return "stale";
-      });
+      const staleRun = enqueueCommandInLane(
+        lane,
+        async () => {
+          await staleGate.promise;
+          return "stale";
+        },
+        { sessionTarget: { agentId: "stale", sessionId: "stale" } },
+      );
 
       expect(resetCommandLane(lane)).toBe(1);
-      const replacementRun = enqueueCommandInLane(lane, async () => {
-        await replacementGate.promise;
-        return "replacement";
-      });
+      const replacementRun = enqueueCommandInLane(
+        lane,
+        async () => {
+          await replacementGate.promise;
+          return "replacement";
+        },
+        { sessionTarget: { agentId: "replacement", sessionId: "replacement" } },
+      );
       const replacementState = lanes.get(lane);
 
       staleGate.resolve();
       await expect(staleRun).resolves.toBe("stale");
       expect(lanes.get(lane)).toBe(replacementState);
       expect(getCommandLaneSnapshot(lane)).toMatchObject({ activeCount: 1, queuedCount: 0 });
+      expect(getQueueSize(lane, (target) => target?.agentId === "stale")).toBe(0);
+      expect(getQueueSize(lane, (target) => target?.agentId === "replacement")).toBe(1);
 
       replacementGate.resolve();
       await expect(replacementRun).resolves.toBe("replacement");
@@ -898,7 +982,7 @@ describe("command queue", () => {
       const replacementState = {
         lane,
         queue: createLaneQueue(),
-        activeTaskIds: new Set<number>(),
+        activeTasks: new Map(),
         maxConcurrent: 1,
         draining: false,
         generation: 0,

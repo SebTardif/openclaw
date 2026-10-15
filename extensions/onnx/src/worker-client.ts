@@ -1,6 +1,9 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createDeferred } from "openclaw/plugin-sdk/concurrency-runtime";
-import { resolveRuntimeWorkerArgv } from "openclaw/plugin-sdk/process-runtime";
+import {
+  resolveRuntimeWorkerArgv,
+  spawnOomScoreAdjusted as spawn,
+} from "openclaw/plugin-sdk/process-runtime";
 import type { WorkerConfig } from "./config.js";
 import type { ClassificationInput, ClassificationResult } from "./models/types.js";
 import {
@@ -176,16 +179,13 @@ export class InferenceWorkerClient {
     };
     this.worker = worker;
     child.on("message", (message: unknown) => this.receive(worker, message));
-    child.on("error", () => {
+    const onFailure = () => {
       if (this.worker === worker) {
         this.retire(new OnnxWorkerError("runtime"));
       }
-    });
-    child.once("disconnect", () => {
-      if (this.worker === worker) {
-        this.retire(new OnnxWorkerError("runtime"));
-      }
-    });
+    };
+    child.on("error", onFailure);
+    child.once("disconnect", onFailure);
     child.once("close", () => {
       if (this.worker === worker) {
         this.worker = undefined;
@@ -253,9 +253,7 @@ export class InferenceWorkerClient {
         request.kind === "classify" &&
         reply.results.length === request.inputs.length &&
         reply.results.every(
-          (result, index) =>
-            result.logits.length === request.inputs[index]?.labels.length &&
-            result.logits.every(Number.isFinite),
+          (result, index) => result.logits.length === request.inputs[index]?.labels.length,
         ))
     ) {
       this.finish(reply);
