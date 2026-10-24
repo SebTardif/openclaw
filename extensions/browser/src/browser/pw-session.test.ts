@@ -116,7 +116,9 @@ function observedPage() {
 
 function download(
   filename: string,
-  saveAs = vi.fn(async (_outPath: string) => {}),
+  saveAs: ReturnType<typeof vi.fn> = vi.fn(async () => {
+    throw new Error("download stream should not start");
+  }),
   url = `https://example.com/${filename}`,
 ): MutableDownload {
   return {
