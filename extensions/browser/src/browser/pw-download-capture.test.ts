@@ -12,11 +12,7 @@ import {
   createDownloadCaptureForPage,
   type BrowserDownloadCaptureOptions,
 } from "./pw-download-capture.js";
-import {
-  downloadReadStream,
-  requireStagedPath,
-  trackDownloadStagingOpens,
-} from "./pw-download-test-doubles.js";
+import { downloadReadStream } from "./pw-download-test-doubles.js";
 
 const pendingOr = <T>(outcome: Promise<T>) => Promise.race([outcome, Promise.resolve("pending")]);
 
@@ -144,26 +140,37 @@ describe("Playwright download capture cancellation", () => {
       const outputPath = path.join(outputRoot, "cancelled.bin");
       const { write, writeSettled } = observeOutputWriteSettlement(outputFiles);
       const saveGate = Promise.withResolvers<void>();
-      const saveStarted = Promise.withResolvers<void>();
-      const staged = trackDownloadStagingOpens();
-      if (deadline) {
-        vi.useFakeTimers();
-      }
+      const partialReady = Promise.withResolvers<string>();
+      const openFile = fs.open.bind(fs);
+      const openSpy = vi.spyOn(fs, "open").mockImplementation(async (file, flags, mode) => {
+        const handle = await openFile(file, flags, mode);
+        if (flags !== "w" || !String(file).endsWith(".part")) {
+          return handle;
+        }
+        const writeChunk = handle.write.bind(handle);
+        handle.write = (async (
+          buffer: Buffer,
+          offset?: number,
+          length?: number,
+          position?: number | null,
+        ) => {
+          const result = await writeChunk(buffer, offset, length, position);
+          partialReady.resolve(String(file));
+          await saveGate.promise;
+          return result;
+        }) as typeof handle.write;
+        return handle;
+      });
       const f = makeCapture({
         mode: "explicit",
         outputPath,
         outputRoot,
         signal: controller.signal,
-        timeout: deadline ? 25 : 1_000,
+        timeout: deadline ? 1_000 : 5_000,
         download: {
           filename: "cancelled.bin",
           url: "https://example.com/cancelled.bin",
-          createReadStream: downloadReadStream("cancelled partial contents", {
-            afterYield: async () => {
-              saveStarted.resolve();
-              await saveGate.promise;
-            },
-          }),
+          createReadStream: downloadReadStream("cancelled partial contents"),
           cancel: async () => {
             saveGate.resolve();
           },
@@ -171,12 +178,10 @@ describe("Playwright download capture cancellation", () => {
       });
       try {
         f.emit();
-        await withinTest(saveStarted.promise, signal);
-        const partialPath = requireStagedPath(staged);
+        const partialPath = await withinTest(partialReady.promise, signal);
         await expect(fs.readFile(partialPath, "utf8")).resolves.toBe("cancelled partial contents");
         if (deadline) {
-          await vi.advanceTimersByTimeAsync(25);
-          await expect(pendingOr(f.outcome)).resolves.toMatchObject({
+          await expect(f.outcome).resolves.toMatchObject({
             message: "Timeout waiting for download",
           });
         } else {
@@ -198,6 +203,7 @@ describe("Playwright download capture cancellation", () => {
           await writeSettled.promise;
         }
         write.mockRestore();
+        openSpy.mockRestore();
         vi.useRealTimers();
         await fs.rm(outputRoot, { recursive: true, force: true });
       }
