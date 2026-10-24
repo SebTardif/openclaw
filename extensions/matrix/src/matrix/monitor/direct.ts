@@ -195,8 +195,9 @@ export function createDirectRoomTracker(client: MatrixClient, opts: DirectRoomTr
           return false;
         }
 
-        // Two joined members are not a DM. is_direct and m.direct are the
-        // signals, including when the direct-room cache has not seeded yet.
+        // Two joined members are not a DM by themselves, even before the
+        // direct-room cache seeds. is_direct, m.direct, a promoted recent
+        // invite, and opted-in per-room recovery can still mark the room direct.
         if (hasLocallyPromotedDirectRoom(roomId, senderId)) {
           const shouldKeep = await checkRoomPolicy("shouldKeepLocallyPromotedDirectRoom", roomId);
           if (shouldKeep !== false) {
