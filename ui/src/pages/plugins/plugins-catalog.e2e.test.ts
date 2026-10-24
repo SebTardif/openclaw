@@ -87,6 +87,75 @@ describeControlUiE2e("Control UI installed plugin catalog", () => {
     },
   );
 
+  it("renders a long valid plugin icon and rejects an unclosed transform in the built UI", async () => {
+    const context = await newContext();
+    const page = await context.newPage();
+    await page.addInitScript(
+      ({ gatewayUrl }) => {
+        window["__OPENCLAW_NATIVE_CONTROL_AUTH__"] = { gatewayUrl };
+      },
+      { gatewayUrl: server.baseUrl.replace(/^http/u, "ws") },
+    );
+    const longList = "scale(1) ".repeat(40);
+    const unclosed = `scale(${"\t\t)scale(".repeat(24)}`;
+    await installMockGateway(page, {
+      featureMethods: pluginMethods,
+      methodResponses: {
+        ...pluginMethodResponses(),
+        "plugins.list": inventory([
+          {
+            ...remoteIconPlugin,
+            id: "valid-transform",
+            name: "Valid Transform",
+            installed: true,
+            enabled: true,
+            state: "enabled",
+          },
+          {
+            ...remoteIconPlugin,
+            id: "stalled-transform",
+            name: "Stalled Transform",
+            installed: true,
+            enabled: true,
+            state: "enabled",
+          },
+        ]),
+      },
+    });
+    const svg = (transform: string) =>
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 4h16v16H4Z" transform="${transform}"/></svg>`;
+    await page.route("**/__openclaw__/plugin-icon/valid-transform", async (route) => {
+      await route.fulfill({ body: svg(longList), contentType: "image/svg+xml" });
+    });
+    await page.route("**/__openclaw__/plugin-icon/stalled-transform", async (route) => {
+      await route.fulfill({ body: svg(unclosed), contentType: "image/svg+xml" });
+    });
+    try {
+      const started = Date.now();
+      await page.goto(`${server.baseUrl}settings/plugins`);
+      const validIcon = page.locator('[data-plugin-icon-id="valid-transform"] img');
+      await validIcon.waitFor();
+      await expect
+        .poll(() =>
+          validIcon.evaluate(async (image: HTMLImageElement) => {
+            const response = await fetch(image.src);
+            return (await response.blob()).type;
+          }),
+        )
+        .toBe("image/png");
+      const stalledRow = page.locator('[data-plugin-id="stalled-transform"]');
+      await stalledRow.waitFor();
+      expect(await stalledRow.locator("img").count()).toBe(0);
+      const search = page.getByRole("searchbox", { name: "Search installed plugins" });
+      await search.fill("Valid");
+      await page.locator('[data-plugin-id="valid-transform"]').waitFor();
+      expect(await page.locator('[data-plugin-id="stalled-transform"]').count()).toBe(0);
+      console.log(`BUILT_UI_PLUGIN_ICONS_MS ${Date.now() - started}`);
+    } finally {
+      await context.close();
+    }
+  });
+
   it("finds an installed plugin by scoped package identity and opens it by keyboard", async () => {
     const context = await newContext();
     const page = await context.newPage();
