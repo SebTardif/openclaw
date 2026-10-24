@@ -25,12 +25,6 @@ scenario:
       conversationId: "!qa-restart:crabline.test"
       senderId: "@driver:crabline.test"
       mentionPrefix: "@openclaw "
-      # The text prefix is not a Matrix user mention. Delivery is under test,
-      # not mention gating, and two joined members are not a direct room.
-      matrixConfigOverrides:
-        groupsByKey:
-          main:
-            requireMention: false
       firstPrefix: MATRIX_QA_RESTART_BEFORE
       secondPrefix: MATRIX_QA_RESTART_AFTER
       timeoutMs: 60000
