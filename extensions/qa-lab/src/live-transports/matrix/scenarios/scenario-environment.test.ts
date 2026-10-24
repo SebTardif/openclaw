@@ -15,10 +15,38 @@ const runMatrixQaCanary = vi.hoisted(() =>
 vi.mock("../substrate/config.js", () => ({ buildMatrixQaConfig }));
 vi.mock("./scenario-runtime-room.js", () => ({ runMatrixQaCanary }));
 
-import { createMatrixQaScenarioEnvironment } from "./scenario-environment.js";
+import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import {
+  allowDeclaredMatrixFlowGroupRoom,
+  createMatrixQaScenarioEnvironment,
+} from "./scenario-environment.js";
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+it("allowlists a declared flow group room without requiring a mention", () => {
+  const config = {
+    channels: {
+      matrix: {
+        accounts: {
+          sut: { enabled: true, groups: {} },
+        },
+      },
+    },
+  } as OpenClawConfig;
+  allowDeclaredMatrixFlowGroupRoom({
+    accountId: "sut",
+    config,
+    flowConfig: {
+      conversationId: "!qa-restart:crabline.test",
+      conversationKind: "group",
+    },
+  });
+  expect(config.channels?.matrix?.accounts?.sut?.groups?.["!qa-restart:crabline.test"]).toEqual({
+    enabled: true,
+    requireMention: false,
+  });
 });
 
 function createEnvironment() {
