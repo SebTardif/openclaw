@@ -25,10 +25,8 @@ const SVG_COLOR_VALUE_RE = /^(?:none|currentColor|#[0-9a-f]{3,8})$/iu;
 const SVG_NUMBER_VALUE_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/iu;
 const SVG_NUMBER_LIST_RE = /^[0-9eE+.,\s-]+$/u;
 const SVG_PATH_VALUE_RE = /^[0-9a-zA-Z+.,\s-]+$/u;
-// Shipped plugin-icon transforms stay under 80 characters. A few hundred
-// characters of an unclosed function stalled the old nested quantifier on
-// the UI thread, and the image decode timeout does not cover this check.
-const SVG_TRANSFORM_MAX_CHARS = 256;
+// The previous nested quantifier stalled the UI thread on an unclosed
+// transform, and the image decode timeout does not cover this check.
 const SVG_TRANSFORM_NAMES = new Set(["matrix", "rotate", "scale", "skewX", "skewY", "translate"]);
 const SVG_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["d", SVG_PATH_VALUE_RE],
@@ -76,7 +74,7 @@ function isSvgTransformArgumentChar(char: string): boolean {
 }
 
 function isSafeSvgTransform(value: string): boolean {
-  if (value.length === 0 || value.length > SVG_TRANSFORM_MAX_CHARS) {
+  if (value.length === 0) {
     return false;
   }
   let index = 0;
