@@ -49,7 +49,7 @@ function client(params: { isDm?: boolean; direct?: boolean }) {
 
 async function admit(tracker: ReturnType<typeof createDirectRoomTracker>) {
   const upsertPairingRequest = vi.fn(async () => ({ code: "PAIRCODE", created: true }));
-  const dispatchInboundMessage = vi.fn(async () => {});
+  let dispatchCount = 0;
   const logs: string[] = [];
   const harness = createHarness({
     directTracker: tracker,
@@ -58,7 +58,13 @@ async function admit(tracker: ReturnType<typeof createDirectRoomTracker>) {
     groupPolicy: "allowlist",
     roomsConfig: {},
     upsertPairingRequest,
-    dispatchInboundMessage,
+    dispatchInboundMessage: async () => {
+      dispatchCount += 1;
+      return {
+        queuedFinal: false,
+        counts: { final: 0, block: 0, tool: 0 },
+      };
+    },
     logVerboseMessage: (message) => {
       logs.push(message);
     },
@@ -73,7 +79,7 @@ async function admit(tracker: ReturnType<typeof createDirectRoomTracker>) {
   );
   return {
     pairingWrites: upsertPairingRequest.mock.calls.length,
-    dispatch: dispatchInboundMessage.mock.calls.length,
+    dispatch: dispatchCount,
     logs,
   };
 }
