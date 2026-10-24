@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../send.js", () => ({
-  sendMessageMatrix: vi.fn(async () => ({
-    messageId: "$pairing",
-    roomId: "!room:example.org",
-  })),
-}));
+vi.mock("../send.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../send.js")>();
+  return {
+    ...actual,
+    sendMessageMatrix: vi.fn(async () => ({
+      messageId: "$pairing",
+      roomId: "!room:example.org",
+    })),
+  };
+});
 import { installMatrixMonitorTestRuntime } from "../../test-runtime.js";
 import type { MatrixClient } from "../sdk.js";
 import { createDirectRoomTracker } from "./direct.js";
