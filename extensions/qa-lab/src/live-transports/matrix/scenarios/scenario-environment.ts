@@ -50,32 +50,6 @@ type MatrixQaConfigApplyStatus = {
   hash?: string;
 };
 
-export function allowDeclaredMatrixFlowGroupRoom(params: {
-  accountId: string;
-  config: OpenClawConfig;
-  flowConfig: Record<string, unknown>;
-}): void {
-  if (params.flowConfig.conversationKind !== "group") {
-    return;
-  }
-  const conversationId = params.flowConfig.conversationId;
-  if (typeof conversationId !== "string" || !conversationId.startsWith("!")) {
-    return;
-  }
-  const account = params.config.channels?.matrix?.accounts?.[params.accountId];
-  if (!account) {
-    return;
-  }
-  const groups = { ...account.groups };
-  const current = groups[conversationId];
-  groups[conversationId] = {
-    ...current,
-    enabled: current?.enabled ?? true,
-    requireMention: current?.requireMention ?? false,
-  };
-  account.groups = groups;
-}
-
 function readMatrixConfigOverrides(
   config: Record<string, unknown>,
 ): MatrixQaConfigOverrides | undefined {
@@ -322,11 +296,6 @@ export function createMatrixQaScenarioEnvironment(params: MatrixQaScenarioEnviro
       sutDeviceId: params.provisioning.sut.deviceId,
       sutUserId: params.provisioning.sut.userId,
       topology: params.provisioning.topology,
-    });
-    allowDeclaredMatrixFlowGroupRoom({
-      accountId: params.accountId,
-      config: gatewayConfig,
-      flowConfig: input.config,
     });
     const gatewayPatch = createMatrixQaConfigPatch(
       configSnapshot.config,
