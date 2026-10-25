@@ -338,8 +338,10 @@ extension TalkModeRuntime {
         do {
             try await session.start()
             // iOS drops a start that returns before ready. A cancelled Mac start used to
-            // fall through and publish this session as listening.
-            guard session.isReady else {
+            // fall through and publish this session as listening. Readiness is main-actor
+            // state, same as stop().
+            let ready = await MainActor.run { session.isReady }
+            guard ready else {
                 await MainActor.run { session.stop() }
                 if realtimeSession === session {
                     realtimeSession = nil
