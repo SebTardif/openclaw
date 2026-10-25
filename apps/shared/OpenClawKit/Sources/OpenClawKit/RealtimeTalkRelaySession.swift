@@ -374,7 +374,9 @@ public final class RealtimeTalkRelaySession {
         let eventStream = await transport.subscribeServerEvents(200)
         switch await lifecycleStatus(lifecycleGeneration) {
         case .current: break
-        case .cancelledLocally: return
+        case .cancelledLocally:
+            await self.finishCancelledStartup()
+            return
         case .routeLost: throw Self.gatewayRouteLostError()
         }
         self.startEventPump(stream: eventStream, lifecycleGeneration: lifecycleGeneration)
@@ -389,6 +391,7 @@ public final class RealtimeTalkRelaySession {
                 if statusAfterCreate == .routeLost {
                     throw Self.gatewayRouteLostError()
                 }
+                await self.finishCancelledStartup()
                 return
             }
             if let startupIssue {
@@ -409,7 +412,9 @@ public final class RealtimeTalkRelaySession {
             let supportsBargeIn = await resolveSupportsBargeIn(result, lifecycleGeneration: lifecycleGeneration)
             switch await lifecycleStatus(lifecycleGeneration) {
             case .current: break
-            case .cancelledLocally: return
+            case .cancelledLocally:
+                await self.finishCancelledStartup()
+                return
             case .routeLost: throw Self.gatewayRouteLostError()
             }
             self.supportsBargeIn = supportsBargeIn
@@ -423,14 +428,19 @@ public final class RealtimeTalkRelaySession {
             self.output.withLock { $0.startupRoutingReady = true }
             switch await lifecycleStatus(lifecycleGeneration) {
             case .current: break
-            case .cancelledLocally: return
+            case .cancelledLocally:
+                await self.finishCancelledStartup()
+                return
             case .routeLost: throw Self.gatewayRouteLostError()
             }
             switch await waitForStartupResult(
                 timeoutSeconds: Self.startupReadyTimeoutSeconds,
                 lifecycleGeneration: lifecycleGeneration)
             {
-            case .ready, .cancelled:
+            case .ready:
+                return
+            case .cancelled:
+                await self.finishCancelledStartup()
                 return
             case let .failed(issue):
                 throw Self.startupFailureError(issue)
@@ -439,6 +449,7 @@ public final class RealtimeTalkRelaySession {
             // A lost route must still surface: swallowing here would discard both the original
             // failure and the route loss, leaving the runtime with nothing to fall back from.
             if await lifecycleStatus(lifecycleGeneration) == .cancelledLocally {
+                await self.finishCancelledStartup()
                 return
             }
             let createdRelaySessionId = self.relaySessionId
@@ -447,6 +458,16 @@ public final class RealtimeTalkRelaySession {
                 try? await self.beginServerClose(relaySessionId: createdRelaySessionId).value
             }
             throw error
+        }
+    }
+
+    /// Local cancel must not look like a ready session. `close` is a no-op once `stop` has run.
+    private func finishCancelledStartup() async {
+        guard !self.isClosed else { return }
+        let relaySessionId = self.relaySessionId
+        self.close(sendClose: false)
+        if let relaySessionId {
+            try? await self.beginServerClose(relaySessionId: relaySessionId).value
         }
     }
 
