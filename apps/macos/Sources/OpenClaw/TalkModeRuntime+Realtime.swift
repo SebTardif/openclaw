@@ -346,6 +346,7 @@ extension TalkModeRuntime {
                 if realtimeSession === session {
                     realtimeSession = nil
                 }
+                self.phase = .idle
                 throw CancellationError()
             }
         } catch {
@@ -353,6 +354,7 @@ extension TalkModeRuntime {
             if realtimeSession === session {
                 realtimeSession = nil
             }
+            self.phase = .idle
             guard isCurrent(lifecycleGeneration), !isPaused,
                   realtimeRelayGeneration == relayGeneration,
                   realtimeRelayStartGeneration == relayGeneration
@@ -369,6 +371,7 @@ extension TalkModeRuntime {
             if realtimeSession === session {
                 realtimeSession = nil
             }
+            self.phase = .idle
             throw CancellationError()
         }
     }
@@ -480,6 +483,9 @@ extension TalkModeRuntime {
 
     func handleRealtimeSpeakingChanged(_ speaking: Bool, relayGeneration: UInt64) async {
         guard let session = self.activeRealtimeRelay(relayGeneration) else { return }
+        // Startup close reports speaking false before the relay is ready. That must not
+        // publish listening; only a ready session returns to listening when speech ends.
+        guard await MainActor.run(body: { session.isReady }) else { return }
         let phase: TalkModePhase = speaking ? .speaking : .listening
         self.phase = phase
         _ = await self.projectRealtimeRelay(relayGeneration, session) {

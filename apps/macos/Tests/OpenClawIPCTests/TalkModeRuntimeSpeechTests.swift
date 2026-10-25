@@ -709,6 +709,22 @@ struct TalkModeRuntimeSpeechTests {
         session.stop()
     }
 
+    @Test @MainActor func `a relay that is not ready does not publish listening when speaking ends`() async {
+        let runtime = TalkModeRuntime()
+        let session = makeRuntimeTestRealtimeSession(player: RuntimeTestPCMPlayer())
+        let relayGeneration = await runtime._test_prepareEnabledRealtimeSessionForClose(session)
+        #expect(session.isReady == false)
+        TalkModeController.shared.updatePhase(.idle)
+
+        await runtime.handleRealtimeSpeakingChanged(false, relayGeneration: relayGeneration)
+
+        #expect(await runtime.phase == .idle)
+        #expect(TalkModeController.shared.phase == .idle)
+
+        await runtime.setEnabled(false)
+        session.stop()
+    }
+
     @Test @MainActor func `resuming realtime restarts input and reuses the relay`() async throws {
         let runtime = TalkModeRuntime()
         let audioCapture = RuntimeTestAudioCapture()
