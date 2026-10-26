@@ -169,8 +169,8 @@ describe("production lint suppressions", () => {
         "scripts/e2e/parallels/host-command.ts|no-warning-comments|1",
         // The scheduling probe forwards native methods with the original call receiver through Reflect.apply.
         "scripts/lib/control-ui-resource-counts.ts|typescript/unbound-method|8",
-        // The Talk probe forwards native playback and analyser methods with their original receivers.
-        "scripts/lib/control-ui-talk-fixture.ts|typescript/unbound-method|2",
+        // The Talk probe forwards native playback, analyser, processor, start, and stop methods with their original receivers.
+        "scripts/lib/control-ui-talk-fixture.ts|typescript/unbound-method|5",
         "scripts/lib/plain-gh.mjs|no-warning-comments|1",
         "scripts/lib/sqlite-reliability-process.ts|typescript/prefer-promise-reject-errors|1",
         // The copy-count probe restores the native method after measurement.
@@ -281,6 +281,8 @@ describe("production lint suppressions", () => {
         "src/gateway/session-companion-prompt.ts|unicorn/no-array-sort|1",
         // Preserve the measured indexed fanout loop while reusing envelope tuples.
         "src/gateway/session-event-projection.ts|typescript/prefer-for-of|1",
+        // Event field ordering sorts only the freshly filtered, audience-private key array.
+        "src/gateway/session-event-projection.ts|unicorn/no-array-sort|1",
         "src/gateway/session-swarm-summary.ts|unicorn/no-array-sort|2",
         // Node worker ports do not accept a browser target origin.
         "src/gateway/system-ca-warmup.worker.ts|unicorn/require-post-message-target-origin|1",
@@ -321,6 +323,9 @@ describe("production lint suppressions", () => {
         "src/plugins/memory-state.ts|unicorn/no-array-sort|2",
         // Reflect.apply supplies the wrapped callable as Function.prototype.bind's receiver.
         "src/plugins/plugin-instance-bindings.ts|typescript/unbound-method|1",
+        // Iterator continuations supply the native Promise receiver and preserve exact plugin rejection values.
+        "src/plugins/plugin-instance-iterator.ts|typescript/prefer-promise-reject-errors|1",
+        "src/plugins/plugin-instance-iterator.ts|typescript/unbound-method|1",
         "src/plugins/plugin-instance-owned-values.ts|eslint/no-constructor-return|1",
         "src/plugins/plugin-instance-owned-values.ts|typescript/no-extraneous-class|1",
         "src/plugins/plugin-return-value.ts|typescript/prefer-promise-reject-errors|1",
