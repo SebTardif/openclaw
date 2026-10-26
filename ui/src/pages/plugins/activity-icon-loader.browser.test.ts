@@ -161,7 +161,9 @@ describe.runIf("__vitest_browser__" in globalThis)("plugin activity icon decoder
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("rasterizes an ordinary transform and a long valid transform list", async () => {
+  it("rasterizes an ordinary transform and a long valid transform list", async ({
+    onTestFinished,
+  }) => {
     const fetch = vi.spyOn(globalThis, "fetch");
     fetch.mockImplementation(
       async () =>
@@ -171,6 +173,7 @@ describe.runIf("__vitest_browser__" in globalThis)("plugin activity icon decoder
     );
     const ordinary = await loadActivity(activityParams("ordinary-transform"));
     expect(ordinary).not.toBeNull();
+    onTestFinished(() => URL.revokeObjectURL(ordinary!));
     const ordinaryBlob = await (await nativeFetch(ordinary!)).blob();
     expect(ordinaryBlob.type).toBe("image/png");
 
@@ -182,6 +185,7 @@ describe.runIf("__vitest_browser__" in globalThis)("plugin activity icon decoder
     );
     const longList = await loadActivity(activityParams("long-transform"));
     expect(longList).not.toBeNull();
+    onTestFinished(() => URL.revokeObjectURL(longList!));
     const longBlob = await (await nativeFetch(longList!)).blob();
     expect(longBlob.type).toBe("image/png");
   });
