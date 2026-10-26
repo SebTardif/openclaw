@@ -687,6 +687,10 @@ struct TalkModeRuntimeSpeechTests {
         let player = RuntimeTestPCMPlayer()
         let session = makeRuntimeTestRealtimeSession(player: player)
         let relayGeneration = await runtime._test_prepareEnabledRealtimeSessionForClose(session)
+        TalkModeController.shared.updatePhase(.idle)
+        await runtime.handleRealtimeSpeakingChanged(false, relayGeneration: relayGeneration)
+        #expect(await runtime.phase == .idle)
+        #expect(TalkModeController.shared.phase == .idle)
         TalkModeController.shared.updatePhase(.speaking)
         TalkModeController.shared.updateLevel(0.8)
         TalkModeController.shared.updatePartialTranscript("stale")
@@ -704,22 +708,6 @@ struct TalkModeRuntimeSpeechTests {
         #expect(TalkModeController.shared.level == 0)
         #expect(TalkModeController.shared.partialTranscript.isEmpty)
         #expect(player.stopCount == 0)
-
-        await runtime.setEnabled(false)
-        session.stop()
-    }
-
-    @Test @MainActor func `a relay that is not ready does not publish listening when speaking ends`() async {
-        let runtime = TalkModeRuntime()
-        let session = makeRuntimeTestRealtimeSession(player: RuntimeTestPCMPlayer())
-        let relayGeneration = await runtime._test_prepareEnabledRealtimeSessionForClose(session)
-        #expect(session.isReady == false)
-        TalkModeController.shared.updatePhase(.idle)
-
-        await runtime.handleRealtimeSpeakingChanged(false, relayGeneration: relayGeneration)
-
-        #expect(await runtime.phase == .idle)
-        #expect(TalkModeController.shared.phase == .idle)
 
         await runtime.setEnabled(false)
         session.stop()
@@ -813,11 +801,9 @@ struct TalkModeRuntimeSpeechTests {
     @Test func `stale relay startup does not clear a successor listening phase`() async throws {
         let barrier = RuntimeContinuationBarrier()
         let requests = RuntimeTestRelayRequestLog()
-        let probe = RuntimeCommitProbe()
         let bootstrap = try makeRuntimeTestBootstrap(
             requests: requests,
-            createBarrier: barrier,
-            probe: probe)
+            createBarrier: barrier)
         let runtime = TalkModeRuntime(realtimeTalkBootstrapProvider: { bootstrap })
         let lifecycleGeneration = await runtime._test_prepareEnabledLifecycle()
         await runtime._test_enableRealtimeRelaySelection()

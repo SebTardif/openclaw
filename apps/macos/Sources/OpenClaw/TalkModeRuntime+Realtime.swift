@@ -337,15 +337,8 @@ extension TalkModeRuntime {
         realtimeSession = session
         do {
             try await session.start()
-            // iOS drops a start that returns before ready. A cancelled Mac start used to
-            // fall through and publish this session as listening. Readiness is main-actor
-            // state, same as stop().
-            let ready = await MainActor.run { session.isReady }
-            guard ready else {
-                await MainActor.run { session.stop() }
-                if realtimeSession === session {
-                    realtimeSession = nil
-                }
+            // A cancelled startup can return normally without a ready relay.
+            guard await MainActor.run(body: { session.isReady }) else {
                 throw CancellationError()
             }
         } catch {
@@ -359,8 +352,7 @@ extension TalkModeRuntime {
             else {
                 throw CancellationError()
             }
-            // A newer native session may already be listening. Only the startup
-            // that still owns this runtime may clear that phase.
+            // Only the current startup may reset the phase.
             self.phase = .idle
             throw error
         }
@@ -483,9 +475,10 @@ extension TalkModeRuntime {
 
     func handleRealtimeSpeakingChanged(_ speaking: Bool, relayGeneration: UInt64) async {
         guard let session = self.activeRealtimeRelay(relayGeneration) else { return }
-        // Startup close reports speaking false before the relay is ready. That must not
-        // publish listening; only a ready session returns to listening when speech ends.
-        guard await MainActor.run(body: { session.isReady }) else { return }
+        // Closing an unready startup reports speaking false without becoming ready.
+        guard await MainActor.run(body: { session.isReady }),
+              self.activeRealtimeRelay(relayGeneration) === session
+        else { return }
         let phase: TalkModePhase = speaking ? .speaking : .listening
         self.phase = phase
         _ = await self.projectRealtimeRelay(relayGeneration, session) {
