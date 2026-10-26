@@ -186,6 +186,7 @@ const repositoryScriptEntries = [
   "scripts/perf/approval-replay-burst-measure.ts!",
   "scripts/perf/channels-status-inventory.ts!",
   "scripts/perf/extension-handler-lookup-measure.ts!",
+  "scripts/perf/knowledge-git-transactions.ts!",
   "scripts/perf/reply-tool-authority-measure.ts!",
   "scripts/perf/select-environment-scale.ts!",
   "scripts/perf/session-archive-staging-measure.ts!",
@@ -201,6 +202,7 @@ const repositoryScriptEntries = [
   "scripts/perf/harness-selection-copy-measure.ts!",
   "scripts/perf/session-catalog-pairing-measure.ts!",
   "scripts/perf/session-involvement-measure.ts!",
+  "scripts/perf/sqlite-native-lease-measure.mjs!",
   "scripts/perf/sqlite-owner-dispatch-measure.mjs!",
   "scripts/perf/sqlite-wal-scan-measure.mjs!",
   "scripts/perf/state-engine-schema-bench.ts!",
@@ -208,15 +210,20 @@ const repositoryScriptEntries = [
   // Knip follows the private Gateway boot preload through this parent's literal URL edge.
   "scripts/perf/state-read-gateway-boot.ts!",
   "scripts/perf/worktree-snapshot-measure.ts!",
+  "scripts/perf/attempt-stop-reason-stream-measure.ts!",
   "scripts/perf/codex-inference-terminal-measure.ts!",
+  "scripts/perf/codex-inference-upload-measure.ts!",
   "scripts/perf/codex-tool-report-measure.ts!",
   "scripts/perf/failed-placement-recovery-bench.ts!",
   "scripts/perf/provider-prompt-state-worker-measure.mjs!",
+  "scripts/perf/session-diff-metadata-measure.ts!",
   "scripts/perf/session-file-workspace-measure.ts!",
   // The performance guide and transcript driver invoke these tools and preloads by path.
   "scripts/lib/gateway-bench-transport-preload.ts!",
   "scripts/perf/async-store-measure.mjs!",
   "scripts/perf/code-mode-store-measure.ts!",
+  // Its header documents the long-history session-store replay benchmark.
+  "scripts/perf/code-mode-store-replay-measure.ts!",
   "scripts/perf/gateway-agent-event-measure.ts!",
   "scripts/perf/transcript-hydration-counts-preload.ts!",
   // The performance guide and retained package-integrity rerun invoke these benchmarks by path.
@@ -384,6 +391,7 @@ const repositoryScriptEntries = [
   "scripts/perf/session-run-progress-measure.ts!",
   "scripts/perf/session-tool-pin-measure.ts!",
   "scripts/perf/sidebar-presentation-measure.ts!",
+  "scripts/perf/sidebar-fact-sharing-measure.ts!",
   "scripts/perf/source-kind-progress-equality-measure.ts!",
   "scripts/perf/sqlite-reclamation-retention.ts!",
   "scripts/perf/state-db-cache-admission-measure.ts!",
@@ -415,6 +423,7 @@ const repositoryScriptEntries = [
   "scripts/perf/identifier-renormalization-measure.ts!",
   "scripts/perf/ingress-ip-measure.ts!",
   "scripts/perf/memory-ranking-copies.ts!",
+  "scripts/perf/memory-prompt-copy-measure.ts!",
   "scripts/perf/misc-fresh-array-copies-measure.mjs!",
   "scripts/perf/native-control-port-measure.ts!",
   "scripts/perf/plugin-fresh-arrays-measure.mjs!",
@@ -634,6 +643,8 @@ const repositoryScriptEntries = [
   // The branch-rotation guide invokes the driver, which loads its IPC preload by path.
   "scripts/perf/branch-rotation-measure.ts!",
   "scripts/perf/branch-rotation-measure-preload.ts!",
+  // The plugin scope census is loaded by the documented stress --gateway-preload option.
+  "scripts/perf/plugin-scope-attribution-preload.mjs!",
   // The documented placement shutdown reproduction is invoked as a standalone CLI.
   "scripts/perf/worker-placement-reconcile-shutdown-measure.ts!",
   // The standalone build guide invokes this builder by path.
