@@ -346,7 +346,6 @@ extension TalkModeRuntime {
                 if realtimeSession === session {
                     realtimeSession = nil
                 }
-                self.phase = .idle
                 throw CancellationError()
             }
         } catch {
@@ -354,13 +353,15 @@ extension TalkModeRuntime {
             if realtimeSession === session {
                 realtimeSession = nil
             }
-            self.phase = .idle
             guard isCurrent(lifecycleGeneration), !isPaused,
                   realtimeRelayGeneration == relayGeneration,
                   realtimeRelayStartGeneration == relayGeneration
             else {
                 throw CancellationError()
             }
+            // A newer native session may already be listening. Only the startup
+            // that still owns this runtime may clear that phase.
+            self.phase = .idle
             throw error
         }
         guard isCurrent(lifecycleGeneration), !isPaused,
@@ -371,7 +372,6 @@ extension TalkModeRuntime {
             if realtimeSession === session {
                 realtimeSession = nil
             }
-            self.phase = .idle
             throw CancellationError()
         }
     }

@@ -810,6 +810,47 @@ struct TalkModeRuntimeSpeechTests {
         #expect(await requests.snapshot().methods.contains("talk.session.create"))
     }
 
+    @Test func `stale relay startup does not clear a successor listening phase`() async throws {
+        let barrier = RuntimeContinuationBarrier()
+        let requests = RuntimeTestRelayRequestLog()
+        let probe = RuntimeCommitProbe()
+        let bootstrap = try makeRuntimeTestBootstrap(
+            requests: requests,
+            createBarrier: barrier,
+            probe: probe)
+        let runtime = TalkModeRuntime(realtimeTalkBootstrapProvider: { bootstrap })
+        let lifecycleGeneration = await runtime._test_prepareEnabledLifecycle()
+        await runtime._test_enableRealtimeRelaySelection()
+        let attempt = Task {
+            do {
+                try await runtime.startRealtimeRelay(generation: lifecycleGeneration)
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        try await waitForRuntimeBarrier(barrier, cleaningUp: attempt)
+        await runtime.setEnabled(false)
+        let successorLifecycle = await runtime._test_prepareEnabledLifecycle()
+        let recognition = try #require(await runtime._test_beginRecognitionAttempt(
+            lifecycleGeneration: successorLifecycle))
+        let relayGeneration = await runtime.realtimeRelayGeneration
+        let accepted = await runtime.commitNativeFallback(
+            recognitionStarted: true,
+            lifecycleGeneration: successorLifecycle,
+            recognitionGeneration: recognition,
+            relayGeneration: relayGeneration,
+            status: nil)
+        #expect(accepted)
+        #expect(await runtime.phase == .listening)
+
+        await barrier.release()
+        #expect(await attempt.value == false)
+        #expect(await runtime.phase == .listening)
+        await runtime.setEnabled(false)
+    }
+
     @Test func `failed realtime bootstrap clears prior Gateway selection`() async throws {
         let runtime = TalkModeRuntime(realtimeTalkBootstrapProvider: {
             throw RuntimeRelayStartError.failed
