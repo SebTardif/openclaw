@@ -7,7 +7,6 @@ import { localParticipantIdentityKey } from "../../../lib/chat/sender-label.ts";
 import { extractToolCardsCached } from "../../../lib/chat/tool-cards.ts";
 import { chatItemGroups } from "../chat-agent-run-grouping.ts";
 import { assistantGroupCanOwnActiveRunStatus } from "../chat-assistant-reply.ts";
-import { projectDelegatedTasks } from "../chat-delegation.ts";
 import { resolveTurnRecap, shouldRenderQueuedSendInThread } from "../chat-progress.ts";
 import { projectChatReasoning } from "../chat-reasoning.ts";
 import { projectSubagentStatus } from "../chat-subagent-wait.ts";
@@ -21,15 +20,13 @@ import {
   setExpansionState,
   syncToolCardExpansionState,
 } from "../chat-thread.ts";
-import { readAsyncQuestions } from "./chat-async-question.ts";
-import { projectDelegationRows } from "./chat-delegation-rows.ts";
+import { readAsyncQuestions } from "./chat-async-question-content.ts";
 import { buildChatArchiveNotice } from "./chat-divider.ts";
 import type { NativeMessageGroupOptions } from "./chat-message-group-frame.ts";
 import { assistantMediaPolicyKey } from "./chat-message-media.ts";
 import type { StreamGroupOptions } from "./chat-message-stream-view.tsx";
 import { projectRealtimeTalkConversation } from "./chat-realtime-controls.ts";
 import { createReplyPreviewResolver } from "./chat-reply-preview.ts";
-import { resolveChatSwarmParent } from "./chat-swarm-progress-parent.ts";
 import { getTranscriptState, type ChatThreadProps } from "./chat-thread-interactions.ts";
 import { projectTranscriptActivity } from "./chat-transcript-activity.ts";
 import { latestTranscriptAnnouncement } from "./chat-transcript-announcement.ts";
@@ -54,8 +51,8 @@ import {
 } from "./chat-transcript-render-guard.ts";
 import type { NativeTranscriptView } from "./chat-transcript-rows.ts";
 import type { ChatTranscriptSession, TranscriptHeader } from "./chat-transcript-session.ts";
+import { createTranscriptStreamSource } from "./chat-transcript-stream-source.ts";
 import { projectTranscriptWorkPreviews } from "./chat-transcript-work-previews.ts";
-import { projectTurnVideoMessages } from "./chat-turn-video-gallery.ts";
 import { resolveAssistantDisplayAvatar } from "./chat-welcome.ts";
 
 const questionIndexes = createTranscriptMemo<NonNullable<StreamGroupOptions["questionPrompts"]>>();
@@ -68,6 +65,7 @@ export function projectChatTranscript(
 ) {
   const state = getTranscriptState(props.paneId);
   const { asyncQuestions, selectedSession: activeSession } = props;
+  const asyncQuestionGeneration = state.asyncQuestionGeneration;
   const { showOwnSenderName, replyPeople } = resolveTranscriptParticipants(props);
   const mediaPolicyKey = assistantMediaPolicyKey(activeSession, props.mediaPolicyEpoch);
   const { showReasoning, reasoning } = projectChatReasoning(props);
@@ -100,7 +98,9 @@ export function projectChatTranscript(
     toolMessages: props.toolMessages,
     guardianNotices: props.guardianNotices,
     streamSegments: props.streamSegments,
-    stream: props.stream ?? null,
+    get stream() {
+      return props.stream ?? null;
+    },
     reasoning,
     showReasoning,
     streamStartedAt: props.streamStartedAt,
@@ -137,7 +137,11 @@ export function projectChatTranscript(
           }
         : undefined,
   } satisfies Parameters<typeof buildCachedChatItems>[0];
-  const chatItems = buildCachedChatItems(chatItemsInput);
+  const { snapshot, live, resolveLiveStream } = createTranscriptStreamSource(
+    chatItemsInput,
+    searchFiltering,
+  );
+  const chatItems = snapshot.items;
   const {
     workingIndicator,
     activityRunId,
@@ -262,6 +266,7 @@ export function projectChatTranscript(
   const recapForGroup = (key: string) =>
     recapAttached && key === tailStatusOwner?.key ? (turnRecap ?? undefined) : undefined;
   const sharedMessageRenderOptions = {
+    resolveLiveStream,
     presented,
     onReply: props.onSetReply
       ? (target) => state.transcriptRenderContext.onSetReply?.(target)
@@ -279,6 +284,7 @@ export function projectChatTranscript(
     onOpenWorkspaceFile: props.onOpenWorkspaceFile,
     onPermissionRetry: props.onPermissionRetry,
     mediaOwner: props.mediaOwner,
+    mediaReadAllowed: props.mediaReadAllowed,
     resourceBasePath: props.resourceBasePath,
     mediaPolicyKey,
     connectionEpoch: props.connectionEpoch,
@@ -296,12 +302,9 @@ export function projectChatTranscript(
     showAssistantAvatar: avatarPlacement === "gutter",
     bubbleMode: props.chatBubbleMode === true && !searchFiltering,
   } satisfies StreamGroupOptions;
-  // Only one bubble owns live animation; actionable waits and child work take precedence.
+  // Actionable waits take precedence over the active tool bubble.
   const bubbleActivityGroupKey =
-    props.showToolCalls &&
-    !props.waitingApproval &&
-    props.retryAt === undefined &&
-    !subagents.activity.length
+    props.showToolCalls && !props.waitingApproval && props.retryAt === undefined && !subagents.wait
       ? runningActivityGroupKey
       : undefined;
   const streamGroupOptions = {
@@ -312,17 +315,13 @@ export function projectChatTranscript(
     startupLabel: props.startupLabel,
     retryAt: props.retryAt,
     waitingApproval: props.waitingApproval,
-    waitingSubagents: subagents.wait ?? undefined,
-    runningSubagents: subagents.running,
-    subagentActivity: subagents.activity.length
+    waitingSubagents: subagents.wait
       ? {
-          rows: subagents.activity,
-          presented,
-          turnStartedAt: subagents.wait ? workingIndicator?.request?.askedAt : undefined,
-          onOpenSubagent: props.onOpenSubagent,
-          onOpenSession: props.onOpenSession,
+          ...subagents.wait,
+          startedAt: workingIndicator?.request?.askedAt ?? subagents.wait.startedAt,
         }
       : undefined,
+    runningSubagents: subagents.running,
     onOpenSubagents: subagents.listed ? props.onOpenSubagents : undefined,
     runOutputTokens,
     questionPrompts,
@@ -428,8 +427,96 @@ export function projectChatTranscript(
       : "";
     return `${continuationKey}|${statusKey}|${searchFiltering ? "search-result" : ""}`;
   };
+  // Deferred palettes apply leaf branding after the preference snapshot.
+  const appliedBranding = currentThemeBranding();
+  trackTranscriptRenderDependencies(state, [
+    locale,
+    props.branding?.mascot,
+    props.branding?.brandIcon,
+    props.branding?.workingIndicator,
+    props.branding?.avatarHat,
+    props.branding?.artwork,
+    props.branding?.workingPhrases,
+    appliedBranding.mascot,
+    appliedBranding.brandIcon,
+    appliedBranding.workingIndicator,
+    appliedBranding.artwork,
+    appliedBranding.avatarHat,
+    expandedToolCards,
+    getExpansionStateVersion(expandedToolCards),
+    expandedUserMessages,
+    getExpansionStateVersion(expandedUserMessages),
+    expandedAssistantMessages,
+    getExpansionStateVersion(expandedAssistantMessages),
+    // The host minute poll requests an update; this key crosses row guard() memoization.
+    Math.floor(Date.now() / 60_000),
+    props.latestBrowserTabs,
+    props.sessionKey,
+    // Invalidate settled rows when spawn metadata arrives, not on activity/title patches.
+    avatarPlacement,
+    props.boardProvider,
+    props.boardProvider?.canPinWidgets,
+    props.boardProvider?.canPinMcpApps,
+    props.fullMessageAgentId,
+    Boolean(props.loadFullAssistantMessage),
+    showReasoning,
+    props.showToolCalls,
+    props.chatBubbleMode,
+    Boolean(props.runActive),
+    activityRunId,
+    activityGroupKey,
+    Boolean(props.runWorking),
+    Boolean(props.runFinalizing),
+    props.startupLabel,
+    props.retryAt,
+    Boolean(props.waitingApproval),
+    props.questionPrompts,
+    state.asyncQuestionRevision,
+    props.asyncQuestions?.historyKey,
+    Boolean(props.autoExpandToolCalls),
+    props.assistantName,
+    assistantIdentity.avatar,
+    assistantIdentity.textAvatar,
+    props.currentAgentId,
+    props.agents,
+    props.senderAgentAvatars,
+    props.mainKey,
+    props.userId,
+    props.userName,
+    showOwnSenderName,
+    props.userAvatar,
+    ...channelSenderAvatarMemoKey(props.channelAvatar),
+    props.resourceBasePath,
+    props.basePath,
+    props.sessionPublicOrigin,
+    mediaPolicyKey,
+    props.assistantAttachmentAuthToken,
+    props.mediaOwner,
+    props.mediaReadAllowed,
+    props.connectionEpoch,
+    props.canvasPluginSurfaceUrl,
+    props.embedSandboxMode ?? "scripts",
+    props.allowExternalEmbedUrls ?? false,
+    Boolean(props.fetchLinkFavicon),
+    props.pluginToolIcons,
+    threadContextWindow,
+    Boolean(props.onSetReply),
+    props.messageReactions,
+    Boolean(props.onReact),
+    Boolean(props.asyncQuestions?.submit),
+    Boolean(props.onRetryQueuedMessage),
+    props.connected,
+    Boolean(props.onDiscardQueuedMessage),
+    props.queuedMessageAction?.id,
+    props.queuedMessageAction?.label,
+    props.queuedMessageAction?.onAction,
+    props.queuedMessageAction?.onDiscard,
+    props.replyMessageAccess?.revision ?? 0,
+    props.replyMessageAccess?.navigationId ?? "",
+    turnRecap === null ? "" : `${turnRecap.runtimeMs}:${turnRecap.outputTokens ?? ""}`,
+  ]);
   const renderItem = guardChatRenderItems(
-    state,
+    state.transcriptRenderDependencies,
     (item) => {
       const groups = chatItemGroups(item);
       const hasTools = groups.some((group) =>
@@ -440,10 +527,11 @@ export function projectChatTranscript(
         groups.some((group) => group.messages.some(({ message }) => readAsyncQuestions(message)));
       return [
         liveStatusSignature(item),
+        item.key === liveItem?.key ? resolveLiveStream : undefined,
         ...transcriptReplyDependencies(item, loadedReplySources),
         // Durable drafts can restore the same map under a new callback generation.
         hasQuestions ? asyncQuestions.drafts : undefined,
-        hasQuestions ? state.asyncQuestionGeneration : undefined,
+        hasQuestions ? asyncQuestionGeneration : undefined,
         // Tool plugins own foreground activity; launch cards also read the child roster.
         hasTools ? presented : undefined,
         hasTools ? subagents.rowsKey : undefined,
@@ -470,6 +558,7 @@ export function projectChatTranscript(
           item,
           options: {
             expanded: workExpanded,
+            mediaReadAllowed: props.mediaReadAllowed,
             bubbleMode: props.chatBubbleMode === true && !searchFiltering,
             browserTabPreviews: workPreviews.get(item.key),
             onToggle: () => toggleToolCardExpanded(item.key, workExpanded),
@@ -551,112 +640,8 @@ export function projectChatTranscript(
       overflow: props.typingOverflow,
     });
   }
-  const baseRows = projectTranscriptRows(rows, workPreviews, contentRows);
-  const delegation = searchFiltering
-    ? new Map()
-    : projectDelegatedTasks(
-        transcriptItems,
-        props.subagentSessions,
-        (props.swarm ? resolveChatSwarmParent(props.swarm) : props.selectedSession)?.swarm,
-        props.messages,
-      );
-  const delegationRows = projectDelegationRows(baseRows, delegation, props);
-  const transcriptRows = delegationRows.rows;
-  // Deferred palettes apply leaf branding after the preference snapshot.
-  const appliedBranding = currentThemeBranding();
-  trackTranscriptRenderDependencies(state, [
-    locale,
-    props.branding?.mascot,
-    props.branding?.brandIcon,
-    props.branding?.workingIndicator,
-    props.branding?.avatarHat,
-    props.branding?.artwork,
-    props.branding?.workingPhrases,
-    appliedBranding.mascot,
-    appliedBranding.brandIcon,
-    appliedBranding.workingIndicator,
-    appliedBranding.artwork,
-    appliedBranding.avatarHat,
-    expandedToolCards,
-    getExpansionStateVersion(expandedToolCards),
-    expandedUserMessages,
-    getExpansionStateVersion(expandedUserMessages),
-    expandedAssistantMessages,
-    getExpansionStateVersion(expandedAssistantMessages),
-    // The host minute poll requests an update; this key crosses row guard() memoization.
-    Math.floor(Date.now() / 60_000),
-    props.latestBrowserTabs,
-    props.sessionKey,
-    // Invalidate settled rows when spawn metadata arrives, not on activity/title patches.
-    avatarPlacement,
-    props.boardProvider,
-    props.boardProvider?.canPinWidgets,
-    props.boardProvider?.canPinMcpApps,
-    props.fullMessageAgentId,
-    Boolean(props.loadFullAssistantMessage),
-    showReasoning,
-    props.showToolCalls,
-    props.chatBubbleMode,
-    Boolean(props.runActive),
-    activityRunId,
-    activityGroupKey,
-    Boolean(props.runWorking),
-    Boolean(props.runFinalizing),
-    props.startupLabel,
-    props.retryAt,
-    Boolean(props.waitingApproval),
-    props.questionPrompts,
-    state.asyncQuestionRevision,
-    props.asyncQuestions?.historyKey,
-    Boolean(props.autoExpandToolCalls),
-    props.assistantName,
-    assistantIdentity.avatar,
-    assistantIdentity.textAvatar,
-    props.currentAgentId,
-    props.agents,
-    props.senderAgentAvatars,
-    props.mainKey,
-    props.userId,
-    props.userName,
-    showOwnSenderName,
-    props.userAvatar,
-    ...channelSenderAvatarMemoKey(props.channelAvatar),
-    props.resourceBasePath,
-    props.basePath,
-    props.sessionPublicOrigin,
-    mediaPolicyKey,
-    props.assistantAttachmentAuthToken,
-    props.mediaOwner,
-    props.connectionEpoch,
-    props.canvasPluginSurfaceUrl,
-    props.embedSandboxMode ?? "scripts",
-    props.allowExternalEmbedUrls ?? false,
-    Boolean(props.fetchLinkFavicon),
-    props.pluginToolIcons,
-    threadContextWindow,
-    Boolean(props.onSetReply),
-    props.messageReactions,
-    Boolean(props.onReact),
-    Boolean(props.asyncQuestions?.submit),
-    Boolean(props.onRetryQueuedMessage),
-    props.connected,
-    Boolean(props.onDiscardQueuedMessage),
-    props.queuedMessageAction?.id,
-    props.queuedMessageAction?.label,
-    props.queuedMessageAction?.onAction,
-    props.queuedMessageAction?.onDiscard,
-    props.replyMessageAccess?.revision ?? 0,
-    props.replyMessageAccess?.navigationId ?? "",
-    turnRecap === null ? "" : `${turnRecap.runtimeMs}:${turnRecap.outputTokens ?? ""}`,
-  ]);
-  const unfilteredItems = () =>
-    buildCachedChatItems(
-      { ...chatItemsInput, searchOpen: false, searchQuery: "", messageRecovery: undefined },
-      "unfiltered",
-    );
-  state.transcriptRenderContext.turnVideoMessages = projectTurnVideoMessages(
-    searchFiltering ? unfilteredItems() : chatItems,
-  );
+  const transcriptRows = projectTranscriptRows(rows, workPreviews, contentRows);
+  state.transcriptRenderContext.turnVideoMessages = snapshot.turnVideoMessages;
   state.transcriptRenderContext.onSetReply = props.onSetReply;
   state.transcriptRenderContext.onOpenReply = (replyToId) => {
     // Search removes rows from the index, not from loaded history. Resolve the
@@ -703,7 +688,13 @@ export function projectChatTranscript(
     isDirectThread,
     positionIndex: showLoadingSkeleton
       ? { markers: [], markerIdsByMessageId: new Map() }
-      : positionIndex,
+      : {
+          ...positionIndex,
+          resolveLiveMessage: (message: unknown) =>
+            message === transcriptChain.live?.message
+              ? (live().prepared?.message ?? message)
+              : message,
+        },
     isEmpty,
     showLoadingSkeleton,
     searchOpen: search.open,
@@ -713,9 +704,7 @@ export function projectChatTranscript(
         (row) =>
           row.kind === "item"
             ? renderItem(row.key === liveItem?.key ? liveItem : row.item)
-            : (delegationRows.content.get(row.key) ??
-              contentRows.find((content) => content.key === row.key)?.content ??
-              row.content),
+            : (contentRows.find((content) => content.key === row.key)?.content ?? row.content),
         latestTranscriptAnnouncement(collapsedItems, liveItem),
         props.announceTranscript !== false && !search.open && !props.loading,
         overlay,
