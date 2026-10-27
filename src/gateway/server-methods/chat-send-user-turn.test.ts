@@ -14,10 +14,12 @@ import { resolveSessionResetCommand } from "../../auto-reply/reply/session-reset
 import type { MsgContext } from "../../auto-reply/templating.js";
 import { resolveStateDir } from "../../config/paths.js";
 import { setRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
+import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import {
   listSessionParticipantsReadOnly,
   upsertSessionEntryCore,
 } from "../../config/sessions/session-accessor.js";
+import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { InputProvenance } from "../../sessions/input-provenance.js";
 import { recordAcceptedSessionParticipantInput } from "../../sessions/session-participant-input-recording.js";
@@ -81,11 +83,13 @@ async function acceptWebchatAuthor(params: {
   profileId: string;
   provenance?: InputProvenance;
   accept: "persist" | "stage";
+  sessionKey?: string;
+  cfg?: { session: { threadBindings: { enabled: true } } };
 }) {
   const transcript = createSqliteTranscriptTarget({
     dir: params.directory,
     sessionId: "session-b",
-    sessionKey: "agent:main:shared",
+    sessionKey: params.sessionKey ?? "agent:main:shared",
   });
   const scope = {
     agentId: "main",
@@ -115,6 +119,7 @@ async function acceptWebchatAuthor(params: {
     now: 1,
     resolvedSessionModel: { provider: "openai", model: "gpt-test" },
     sessionTarget: { storePath: transcript.storePath, storeKey: transcript.sessionKey },
+    ...(params.cfg ? { cfg: params.cfg } : {}),
   };
   const request = {
     chatSendReceivedAtMs: 1,
@@ -137,7 +142,11 @@ async function acceptWebchatAuthor(params: {
   const admission = {
     admittedSessionId: transcript.sessionId,
     acquireInputActor: async () => undefined,
-    originatingRoute: { originatingChannel: "webchat" as const, explicitDeliverRoute: false },
+    originatingRoute: {
+      originatingChannel: "webchat" as const,
+      originatingTo: transcript.sessionKey,
+      explicitDeliverRoute: false,
+    },
     sourceRef: {
       input: {
         sourceSessionId: transcript.sessionId,
@@ -267,8 +276,8 @@ describe("prepareChatSendUserTurn", () => {
           kind === "profile" || kind === "profileless" || kind === "system",
         );
         prepareChannelParticipantObservation(prepared.ctx);
-        recordAcceptedSessionParticipantInput({ ...prepared.ctx }, target);
-        recordAcceptedSessionParticipantInput(prepared.ctx, target);
+        void recordAcceptedSessionParticipantInput({ ...prepared.ctx }, target);
+        void recordAcceptedSessionParticipantInput(prepared.ctx, target);
         await waitForSessionParticipantRecording(target);
         const identity =
           kind === "profile"
@@ -716,7 +725,7 @@ describe("prepareChatSendUserTurn", () => {
         },
       ];
       expect(accepted.readParticipants()).toEqual(row);
-      recordAcceptedSessionParticipantInput(accepted.prepared.ctx, accepted.scope);
+      void recordAcceptedSessionParticipantInput(accepted.prepared.ctx, accepted.scope);
       await waitForSessionParticipantRecording(accepted.scope);
       expect(accepted.readParticipants()).toEqual(row);
     });
@@ -740,6 +749,52 @@ describe("prepareChatSendUserTurn", () => {
           lastPromptedAt: 1,
         },
       ]);
+    });
+  });
+
+  it("records a bound webchat author on the ACP session, not the dashboard session", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      setRuntimeConfigSnapshot({});
+      const dashboardKey = "agent:main:dashboard:11111111-1111-4111-8111-111111111111";
+      const acpKey = "agent:claude:acp:22222222-2222-4222-8222-222222222222";
+      await getSessionBindingService().bind({
+        targetSessionKey: acpKey,
+        targetKind: "session",
+        placement: "current",
+        conversation: { channel: "webchat", accountId: "default", conversationId: dashboardKey },
+      });
+      const boundScope = {
+        agentId: "claude",
+        env: state.env,
+        sessionKey: acpKey,
+        storePath: resolveSessionStorePathCore(undefined, { agentId: "claude" }),
+      };
+      await upsertSessionEntryCore(boundScope, {
+        sessionId: "22222222-2222-4222-8222-222222222222",
+        updatedAt: 1,
+      });
+      const profile = ensureProfileForEmail("bound-b@example.test", { env: state.env });
+      const accepted = await acceptWebchatAuthor({
+        accept: "persist",
+        cfg: { session: { threadBindings: { enabled: true } } },
+        directory: state.statePath("accepted-author-bound"),
+        env: state.env,
+        profileId: profile.id,
+        sessionKey: dashboardKey,
+      });
+      const row = [
+        {
+          identity: { type: "profile" as const, id: profile.id },
+          contributionCount: 1,
+          firstPromptedAt: 1,
+          lastPromptedAt: 1,
+        },
+      ];
+      expect(accepted.readParticipants()).toBeUndefined();
+      expect(listSessionParticipantsReadOnly(boundScope).get(acpKey)).toEqual(row);
+      void recordAcceptedSessionParticipantInput(accepted.prepared.ctx, boundScope);
+      await waitForSessionParticipantRecording(boundScope);
+      expect(listSessionParticipantsReadOnly(boundScope).get(acpKey)).toEqual(row);
     });
   });
 });

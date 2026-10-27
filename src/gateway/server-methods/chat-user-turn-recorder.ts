@@ -9,9 +9,11 @@ import {
 import { captureRequesterOrigin } from "../../agents/requester-origin.js";
 import { createRestartRecoveryRequesterSource } from "../../agents/requester-run-recovery-source.js";
 import { resolveSessionSubmittedModelRef } from "../../agents/session-model-ref.js";
+import { resolveConversationBindingContextFromMessage } from "../../auto-reply/reply/conversation-binding-input.js";
 import type { InternalGetReplyOptions } from "../../auto-reply/reply/get-reply.types.js";
 import { normalizeMessageClientSources } from "../../chat/message-client-source.js";
 import { hasSessionActiveAutoModelFallback } from "../../config/sessions/model-override-provenance.js";
+import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import { bindUserTurnInputActor } from "../../config/sessions/session-input-actor.js";
 import {
   composeSessionSourceAssertion,
@@ -19,10 +21,15 @@ import {
   type SessionSourceAssertion,
 } from "../../config/sessions/session-source-authority.js";
 import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline.js";
+import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
+import { isPluginOwnedSessionBindingRecord } from "../../plugins/conversation-binding-metadata.js";
+import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { isProgressCardRefreshInputProvenance } from "../../sessions/input-provenance.js";
 import { getRpcSourceIdentity } from "../../sessions/session-controller.rpc-sources.js";
+import { isAcpSessionKey } from "../../sessions/session-key-utils.js";
 import { recordAcceptedSessionParticipantInput } from "../../sessions/session-participant-input-recording.js";
 import type { SessionParticipantInputContext } from "../../sessions/session-participant-input.js";
+import { trackSessionParticipantRecording } from "../../sessions/session-participant-recording.js";
 import {
   buildRunUserTurnIdempotencyKey,
   createUserTurnTranscriptRecorder,
@@ -227,17 +234,60 @@ export function createGatewayChatUserTurnController(params: {
       })
     : undefined;
   let acceptedParticipantContext: SessionParticipantInputContext | undefined;
+  const fallbackParticipantTarget = {
+    agentId: session.agentId,
+    sessionKey: session.sessionKey,
+    storePath: session.storePath,
+  };
+  const resolveAcceptedParticipantTarget = async (ctx: SessionParticipantInputContext) => {
+    const cfg = session.cfg;
+    if (!cfg) {
+      return fallbackParticipantTarget;
+    }
+    try {
+      const conversation = resolveConversationBindingContextFromMessage({ cfg, ctx });
+      const binding = conversation
+        ? await getSessionBindingService().resolveByConversationAsync(conversation)
+        : null;
+      const targetSessionKey = binding?.targetSessionKey.trim();
+      if (
+        !binding ||
+        binding.targetKind !== "session" ||
+        !targetSessionKey ||
+        targetSessionKey === fallbackParticipantTarget.sessionKey ||
+        !isAcpSessionKey(targetSessionKey) ||
+        isPluginOwnedSessionBindingRecord(binding)
+      ) {
+        return fallbackParticipantTarget;
+      }
+      const agentId = resolveAgentIdFromSessionKey(targetSessionKey);
+      return {
+        agentId,
+        sessionKey: targetSessionKey,
+        storePath: resolveSessionStorePathCore(cfg.session?.store, { agentId }),
+      };
+    } catch (error) {
+      params.warn(`failed to resolve bound session participant: ${formatForLog(error)}`);
+      return fallbackParticipantTarget;
+    }
+  };
   const recordVisibleAcceptedParticipant = (message: PersistedUserTurnMessage | undefined) => {
-    if (!acceptedParticipantContext || !isVisibleExternalUserTurn(message)) {
+    const participantContext = acceptedParticipantContext;
+    if (!participantContext || !isVisibleExternalUserTurn(message)) {
       return;
     }
-    recordAcceptedSessionParticipantInput(acceptedParticipantContext, {
-      agentId: session.agentId,
-      sessionKey: session.sessionKey,
-      storePath: session.storePath,
-      onError: (error) =>
-        params.warn(`failed to record session participant: ${formatForLog(error)}`),
-    });
+    // Binding lookup stays off the accept path. Waiters join it before the write is registered.
+    const work = (async () => {
+      const target = await resolveAcceptedParticipantTarget(participantContext);
+      await Promise.allSettled(
+        recordAcceptedSessionParticipantInput(participantContext, {
+          ...target,
+          onError: (error) =>
+            params.warn(`failed to record session participant: ${formatForLog(error)}`),
+        }),
+      );
+    })();
+    trackSessionParticipantRecording(fallbackParticipantTarget, work);
   };
   const recorder: UserTurnTranscriptRecorder = createUserTurnTranscriptRecorder({
     onMessagePersisted: params.onMessagePersisted,
