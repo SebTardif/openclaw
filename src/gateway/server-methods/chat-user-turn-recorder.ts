@@ -21,6 +21,8 @@ import {
 import { measureDiagnosticsTimelineSpan } from "../../infra/diagnostics-timeline.js";
 import { isProgressCardRefreshInputProvenance } from "../../sessions/input-provenance.js";
 import { getRpcSourceIdentity } from "../../sessions/session-controller.rpc-sources.js";
+import { recordAcceptedSessionParticipantInput } from "../../sessions/session-participant-input-recording.js";
+import type { SessionParticipantInputContext } from "../../sessions/session-participant-input.js";
 import {
   buildRunUserTurnIdempotencyKey,
   createUserTurnTranscriptRecorder,
@@ -73,7 +75,21 @@ type GatewayChatUserTurnController = {
     | "recordedSessionActivity"
   >;
   setInputPromise: (input: Promise<UserTurnInput>) => void;
+  bindAcceptedSessionParticipant: (ctx: SessionParticipantInputContext) => void;
 };
+
+/** Stage does not notify, so it uses the same visibility gate as original-input commit. */
+function isVisibleExternalUserTurn(message: PersistedUserTurnMessage | undefined): boolean {
+  const metadata = message?.["__openclaw"];
+  return (
+    message !== undefined &&
+    message.display !== false &&
+    message.excludeFromContext !== true &&
+    (message.provenance === undefined || message.provenance.kind === "external_user") &&
+    metadata?.lateMedia !== true &&
+    metadata?.beforeAgentRunBlocked === undefined
+  );
+}
 
 export function createGatewayChatUserTurnController(params: {
   admission: AdmittedChatSend;
@@ -210,6 +226,19 @@ export function createGatewayChatUserTurnController(params: {
         prepareSessionSourceScope: prepareWorkerGoalSource,
       })
     : undefined;
+  let acceptedParticipantContext: SessionParticipantInputContext | undefined;
+  const recordVisibleAcceptedParticipant = (message: PersistedUserTurnMessage | undefined) => {
+    if (!acceptedParticipantContext || !isVisibleExternalUserTurn(message)) {
+      return;
+    }
+    recordAcceptedSessionParticipantInput(acceptedParticipantContext, {
+      agentId: session.agentId,
+      sessionKey: session.sessionKey,
+      storePath: session.storePath,
+      onError: (error) =>
+        params.warn(`failed to record session participant: ${formatForLog(error)}`),
+    });
+  };
   const recorder: UserTurnTranscriptRecorder = createUserTurnTranscriptRecorder({
     onMessagePersisted: params.onMessagePersisted,
     ...(recoveredInput ? { message: recoveredInput.target.message } : {}),
@@ -297,6 +326,56 @@ export function createGatewayChatUserTurnController(params: {
         })
       : {}),
     errorContext: "gateway chat user turn transcript",
+    onOriginalInputCommitted: ({ message, anchor }: UserTurnOriginalInputCommit) => {
+      recordVisibleAcceptedParticipant(message);
+      if (!selectedMentions || !senderProfileId || !mentionInbox) {
+        return;
+      }
+      const stored = message["__openclaw"]?.humanMentions;
+      const text =
+        extractTextFromChatContent(message.content, {
+          joinWith: "\n",
+          normalizeText: (value) => value,
+        }) ?? "";
+      const retained = recoveredInput
+        ? selectedMentions
+        : selectedMentions.filter(
+            (mention) =>
+              Array.isArray(stored) &&
+              stored.some((value) => {
+                const span = asOptionalRecord(value);
+                return (
+                  span?.profileId === mention.profileId &&
+                  span.start === mention.start &&
+                  span.end === mention.end &&
+                  text.slice(mention.start, mention.end) ===
+                    request.rawMessage.slice(mention.start, mention.end)
+                );
+              }),
+          );
+      if (!retained.length) {
+        params.warn(
+          "Human mentions skipped because the committed text no longer contains the selected tokens.",
+        );
+        return;
+      }
+      mentionCommit = mentionInbox.recordCommittedInputAsync({
+        sourceId,
+        committedSource: {
+          generation: anchor.generation,
+          sequence: anchor.rawSeq,
+          timestamp: message.timestamp,
+        },
+        agentId: anchor.agentId,
+        sessionKey: session.sessionKey,
+        sessionId: anchor.sessionId,
+        messageId: anchor.entryId,
+        senderProfileId,
+        recipientProfileIds: retained.map((mention) => mention.profileId),
+        excerpt: text,
+      });
+      void mentionCommit.catch(onPersistenceError);
+    },
     assertOriginalInputCommit: composeSessionSourceAssertion([
       params.assertOriginalInputCommit,
       admission.operatorAuthority?.assertCurrent,
@@ -333,58 +412,20 @@ export function createGatewayChatUserTurnController(params: {
       return next;
     },
     onPersistenceError,
-    ...(selectedMentions && senderProfileId && mentionInbox
-      ? {
-          onOriginalInputCommitted: ({ message, anchor }: UserTurnOriginalInputCommit) => {
-            const stored = message["__openclaw"]?.humanMentions;
-            const text =
-              extractTextFromChatContent(message.content, {
-                joinWith: "\n",
-                normalizeText: (value) => value,
-              }) ?? "";
-            const retained = recoveredInput
-              ? selectedMentions
-              : selectedMentions.filter(
-                  (mention) =>
-                    Array.isArray(stored) &&
-                    stored.some((value) => {
-                      const span = asOptionalRecord(value);
-                      return (
-                        span?.profileId === mention.profileId &&
-                        span.start === mention.start &&
-                        span.end === mention.end &&
-                        text.slice(mention.start, mention.end) ===
-                          request.rawMessage.slice(mention.start, mention.end)
-                      );
-                    }),
-                );
-            if (!retained.length) {
-              params.warn(
-                "Human mentions skipped because the committed text no longer contains the selected tokens.",
-              );
-              return;
-            }
-            mentionCommit = mentionInbox.recordCommittedInputAsync({
-              sourceId,
-              committedSource: {
-                generation: anchor.generation,
-                sequence: anchor.rawSeq,
-                timestamp: message.timestamp,
-              },
-              agentId: anchor.agentId,
-              sessionKey: session.sessionKey,
-              sessionId: anchor.sessionId,
-              messageId: anchor.entryId,
-              senderProfileId,
-              recipientProfileIds: retained.map((mention) => mention.profileId),
-              excerpt: text,
-            });
-            void mentionCommit.catch(onPersistenceError);
-          },
-        }
-      : {}),
   });
   bindUserTurnInputActor(recorder, { phase: "acceptInput", acquire: admission.acquireInputActor });
+  // Pending admission is the accept point when reply init never runs. Commit
+  // notifies separately; the recorded flag keeps a single contribution.
+  const stageApproved = recorder.stageApproved;
+  if (stageApproved) {
+    recorder.stageApproved = (options) =>
+      stageApproved(options).then((staged) => {
+        if (staged) {
+          recordVisibleAcceptedParticipant(recorder.getPendingInputMessage?.());
+        }
+        return staged;
+      });
+  }
   const persist: GatewayChatUserTurnController["persist"] = async (options) => {
     if (options?.contextFreeCommand === true && !recorder.hasPersisted()) {
       contextFreeCommand = true;
@@ -437,6 +478,9 @@ export function createGatewayChatUserTurnController(params: {
           ? { expectedExistingSessionId: session.entry.sessionId }
           : {}),
     }),
+    bindAcceptedSessionParticipant: (ctx) => {
+      acceptedParticipantContext = ctx;
+    },
     setInputPromise: (input) => {
       const previousInputPromise = inputPromise;
       inputPromise = Promise.all([previousInputPromise, input]).then(([previous, next]) => ({
