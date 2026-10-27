@@ -26,6 +26,7 @@ import { recordAcceptedSessionParticipantInput } from "../../sessions/session-pa
 import {
   isSessionPersonalBootstrapTurn,
   prepareChannelParticipantObservation,
+  sessionParticipantInput,
 } from "../../sessions/session-participant-input.js";
 import { waitForSessionParticipantRecording } from "../../sessions/session-participant-recording.js";
 import { buildPersistedUserTurnMessage } from "../../sessions/user-turn-transcript.js";
@@ -795,6 +796,62 @@ describe("prepareChatSendUserTurn", () => {
       void recordAcceptedSessionParticipantInput(accepted.prepared.ctx, boundScope);
       await waitForSessionParticipantRecording(boundScope);
       expect(listSessionParticipantsReadOnly(boundScope).get(acpKey)).toEqual(row);
+    });
+  });
+
+  it("leaves the author unrecorded when bound-session lookup fails", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      setRuntimeConfigSnapshot({});
+      const dashboardKey = "agent:main:dashboard:33333333-3333-4333-8333-333333333333";
+      const acpKey = "agent:claude:acp:44444444-4444-4444-8444-444444444444";
+      await getSessionBindingService().bind({
+        targetSessionKey: acpKey,
+        targetKind: "session",
+        placement: "current",
+        conversation: { channel: "webchat", accountId: "default", conversationId: dashboardKey },
+      });
+      const boundScope = {
+        agentId: "claude",
+        env: state.env,
+        sessionKey: acpKey,
+        storePath: resolveSessionStorePathCore(undefined, { agentId: "claude" }),
+      };
+      await upsertSessionEntryCore(boundScope, {
+        sessionId: "44444444-4444-4444-8444-444444444444",
+        updatedAt: 1,
+      });
+      const lookup = vi
+        .spyOn(getSessionBindingService(), "resolveByConversationAsync")
+        .mockRejectedValue(new Error("binding store unavailable"));
+      try {
+        const profile = ensureProfileForEmail("lookup-b@example.test", { env: state.env });
+        const accepted = await acceptWebchatAuthor({
+          accept: "persist",
+          cfg: { session: { threadBindings: { enabled: true } } },
+          directory: state.statePath("accepted-author-lookup-failed"),
+          env: state.env,
+          profileId: profile.id,
+          sessionKey: dashboardKey,
+        });
+        expect(
+          accepted.prepared.ctx[sessionParticipantInput]?.map((input) => input.recorded),
+        ).toEqual([false]);
+        expect(accepted.readParticipants()).toBeUndefined();
+        expect(listSessionParticipantsReadOnly(boundScope).get(acpKey)).toBeUndefined();
+        lookup.mockRestore();
+        void recordAcceptedSessionParticipantInput(accepted.prepared.ctx, boundScope);
+        await waitForSessionParticipantRecording(boundScope);
+        expect(listSessionParticipantsReadOnly(boundScope).get(acpKey)).toEqual([
+          {
+            identity: { type: "profile", id: profile.id },
+            contributionCount: 1,
+            firstPromptedAt: 1,
+            lastPromptedAt: 1,
+          },
+        ]);
+      } finally {
+        lookup.mockRestore();
+      }
     });
   });
 });

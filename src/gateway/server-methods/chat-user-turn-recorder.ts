@@ -270,8 +270,9 @@ export function createGatewayChatUserTurnController(params: {
         storePath: resolveSessionStorePathCore(cfg.session?.store, { agentId }),
       };
     } catch (error) {
+      // A failed lookup is not "unbound". Leave the fact for the dispatch owner.
       params.warn(`failed to resolve bound session participant: ${formatForLog(error)}`);
-      return fallbackParticipantTarget;
+      return null;
     }
   };
   const recordVisibleAcceptedParticipant = (message: PersistedUserTurnMessage | undefined) => {
@@ -282,6 +283,9 @@ export function createGatewayChatUserTurnController(params: {
     // Binding lookup stays off the accept path. Waiters join it before the write is registered.
     const work = (async () => {
       const target = await resolveAcceptedParticipantTarget(participantContext);
+      if (!target) {
+        return;
+      }
       await Promise.allSettled(
         recordAcceptedSessionParticipantInput(participantContext, {
           ...target,
