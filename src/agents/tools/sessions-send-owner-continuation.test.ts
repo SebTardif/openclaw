@@ -105,7 +105,7 @@ vi.mock("./sessions-send-tool.delivery.js", () => ({
   },
 }));
 vi.mock("../../sessions/session-participant-recording.js", () => ({
-  recordSessionParticipantBestEffort: () => Promise.resolve(null),
+  recordSessionParticipantBestEffort: () => {},
 }));
 
 const SESSION = "agent:main:requester";

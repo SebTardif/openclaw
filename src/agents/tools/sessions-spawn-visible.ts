@@ -672,7 +672,7 @@ export async function maybeSpawnVisibleSession(params: {
         runId,
       };
     }
-    recordSessionParticipantBestEffort({
+    void recordSessionParticipantBestEffort({
       promptedAt,
       identity: { type: "agent", id: requesterAgentId },
       agentId: targetAgentId,
