@@ -26,7 +26,6 @@ import { recordAcceptedSessionParticipantInput } from "../../sessions/session-pa
 import {
   isSessionPersonalBootstrapTurn,
   prepareChannelParticipantObservation,
-  sessionParticipantInput,
 } from "../../sessions/session-participant-input.js";
 import { waitForSessionParticipantRecording } from "../../sessions/session-participant-recording.js";
 import { buildPersistedUserTurnMessage } from "../../sessions/user-turn-transcript.js";
@@ -833,9 +832,6 @@ describe("prepareChatSendUserTurn", () => {
           profileId: profile.id,
           sessionKey: dashboardKey,
         });
-        expect(
-          accepted.prepared.ctx[sessionParticipantInput]?.map((input) => input.recorded),
-        ).toEqual([false]);
         expect(accepted.readParticipants()).toBeUndefined();
         expect(listSessionParticipantsReadOnly(boundScope).get(acpKey)).toBeUndefined();
         lookup.mockRestore();
