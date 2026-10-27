@@ -14,11 +14,13 @@ export function recordAcceptedSessionParticipantInput(
     if (!input.recorded) {
       input.recorded = true;
       writes.push(
-        recordSessionParticipantBestEffort({
-          ...target,
-          identity: input.identity,
-          promptedAt: input.promptedAt,
-        }).then((result) => {
+        Promise.resolve(
+          recordSessionParticipantBestEffort({
+            ...target,
+            identity: input.identity,
+            promptedAt: input.promptedAt,
+          }),
+        ).then((result) => {
           if (result !== "inserted" && result !== "updated") {
             input.recorded = false;
           }
