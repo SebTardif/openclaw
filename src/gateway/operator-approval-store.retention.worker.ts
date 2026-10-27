@@ -1,5 +1,5 @@
-import type { DatabaseSync } from "node:sqlite";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import type { EngineConnection } from "../infra/sql-connection.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import type { OperatorApprovalDatabase } from "./operator-approval-store.types.js";
 
@@ -10,7 +10,7 @@ import type { OperatorApprovalDatabase } from "./operator-approval-store.types.j
  * in the future. A missing table means no grant can exist.
  */
 export function deleteTerminalOperatorApprovalsPastRetention(params: {
-  db: DatabaseSync;
+  db: EngineConnection;
   cutoffMs: number;
   nowMs: number;
 }): string[] {
