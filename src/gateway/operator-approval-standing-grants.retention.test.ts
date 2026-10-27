@@ -130,14 +130,12 @@ async function mintAgedGrant(expiresAtMs: number | null) {
     job: loadedJob,
     agentId: "main",
     startedAtMs: NOW_MS,
-    observed: undefined,
   });
   const handle = runOpenClawStateWriteTransaction(
     ({ db }) =>
       claimCronRunReceiptInDatabaseForTest({
         database: db,
         prepared,
-        resolveAgentId: (current) => current.agentId ?? "main",
       }),
     options,
   );
