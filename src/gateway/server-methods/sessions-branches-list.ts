@@ -4,6 +4,7 @@ import {
   type SessionsBranchesListParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import { listSessionBranches } from "../../config/sessions/session-accessor.js";
+import { withSessionActorStorage } from "../../config/sessions/session-actor-storage-acquisition.js";
 import { getSessionActorStorageBinding } from "../../config/sessions/session-actor-storage-binding.js";
 import {
   captureSessionUpstreamLinkReadSource,
@@ -26,17 +27,18 @@ export async function listSessionBranchesForGateway(
     return;
   }
   // Branches depend on transcript/lifecycle state, not a label or activity update during I/O.
-  const read = retainSessionScopedRead(options, sessionKey, requestedAgent.agentId, {
+  const read = await retainSessionScopedRead(options, sessionKey, requestedAgent.agentId, {
     allowMetadataChanges: true,
   });
-  try {
-    await withGatewaySessionEntryReadOnly(
+  const run = () =>
+    withGatewaySessionEntryReadOnly(
       {
         key: sessionKey,
         cfg,
         agentId: requestedAgent.agentId,
         excludeInternalEffects: true,
         projection: "list",
+        prepared: read?.prepared,
       },
       async (current, assertCurrent) => {
         const upstreamLink = current.entry?.sessionId
@@ -90,6 +92,22 @@ export async function listSessionBranchesForGateway(
         respond(true, { branches: result.branches }, undefined);
       },
     );
+  const assertCurrent = () => read?.assertCurrent();
+  try {
+    const handled = await withSessionActorStorage(
+      { sessionKey, agentId: requestedAgent.agentId },
+      {
+        lifetime: { assertCurrent, assertReadable: assertCurrent },
+        authority: { assertCurrent, authorize() {} },
+      },
+      async () => {
+        await run();
+        return true;
+      },
+    );
+    if (!handled) {
+      await run();
+    }
   } finally {
     read?.release();
   }

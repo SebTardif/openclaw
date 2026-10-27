@@ -11,13 +11,11 @@ import {
   bindGatewayContextResolver,
   getGatewayContextResolver,
 } from "../../../plugins/runtime/gateway-request-scope.js";
-import {
-  parseAgentSessionKey,
-  resolveAgentIdFromSessionKey,
-} from "../../../routing/session-key.js";
+import { resolveAgentIdFromSessionKey } from "../../../routing/session-key.js";
 import { emitSessionLifecycleEvent } from "../../../sessions/session-lifecycle-events.js";
 import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.js";
 import { normalizeDeliveryContext } from "../../../utils/delivery-context.shared.js";
+import { createOperatorInputRecoverySource } from "../../operator-run-recovery-source.js";
 import { resolveSubagentRequesterAgentId } from "../../subagent-requester-owner.js";
 import {
   prepareTerminatedCollectorLaunch,
@@ -26,25 +24,21 @@ import {
   updateSwarmCollectorCompletion,
 } from "../swarm/swarm-collector.js";
 import { bindSwarmRunReservation, ownsSwarmRunReservation } from "../swarm/swarm-scheduler.js";
-import {
-  matchesSubagentChildSessionOwner,
-  resolveSubagentChildAgentId,
-} from "./subagent-child-owner-match.js";
+import { resolveSubagentChildAgentId } from "./subagent-child-owner-match.js";
 import { bindSubagentExecRequestOwners } from "./subagent-exec-request-ownership.js";
-import { prepareSubagentRegistrationRows } from "./subagent-registration-rows.js";
 import {
   getCurrentSubagentRunOwner,
   subagentRuns,
   waitForSubagentRetirementPublication,
 } from "./subagent-registry-memory.js";
 import {
-  SubagentRegistryVersionConflictError,
   SubagentRegistryWriteError,
   assertSubagentRegistryWriteSourceCurrent,
   mutateSubagentRuns,
   SubagentRegistryMutationRejectedError,
   waitForPendingSubagentKillClaim,
 } from "./subagent-registry-persistence.js";
+import { resolveSwarmWaitOwnerSessionKeys } from "./subagent-registry-queries.js";
 import { registerRequiredQueuedSubagent } from "./subagent-registry-queued-registration.js";
 import {
   createFailedQueuedRun,
@@ -52,6 +46,7 @@ import {
   type RegisterSubagentRunParams,
 } from "./subagent-registry-run-launch-record.js";
 import { SubagentRecoveryManager } from "./subagent-registry-run-recovery.js";
+import { prepareSubagentRegistrationRows } from "./subagent-registry-state.js";
 import type {
   RegisterSubagentRunOptions,
   SubagentRegistrationScope,
@@ -63,40 +58,8 @@ import {
   getSubagentRunRuntimeKey,
   isSameSubagentRunOwner,
   isSubagentRunGenerationCandidate,
-  latestSubagentRun,
   nextSubagentRunGeneration,
 } from "./subagent-run-generation.js";
-
-function resolveSwarmWaitOwnerSessionKeys(
-  getRunsForChildSession: (
-    childSessionKey: string,
-    childAgentId?: string,
-  ) => Iterable<SubagentRunRecord>,
-  requesterSessionKey: string,
-  requesterAgentId?: string,
-): string[] {
-  const ownerSessionKeys: string[] = [];
-  const visited: Array<{ childSessionKey: string; childAgentId?: string }> = [];
-  let currentSessionKey = requesterSessionKey.trim();
-  let currentAgentId = requesterAgentId;
-  while (
-    currentSessionKey &&
-    !visited.some((entry) =>
-      matchesSubagentChildSessionOwner(entry, currentSessionKey, currentAgentId),
-    )
-  ) {
-    visited.push({ childSessionKey: currentSessionKey, childAgentId: currentAgentId });
-    ownerSessionKeys.push(currentSessionKey);
-    const latestOwner = latestSubagentRun(
-      getRunsForChildSession(currentSessionKey, currentAgentId),
-    );
-    currentSessionKey =
-      latestOwner?.controllerSessionKey?.trim() || latestOwner?.requesterSessionKey.trim() || "";
-    currentAgentId =
-      parseAgentSessionKey(currentSessionKey)?.agentId ?? latestOwner?.requesterAgentId;
-  }
-  return ownerSessionKeys;
-}
 
 export class SubagentLaunchManager extends SubagentRecoveryManager {
   private findRunByIdentity(runId: string): SubagentRunRecord | undefined {
@@ -141,7 +104,7 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
       childAgentId,
     );
     let authority: Awaited<ReturnType<typeof captureOperatorToolGatewayContinuationContext>>;
-    let preparedRows: Map<string, SubagentRunRecord> | undefined;
+    let preparedRows: (() => ReadonlyMap<string, SubagentRunRecord>) | undefined;
     let plannedEntry: SubagentRunRecord | undefined;
     let registered: SubagentRunRecord | undefined;
     let custodyTransferred = false;
@@ -179,7 +142,10 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
     };
     const ownsCleanupSession = () =>
       preparedRows !== undefined &&
-      ![...preparedRows.values(), ...this.options.getChildSessionCandidates(childSessionKey)].some(
+      ![
+        ...preparedRows().values(),
+        ...this.options.getChildSessionCandidates(childSessionKey),
+      ].some(
         (candidate) =>
           candidate.runId !== registered?.runId &&
           isSubagentRunGenerationCandidate(candidate, childSessionKey, childAgentId),
@@ -253,9 +219,33 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
               settleFailedLaunch,
             }),
       );
-      authority = registerParams.collect
-        ? undefined
-        : await captureOperatorToolGatewayContinuationContext();
+      authority = await captureOperatorToolGatewayContinuationContext();
+      // Direct child turns have no spawning requester turn. Save their own admitted
+      // source before launch so a restart never depends on an absent parent claim.
+      const recoveryTarget =
+        requesterAgentId &&
+        registerParams.completionRequesterSessionId &&
+        registerParams.requesterTurnRunId
+          ? {
+              agentId: requesterAgentId,
+              sessionKey: requesterSessionKey,
+              entry: {
+                sessionId: registerParams.completionRequesterSessionId,
+                lifecycleRevision: registerParams.completionRequesterLifecycleRevision,
+                updatedAt: Date.now(),
+              },
+              sourceRunId: registerParams.requesterTurnRunId,
+            }
+          : {
+              agentId: childAgentId,
+              sessionKey: childSessionKey,
+              entry: { ...registerParams.sessionEntry, updatedAt: Date.now() },
+              sourceRunId: runId,
+            };
+      const operatorRecoverySource = createOperatorInputRecoverySource({
+        ...recoveryTarget,
+        authority: authority?.operatorAuthority,
+      });
       const assertCurrent = () => {
         options.assertCurrent?.();
         authority?.assertCurrent();
@@ -279,13 +269,13 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
         ],
         context,
       );
-      selected ??= preparedRows.get(runId);
+      selected ??= preparedRows().get(runId);
       assertCurrent();
       const isGenerationCandidate = (row: SubagentRunRecord) =>
         isSubagentRunGenerationCandidate(row, childSessionKey, childAgentId);
       const runIds = new Set([
         runId,
-        ...[...preparedRows.values(), ...this.options.getChildSessionCandidates(childSessionKey)]
+        ...[...preparedRows().values(), ...this.options.getChildSessionCandidates(childSessionKey)]
           .filter(isGenerationCandidate)
           .map((row) => row.runId),
       ]);
@@ -343,6 +333,7 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
                   )
                 : undefined,
           });
+          entry.operatorRecoverySource = operatorRecoverySource;
           entry.requesterStorePath =
             previous?.requesterStorePath ??
             resolvePhysicalSessionStorePath(
@@ -367,11 +358,6 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
           return {
             value: entry,
             postimages,
-            registrationCohort: {
-              childSessionKey,
-              childAgentId,
-              runIds: [...rows.values()].filter(isGenerationCandidate).map((row) => row.runId),
-            },
           };
         },
         {
@@ -385,6 +371,10 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
               return;
             }
             registered = entry;
+            bindGatewayContextResolver(entry, gatewayContextResolver);
+            options.retainAdmission?.(
+              this.captureAdmissionRejection(entry, options.admissionSessionEffects),
+            );
             try {
               options.assertPublicationCurrent?.();
               bindSubagentExecRequestOwners(entry, readExecRequestOwners(options), {
@@ -394,12 +384,11 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
                   requesterAgentId,
                 ),
               });
-              if (authority?.operatorAuthority) {
+              if (authority && !registerParams.collect) {
                 subagentRuns.bindCompletionAuthority(entry, authority);
                 custodyTransferred = true;
               }
             } finally {
-              bindGatewayContextResolver(entry, gatewayContextResolver);
               if (!registrationOwnership.superseded) {
                 registrationOwnership.accept(entry);
               }
@@ -472,9 +461,6 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
         );
       }
     } catch (error) {
-      if (error instanceof SubagentRegistryVersionConflictError) {
-        preparedRows = undefined;
-      }
       if (!queuedScope) {
         initialOutcome =
           hasSqliteWorkerOutcomeUnknown(error) ||
@@ -565,7 +551,7 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
             `collector gateway run id already exists: ${nextRunId}`,
           );
         }
-        const entry = structuredClone(current);
+        const entry = { ...current };
         entry.swarmRunId ??= current.runId;
         entry.schedulerSlotId ??= entry.swarmRunId;
         entry.runId = nextRunId;
@@ -659,7 +645,7 @@ export class SubagentLaunchManager extends SubagentRecoveryManager {
           if (current.collectorCompletion) {
             return { value: true };
           }
-          entry = structuredClone(current);
+          entry = { ...current };
           prepareTerminatedCollectorLaunch(
             entry,
             endedAt,

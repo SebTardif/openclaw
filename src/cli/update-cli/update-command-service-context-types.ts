@@ -48,6 +48,8 @@ export type PreManagedServiceStop = ManagedGatewayServiceObservation & {
   running: boolean;
   /** Verified native service process, used only to correlate legacy Gateway locks. */
   servicePid?: number;
+  /** Native enable policy captured before our stop; absence is unknown. */
+  serviceAutoStartEnabled?: boolean;
   serviceControlGroup?: string;
   /** Reporting fact only; membership is rechecked before the native stop. */
   serviceMembershipSourceAbsent?: boolean;
@@ -66,6 +68,7 @@ export type PreManagedServiceStop = ManagedGatewayServiceObservation & {
 };
 
 export type UpdateRestartParams = {
+  originalManagedServiceRuntime?: OriginalManagedServiceRuntime;
   result: UpdateRunResult;
   root: string;
   preManagedServiceStop?: PreManagedServiceStop;
@@ -89,7 +92,7 @@ export type OriginalManagedServiceRuntime = {
     fingerprint: string;
     rebound?: string;
     reboundRuntimePin?: string;
-    runtimePin: DaemonRuntimePinSnapshot;
+    runtimePin: DaemonRuntimePinSnapshot | undefined;
   };
   service: ManagedGatewayServiceObservation;
   packageIdentity: PackageDirectoryIdentity;

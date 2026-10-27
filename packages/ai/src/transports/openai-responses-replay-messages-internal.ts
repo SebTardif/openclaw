@@ -16,13 +16,15 @@ import type {
 } from "openai/resources/responses/responses.js";
 import { getAiTransportHost } from "../host.js";
 import { isImageWithMediaPayload } from "../media-payload.js";
+import { preparedRequestSuffix } from "../provider-options.js";
 import { transformProviderMessages } from "../provider-transcript-transform.js";
 import {
   describeToolResultMediaPlaceholder,
+  extractToolResultBlockText,
   extractToolResultText,
 } from "../providers/tool-result-text.js";
 import { shortHash } from "../utils/hash.js";
-import { stripSystemPromptCacheBoundary } from "../utils/system-prompt-cache-boundary.js";
+import { prepareSystemPrompt } from "../utils/system-prompt-cache-boundary.js";
 import {
   buildOpenAIResponsesCompactionReplayPlan,
   isSafeResponsesReplayItemId,
@@ -39,13 +41,17 @@ import {
 } from "./openai-responses-contracts.js";
 import { supportsNativeOpenAIResponsesEndpoint } from "./openai-responses-endpoint.js";
 import { createResponsesInputReplay } from "./openai-responses-input-replay.js";
-import { resolveReplayableResponsesMessageId } from "./openai-responses-replay.js";
+import {
+  normalizeOpenAIResponsesReasoningReplayItem,
+  resolveReplayableResponsesMessageId,
+} from "./openai-responses-replay.js";
 import {
   buildProviderReplayContext,
   isProviderReplayContext,
   providerReplayContextMatches,
   type ProviderReplayContext,
 } from "./provider-replay-context.js";
+import { buildResponsesInputImage } from "./responses-image-payload-sanitizer.js";
 import { sanitizeTransportPayloadText } from "./transport-stream-shared.js";
 
 function resolveResponsesInstructionRole(model: Model): "developer" | "system" {
@@ -100,23 +106,6 @@ function readOpenAIResponsesReasoningReplayBlockMetadata(
   }
   const value = block[OPENAI_RESPONSES_REASONING_REPLAY_BLOCK_META_KEY];
   return isOpenAIResponsesReasoningReplayMetadata(value) ? value : null;
-}
-
-function normalizeOpenAIResponsesReasoningReplayItem(
-  item: ReplayableResponseReasoningItem,
-  api: Api,
-): ReplayableResponseReasoningItem {
-  if (api === "openai-chatgpt-responses") {
-    return Array.isArray(item.summary) ? item : { ...item, summary: [] };
-  }
-  // Match storage's reasoning privacy shape and order before warm replay too.
-  return {
-    id: item.id,
-    type: "reasoning",
-    summary: [],
-    status: item.status,
-    encrypted_content: item.encrypted_content,
-  };
 }
 
 function prepareOpenAIResponsesReasoningItemForReplay(
@@ -211,13 +200,18 @@ function orderResponsesAsyncToolResults(source: Context["messages"]): Context["m
 
 function parseOpenAIResponsesTextSignature(
   signature: string | undefined,
-): { id?: string; phase?: "commentary" | "final_answer" } | undefined {
+): { id?: string; phase?: "commentary" | "final_answer"; sources?: string } | undefined {
   if (!signature) {
     return undefined;
   }
   if (signature.startsWith("{")) {
     try {
-      const parsed = JSON.parse(signature) as { v?: unknown; id?: unknown; phase?: unknown };
+      const parsed = JSON.parse(signature) as {
+        v?: unknown;
+        id?: unknown;
+        phase?: unknown;
+        sources?: unknown;
+      };
       if (parsed.v === 1) {
         const id = typeof parsed.id === "string" ? parsed.id : undefined;
         const phase =
@@ -226,7 +220,11 @@ function parseOpenAIResponsesTextSignature(
             : undefined;
         // A reasoning-dropped replay keeps the phase but omits the paired id.
         if (id !== undefined || phase !== undefined) {
-          return { id, phase };
+          return {
+            id,
+            phase,
+            ...(typeof parsed.sources === "string" ? { sources: parsed.sources } : {}),
+          };
         }
         return undefined;
       }
@@ -269,7 +267,6 @@ export { createAssistantOutput as createOpenAIResponsesAssistantOutput } from ".
 
 type ConvertResponsesMessagesOptions = {
   includeSystemPrompt?: boolean;
-  replayReasoningItems?: boolean;
   replayResponsesItemIds?: boolean;
   sessionId?: string;
   authProfileId?: string;
@@ -286,7 +283,6 @@ function convertResponsesMessagesWithStyle(
 ): ResponseInput {
   const messages: ResponseInput = [];
   const providerStyle = conversionStyle === "provider";
-  const shouldReplayReasoningItems = options?.replayReasoningItems ?? true;
   const shouldReplayResponsesItemIds = options?.replayResponsesItemIds ?? true;
   const replayContext = buildProviderReplayContext(model, {
     sessionId: options?.sessionId,
@@ -343,7 +339,8 @@ function convertResponsesMessagesWithStyle(
       ? transformProviderMessages(source, model, normalizeToolCallId)
       : getAiTransportHost().transformTransportMessages(source, model, normalizeToolCallId, {
           normalizeSameModelToolCallIds: shouldNormalizeSameModelToolCallIds,
-          preserveUnframedToolResults: replayPlan.preserveUnframedToolResults,
+          preserveUnframedToolResults:
+            replayPlan.preserveUnframedToolResults || preparedRequestSuffix.has(context),
         });
   // Results are durable when jobs finish, but Responses continuation must replay
   // every output fragment before adding results to that response's input suffix.
@@ -356,7 +353,8 @@ function convertResponsesMessagesWithStyle(
       buildResponsesInputMessage(resolveResponsesInstructionRole(model), [
         {
           type: "input_text",
-          text: sanitizeTransportPayloadText(stripSystemPromptCacheBoundary(context.systemPrompt)),
+          text: prepareSystemPrompt(context.systemPrompt, context.preparedSystemPrompt)
+            .instructions,
         },
       ]),
     );
@@ -432,11 +430,7 @@ function convertResponsesMessagesWithStyle(
               msg.content.map((item) =>
                 item.type === "text"
                   ? { type: "input_text", text: sanitizeTransportPayloadText(item.text) }
-                  : {
-                      type: "input_image",
-                      detail: "auto",
-                      image_url: `data:${item.mimeType};base64,${item.data}`,
-                    },
+                  : buildResponsesInputImage(item),
               ) as ResponseInputMessageContentList
             ).filter(
               (item) =>
@@ -463,12 +457,12 @@ function convertResponsesMessagesWithStyle(
       const sourceFragmentId = msg.content.find((block) => block.type === "toolCall")?.id;
       let textFallbackOrdinal = 0;
       let previousReplayItemWasReasoning = false;
+      let seenReplayableReasoning = false;
       const isDifferentModel =
         msg.model !== model.id && msg.provider === model.provider && msg.api === model.api;
       for (const block of msg.content) {
         if (block.type === "thinking") {
           if (
-            shouldReplayReasoningItems &&
             block.thinkingSignature &&
             (providerStyle || block.thinkingSignature.startsWith("{"))
           ) {
@@ -502,6 +496,9 @@ function convertResponsesMessagesWithStyle(
             }
             output.push(replayableReasoningItem as ResponseInputItem);
             previousReplayItemWasReasoning = true;
+            seenReplayableReasoning ||=
+              typeof replayableReasoningItem.id === "string" &&
+              replayableReasoningItem.id.startsWith("rs_");
           }
         } else if (block.type === "text") {
           const textSignature = parseOpenAIResponsesTextSignature(block.textSignature);
@@ -519,13 +516,20 @@ function convertResponsesMessagesWithStyle(
             textFallbackOrdinal += 1;
           }
           msgId = normalizeResponsesReplayItemId(msgId);
+          // Source links are OpenClaw's rendering, not provider output. Replaying the
+          // provider text keeps history equal to the stored response for continuation.
+          const sources = textSignature?.sources;
+          const providerText =
+            sources && block.text.endsWith(sources)
+              ? block.text.slice(0, -sources.length)
+              : block.text;
           const messageItem: ReplayableResponseOutputMessage = {
             type: "message",
             role: "assistant",
             content: [
               {
                 type: "output_text",
-                text: sanitizeTransportPayloadText(block.text),
+                text: sanitizeTransportPayloadText(providerText),
                 annotations: [],
               },
             ],
@@ -539,8 +543,10 @@ function convertResponsesMessagesWithStyle(
           const separatorIndex = block.id.indexOf("|");
           const callId = separatorIndex === -1 ? block.id : block.id.slice(0, separatorIndex);
           const itemIdRaw = separatorIndex === -1 ? undefined : block.id.slice(separatorIndex + 1);
+          // Orphan fc_* ids can be rejected; omit them on the wire without rewriting history.
           const itemId =
-            shouldReplayResponsesItemIds && !(isDifferentModel && itemIdRaw?.startsWith("fc_"))
+            shouldReplayResponsesItemIds &&
+            (!itemIdRaw?.startsWith("fc_") || (seenReplayableReasoning && !isDifferentModel))
               ? itemIdRaw
               : undefined;
           output.push({
@@ -581,28 +587,49 @@ function convertResponsesMessagesWithStyle(
       const mediaPlaceholder = describeToolResultMediaPlaceholder(msg.content);
       const hasImages = msg.content.some(isImageWithMediaPayload);
       const separatorIndex = msg.toolCallId.indexOf("|");
-      const callId =
+      const rawCallId =
         separatorIndex === -1 ? msg.toolCallId : msg.toolCallId.slice(0, separatorIndex);
+      const callId = preparedRequestSuffix.has(context)
+        ? preparedRequestSuffix.toolCallId(
+            context,
+            rawCallId,
+            normalizeToolCallId(rawCallId, model, model),
+          )
+        : rawCallId;
+      let output: string | ResponseFunctionCallOutputItemList = hasText
+        ? textResult
+        : (mediaPlaceholder ?? "(no output)");
+      if (hasImages && model.input.includes("image")) {
+        const parts: ResponseFunctionCallOutputItemList = [];
+        let hasExplicitText = false;
+        for (const item of msg.content) {
+          if (isImageWithMediaPayload(item)) {
+            parts.push(buildResponsesInputImage(item));
+          } else if (hasText && item.type === "text") {
+            const text = extractToolResultBlockText(item);
+            if (text) {
+              const joinedText = `${hasExplicitText ? "\n" : ""}${text}`;
+              hasExplicitText = true;
+              const previous = parts.at(-1);
+              if (previous?.type === "input_text") {
+                previous.text += joinedText;
+              } else {
+                parts.push({ type: "input_text", text: joinedText });
+              }
+            }
+          }
+        }
+        if (hasText && !hasExplicitText) {
+          parts.unshift({ type: "input_text", text: textResult });
+        } else if (!hasText && mediaPlaceholder === "(see attached media)") {
+          parts.unshift({ type: "input_text", text: mediaPlaceholder });
+        }
+        output = parts;
+      }
       messages.push({
         type: "function_call_output",
         call_id: callId,
-        output:
-          hasImages && model.input.includes("image")
-            ? ([
-                ...(hasText
-                  ? [{ type: "input_text", text: textResult }]
-                  : mediaPlaceholder === "(see attached media)"
-                    ? [{ type: "input_text", text: mediaPlaceholder }]
-                    : []),
-                ...msg.content.filter(isImageWithMediaPayload).map((item) => ({
-                  type: "input_image",
-                  detail: "auto",
-                  image_url: `data:${item.mimeType};base64,${item.data}`,
-                })),
-              ] as ResponseFunctionCallOutputItemList)
-            : hasText
-              ? textResult
-              : (mediaPlaceholder ?? "(no output)"),
+        output,
       });
     }
     msgIndex += 1;
@@ -629,14 +656,7 @@ export function convertProviderResponsesMessages<TApi extends Api>(
   model: Model<TApi>,
   context: Context,
   allowedToolCallProviders: ReadonlySet<string>,
-  options?: {
-    includeSystemPrompt?: boolean;
-    replayResponsesItemIds?: boolean;
-    sessionId?: string;
-    authProfileId?: string;
-    replayMode?: OpenAIResponsesReplayMode;
-    retainUserProvenance?: boolean;
-  },
+  options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
   return convertResponsesMessagesWithStyle(
     model,

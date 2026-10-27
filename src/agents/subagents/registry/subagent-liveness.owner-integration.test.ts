@@ -29,6 +29,7 @@ import {
 import { resolveSpawnAdmission } from "../../spawn-plan.js";
 import { maybeWakeRequesterAfterAllChildrenSettled } from "../announce/subagent-announce.requester-settle-wake.js";
 import { blockSubagentCompletionDelivery } from "../completion/subagent-completion-admission.store.js";
+import { withPreparedSessionCapabilityRead } from "../spawn/subagent-session-store.js";
 import {
   activateSwarmRun,
   isSwarmRunWaitingForCapacity,
@@ -124,15 +125,17 @@ it("admits new work at the child cap when finished descendants have suspended de
     });
   }
   const admission = () =>
-    resolveSpawnAdmission({
-      cfg: { agents: { defaults: { subagents: { maxChildrenPerAgent: 5 } } } },
-      requesterSessionKey: parent,
-      requesterAgentId: "main",
-      targetAgentId: "main",
-      configuredAgentIds: ["main"],
-    });
+    withPreparedSessionCapabilityRead(() =>
+      resolveSpawnAdmission({
+        cfg: { agents: { defaults: { subagents: { maxChildrenPerAgent: 5 } } } },
+        requesterSessionKey: parent,
+        requesterAgentId: "main",
+        targetAgentId: "main",
+        configuredAgentIds: ["main"],
+      }),
+    );
 
-  expect(admission().ok).toBe(true);
+  expect((await admission()).ok).toBe(true);
   expect(countActiveRunsForSession(parent)).toBe(0);
   expect(subagentRuns.size).toBe(10);
 
@@ -146,7 +149,7 @@ it("admits new work at the child cap when finished descendants have suspended de
       execution: { status: "running", startedAt: now },
     });
   }
-  expect(admission()).toMatchObject({
+  expect(await admission()).toMatchObject({
     ok: false,
     governingCap: "subagents.maxChildrenPerAgent",
   });
@@ -190,19 +193,33 @@ it("retains quiet admitted execution in listing, admission count, and requester 
     expect(isSubagentRunLive(entry)).toBe(true);
     expect(isSubagentRunLive(updated)).toBe(true);
     expect(isSubagentRunLive({ ...updated })).toBe(false);
+    const displayed = buildSubagentSessionListReadIndex().getDisplaySubagentRun(
+      entry.childSessionKey,
+    );
+    expect(displayed).not.toBe(updated);
+    const serialize = vi.spyOn(JSON, "stringify");
+    const live = Array.from({ length: 100 }, () => isSubagentRunLive(displayed));
+    const serializations = serialize.mock.calls.length;
+    serialize.mockRestore();
+    expect(live.every(Boolean)).toBe(true);
+    expect(serializations).toBe(0);
     expect(sweepStaleRunContexts()).toBe(0);
     await testing.sweepOnceForTests();
     expect(entry.execution.endedAt).toBeUndefined();
     expect(getAgentRunContext(entry.runId)).toBeDefined();
     expect
       .soft(
-        resolveSpawnAdmission({
-          cfg: { agents: { defaults: { subagents: { maxChildrenPerAgent: 1 } } } },
-          requesterSessionKey: parent,
-          requesterAgentId: "main",
-          targetAgentId: "main",
-          configuredAgentIds: ["main"],
-        }).ok,
+        (
+          await withPreparedSessionCapabilityRead(() =>
+            resolveSpawnAdmission({
+              cfg: { agents: { defaults: { subagents: { maxChildrenPerAgent: 1 } } } },
+              requesterSessionKey: parent,
+              requesterAgentId: "main",
+              targetAgentId: "main",
+              configuredAgentIds: ["main"],
+            }),
+          )
+        ).ok,
       )
       .toBe(false);
     expect.soft(countActiveRunsForSession(parent)).toBe(1);
@@ -219,7 +236,7 @@ it("retains quiet admitted execution in listing, admission count, and requester 
         ).active.map((row) => ({ runId: row.runId, execution: row.execution.state })),
       )
       .toEqual([{ runId: entry.runId, execution: "running" }]);
-    // A persisted completed sibling already owns an unfrozen settle outbox.
+    // This sibling owes a continuation; fire-and-forget wakes retire independently.
     await addSubagentRunForTests({
       runId: "settled-sibling",
       childSessionKey: "agent:main:subagent:settled-sibling",
@@ -233,21 +250,23 @@ it("retains quiet admitted execution in listing, admission count, and requester 
       endedAt: start + 1,
       outcome: { status: "ok" },
       cleanupCompletedAt: start + 2,
-      expectsCompletionMessage: false,
+      expectsCompletionMessage: true,
+      completion: { required: true },
+      delivery: { status: "pending" },
       requesterSettleWake: { status: "pending", attemptCount: 0 },
     });
     const sibling = subagentRuns.get("settled-sibling")!;
     const completeBatch = vi.fn();
-    const transitionBatch = vi.fn();
     await maybeWakeRequesterAfterAllChildrenSettled({
       isSourceCurrent: () => true,
       requesterSessionKey: parent,
       settledEntry: sibling,
+      transitionBatch: () => {
+        throw new Error("A live sibling cannot transition requester delivery");
+      },
       completeBatch,
-      transitionBatch,
     });
     expect.soft(completeBatch).not.toHaveBeenCalled();
-    expect.soft(transitionBatch).not.toHaveBeenCalled();
   } finally {
     finish.resolve();
     await task;

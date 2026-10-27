@@ -156,8 +156,6 @@ export function createDirectChatContext(
       debug: vi.fn(),
     } satisfies GatewayRequestContext["logGateway"],
     agentRunSeq: new Map(),
-    chatAbortControllers: new Map(),
-    chatQueuedTurns: new Map(),
     chatRunState: createChatRunState(),
     addChatRun: vi.fn(),
     removeChatRun: vi.fn(),
@@ -173,7 +171,11 @@ export function createDirectChatContext(
       throw new Error("prepared chat metadata is unavailable in direct handler tests");
     }),
     recoveryRuntime: {
+      prepareFailedWorkerPlacement: async () => undefined,
       prepareRestartRecovery: () => undefined,
+      resumeChatInput: async () => {
+        throw new Error("Unexpected chat input recovery");
+      },
       dispatchAgent: vi.fn(),
       waitForAgent: vi.fn(),
       sendRecoveryNotice: vi.fn(),

@@ -21,7 +21,7 @@ Pick a setup workflow based on how often you want updates and whether you want t
 
 ## Prereqs (from source)
 
-- Node 24.16+ LTS or Node 26.1+ (recommended)
+- Node 24.22.1+ LTS or Node 26.12.1+ (recommended)
 - `pnpm` required for source checkouts. OpenClaw loads bundled plugins from the
   `extensions/*` pnpm workspace packages in dev mode, so root `npm install` does
   not prepare the full source tree.
@@ -74,7 +74,7 @@ node openclaw.mjs gateway --port 18789 --verbose
 
 1. Install + launch **OpenClaw.app** (menu bar).
 2. Complete the onboarding/permissions checklist (TCC prompts).
-3. Ensure Gateway is **Local** and running (the app manages it).
+3. Check that Gateway is **Local** and running (the app manages it).
 4. Link surfaces (example: WhatsApp):
 
 ```bash

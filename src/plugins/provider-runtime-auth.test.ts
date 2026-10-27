@@ -1,4 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
+import { configForProviders } from "../agents/model-auth.fixtures.test-support.js";
 import { makeProviderModelFixture } from "../agents/test-helpers/provider-model-fixture.js";
 
 const mocks = vi.hoisted(() => ({ resolveProviderRuntimePlugin: vi.fn() }));
@@ -22,6 +23,30 @@ const MODEL = makeProviderModelFixture({
 });
 
 beforeEach(() => mocks.resolveProviderRuntimePlugin.mockReset());
+
+it("skips plugin credential exchange for explicit no-auth", async () => {
+  const lazyRuntime = await import("./provider-runtime.runtime.js");
+  const prepareRuntimeAuth = vi.fn(async () => ({ apiKey: "runtime-token" }));
+  mocks.resolveProviderRuntimePlugin.mockReturnValue({ prepareRuntimeAuth });
+  await expect(
+    lazyRuntime.prepareProviderRuntimeAuth({
+      provider: "demo",
+      config: configForProviders({
+        demo: { auth: "none", api: "openai-completions", baseUrl: MODEL.baseUrl, models: [] },
+      }),
+      context: {
+        env: process.env,
+        provider: "demo",
+        modelId: MODEL.id,
+        model: { ...MODEL, api: "openai-completions" },
+        apiKey: "synthetic-no-auth-marker",
+        authMode: "api-key",
+      },
+    }),
+  ).resolves.toBeUndefined();
+  expect(mocks.resolveProviderRuntimePlugin).not.toHaveBeenCalled();
+  expect(prepareRuntimeAuth).not.toHaveBeenCalled();
+});
 
 it.each([false, true])(
   "revalidates auth exchange after lazy provider loading (revoked: %s)",

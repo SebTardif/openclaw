@@ -6,6 +6,7 @@ import {
   parseSqliteSessionFileMarker,
   type SqliteSessionFileMarker,
 } from "../config/sessions/legacy-sqlite-marker.js";
+import { projectTranscriptNavigationFields } from "../config/sessions/transcript-navigation-fields.js";
 import {
   isCanonicalSessionTranscriptEntry,
   isSessionTranscriptLeafControl,
@@ -69,6 +70,7 @@ async function scanJsonlRange(params: {
   filePath: string;
   startOffset: number;
   endOffset: number;
+  checkProgress?: () => void;
   onRecord: (record: Record<string, unknown>) => void | Promise<void>;
 }): Promise<number> {
   if (params.endOffset <= params.startOffset) {
@@ -86,6 +88,7 @@ async function scanJsonlRange(params: {
   let processedOffset = params.startOffset;
   try {
     for await (const chunk of stream) {
+      params.checkProgress?.();
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       let lineStart = 0;
       for (let newline = bytes.indexOf(10); newline >= 0; newline = bytes.indexOf(10, lineStart)) {
@@ -145,7 +148,9 @@ type RollupScanInput = {
     marker: SqliteSessionFileMarker,
     afterSeq: number,
     throughSeq: number,
-  ) => Promise<Array<{ seq: number; event: unknown }>>;
+    consume: (seq: number, event: unknown) => void,
+  ) => Promise<number>;
+  checkProgress?: () => void;
 };
 
 async function scanJsonlUsageRollup(params: RollupScanInput): Promise<UsageCostRollupEntry> {
@@ -170,6 +175,7 @@ async function scanJsonlUsageRollup(params: RollupScanInput): Promise<UsageCostR
     filePath: params.file.filePath,
     startOffset,
     endOffset: params.file.size,
+    checkProgress: params.checkProgress,
     onRecord: (record) => {
       pendingRecords.push(record);
       if (pendingRecords.length === 128) {
@@ -277,35 +283,25 @@ async function scanSqliteUsageRollup(params: RollupScanInput): Promise<UsageCost
     let after = startSeq;
     const records: UsageRecord[] = [];
     while (after < endSeq) {
-      const page = await params.readRows(scope, after, endSeq);
-      if (page.length === 0) {
-        throw new Error(`SQLite transcript changed while scanning: ${params.file.filePath}`);
-      }
-      for (const { seq, event } of page) {
+      params.checkProgress?.();
+      const lastSeq = await params.readRows(scope, after, endSeq, (seq, event) => {
         const record: UsageRecord = {
           seq,
           usageEntry: isRecord(event) ? parseUsageCostTranscriptRecord(event) : null,
         };
         if (isRecord(event)) {
-          for (const key of [
-            "type",
-            "id",
-            "parentId",
-            "targetId",
-            "appendParentId",
-            "appendMode",
-          ]) {
-            if (Object.hasOwn(event, key)) {
-              record[key] = event[key];
-            }
-          }
+          projectTranscriptNavigationFields(event, record);
         }
         if (seq === maxSeq) {
           anchorHash = sqliteCheckpointAnchorHash(event);
         }
         records.push(record);
+      });
+      params.checkProgress?.();
+      if (lastSeq <= after) {
+        throw new Error(`SQLite transcript changed while scanning: ${params.file.filePath}`);
       }
-      after = page.at(-1)!.seq;
+      after = lastSeq;
     }
     return records;
   };
@@ -342,9 +338,10 @@ async function scanSqliteUsageRollup(params: RollupScanInput): Promise<UsageCost
   });
 }
 
-export function scanUsageCostRollupInWorker(
+export async function scanUsageCostRollupInWorker(
   params: RollupScanInput,
 ): Promise<UsageCostRollupEntry> {
+  params.checkProgress?.();
   return params.file.kind === "sqlite"
     ? scanSqliteUsageRollup(params)
     : scanJsonlUsageRollup(params);

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
 import { resolveRuntimeWorkerUrl } from "../../infra/runtime-worker-url.js";
+import type { RetainedWorkerTransactionAdmission } from "../../infra/sqlite-worker-operation-settlement.js";
 import { emitSessionLifecycleEvent } from "../../sessions/session-lifecycle-events.js";
 import type { OpenClawAgentDatabaseExecution } from "../../state/openclaw-agent-execution-contract.js";
 import { executeOpenClawAgentWorkerPublication } from "../../state/openclaw-agent-worker-store.js";
@@ -69,7 +70,10 @@ export async function projectSessionEntryLifecycleMutationInWorker(
 ) {
   const prepared = await runSessionLifecyclePlanningInWorker(params, "prepare", {
     ...params.input,
-    upsertSessionKeys: params.upserts.map((upsert) => upsert.sessionKey.trim()),
+    upserts: params.upserts.map(({ sessionKey, relatedSessionKeys }) => ({
+      sessionKey,
+      ...(relatedSessionKeys !== undefined ? { relatedSessionKeys } : {}),
+    })),
   });
   const upsertedEntries = await buildProjectedLifecycleUpserts(
     prepared.store,
@@ -98,7 +102,10 @@ export function commitSessionLifecycleProjectionInWorker(params: {
   execution: OpenClawAgentDatabaseExecution;
   assertCurrent: () => void;
   assertPrepared: () => void;
-  assertCandidate: (candidate: SessionLifecycleProjectionCommitted) => void;
+  assertCandidate: (
+    candidate: SessionLifecycleProjectionCommitted,
+    operation: RetainedWorkerTransactionAdmission,
+  ) => void;
   onLifecycleCommitted?: () => void;
   afterCommitted?: (context: SessionEntryCommitContext) => Promise<void>;
 }) {
